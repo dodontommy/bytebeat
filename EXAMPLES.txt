@@ -1,0 +1,271 @@
+bytebeat -- starter expressions
+==============================
+
+YOU DO NOT HAVE TO TYPE ANY OF THESE.
+
+  p        generate a patch into the focused layer -- always makes a sound
+  P        mutate it (same shape, new numbers)
+  C        undo
+  n / b    step through the 14 patches below
+  1-8      focus a layer;  shift+number  toggles it on/off
+  V / v    sequencer on / edit the 16-step pattern
+  M        record the selected knob as a motion loop
+  Z        eight-track performance view and master phrase looper
+  ?        help
+
+The expressions below are what those keys are producing underneath, and are
+worth reading once you want to steer rather than roll dice.
+
+These are the same 14 patches compiled into the binary. In the instrument,
+'n' and 'b' step forward and back through them; loading one sets the
+expression, the output mode, all eight knobs AND the post chain, so every
+one of them makes a sound immediately.
+
+The knob values below are the shipped defaults. They are starting points,
+not settings -- the whole reason p0..p7 are on single keys is that you are
+supposed to be moving them.
+
+Verified: every patch below produces signal between 19% and 65% of full
+scale, measured over 40k samples with the DC blocker applied.
+
+Notation
+  MODE      BYTE   low 8 bits read as unsigned, silence = 128. The classic.
+            WORD   low 16 bits read as signed. Wider, smoother, for drones.
+  post      drive/tone/crush = saturation / lowpass / sample-and-hold
+            spc = feedback delay: time / feedback / wet mix
+  %FS       measured RMS as a fraction of full scale
+  zc        zero crossings per 2000 samples -- a rough pitch indicator.
+            zc 2-4 is subsonic rumble. zc 500+ is bright and noisy.
+
+
+-------------------------------------------------------------------------
+CLASSIC BYTEBEAT -- memoryless f(t), bright and fast
+-------------------------------------------------------------------------
+
+1. sierpinski                                    BYTE   65% FS   zc 34
+   t*(t>>p0&t>>p1)
+   p0=12 p1=8   post: none
+
+   A ramp gated by two shifted copies of itself. Because the shifts are
+   powers of two, every gating term is exactly an octave from every other,
+   so the pattern nests inside itself at every timescale -- the waveform,
+   the note, and the phrase are the same shape. Sweep p0 and p1 against
+   each other; they cannot go out of tune.
+
+2. crowd                                         BYTE   59% FS   zc 276
+   t*((t>>p0|t>>p1)&p2&t>>4)
+   p0=12 p1=8 p2=63   post: none
+
+   Viznut's original, the expression that started all of this. The OR of
+   two shifts picks which octaves sound together; p2 masks the carrier and
+   is effectively a timbre knob. Try p2 at 63, 127, 3.
+
+3. minimal                                       BYTE   33% FS   zc 42
+   t&t>>p0
+   p0=8   post: none
+
+   The entire idea in five characters. A fast ramp ANDed with a ramp 2^p0
+   times slower: the slow one acts as an envelope on the fast one. It is
+   quiet and lopsided at low t and opens up as t grows, because t>>8 gains
+   bits over time. Also the patch that motivated the DC blocker -- see
+   NOTES.md section 2.
+
+4. modulo pitch                                  BYTE   58% FS   zc 625
+   (t%(p0+1))*(t>>p1)
+   p0=63 p1=9   post: none
+
+   Modulo resets the ramp every p0+1 samples, and p0+1 need not be a power
+   of two. This is how you escape the octave lattice: p0 is literally a
+   pitch knob, and sweeping it glides continuously instead of in octaves.
+   The only patch here where you can play a tune.
+
+5. ring metal                                    BYTE   56% FS   zc 824
+   (t*p0&t>>p1)*(t*p2&t>>p3)
+   p0=5 p1=7 p2=3 p3=10   post: drive 30, tone 220
+
+   Two amplitude-modulated tones multiplied together, which produces sum
+   and difference frequencies. Those are not harmonically related to
+   either source, so the result is inharmonic and bell-like -- struck
+   metal rather than a note. p0 against p2 is the interval.
+
+
+-------------------------------------------------------------------------
+DEATH INDUSTRIAL -- stateful, low, filtered, slow
+-------------------------------------------------------------------------
+
+6. two saws                                      WORD   57% FS   zc 12
+   lp(t*p0^(t*p1>>1),p2)
+   p0=48 p1=49 p2=40   post: drive 40, tone 90, spc 140/150/60
+
+   In WORD mode, t*n & 0xffff is a sawtooth at n*sr/65536 Hz -- so p0 is a
+   sub-bass frequency control. Two of them one unit apart beat against each
+   other slowly; the XOR makes the interference gritty rather than smooth.
+   The lp() is what turns it from a buzz into a drone. Move p0 and p1
+   further apart for faster beating.
+
+7. rumble                                        WORD   34% FS   zc 3
+   lp(s0=s0-(s0>>6)+((t>>p0&1)?p1:-p1),p2)
+   p0=9 p1=200 p2=60   post: drive 60, tone 70, spc 90/120/40
+
+   A square wave fed into a leaky integrator, which is a triangle wave --
+   but built from state rather than from t, so it has weight. The -(s0>>6)
+   term is the leak: without it the integrator drifts off to infinity on
+   any asymmetry. p0 is pitch (period = 2^(p0+1) samples), p1 is amplitude,
+   p2 is darkness. At p0=9 this sits around 43 Hz.
+
+8. hangar                                        WORD   58% FS   zc 2
+   w(lp((t*p0^t>>p1)+(d(p2*64+1)>>1),p3))
+   p0=32 p1=11 p2=180 p3=48   post: drive 30, tone 80, spc 200/200/90
+
+   The output is written back into the delay line and read a third of a
+   second later at half level. That feedback loop is what makes a static
+   drone feel like it is happening in a very large room. p2 is the delay
+   time -- short values comb-filter into a resonant pitch, long ones smear.
+   The >>1 sets loop gain; raise it toward >>0 and it will run away.
+
+9. beat gate                                     WORD   19% FS   zc 90
+   (bt<bl>>p0)*((r>>p1)^lp(t*p2,p3))
+   p0=3 p1=18 p2=40 p3=60   post: drive 50, tone 110, spc 160/180/80
+
+   bt counts within the beat and bl is the beat length, so bt < bl>>p0
+   opens a window at the top of every beat and closes it after 1/2^p0 of
+   the beat. A noise burst over a drone, on the grid. p0 is gate length --
+   raise it for a tighter, more percussive hit. Set the tempo with TAB to
+   'bpm'.
+
+10. loop + drift                                 WORD   20% FS   zc 684
+    lp(((k>>p0&k>>p1)*p2<<6)^(r>>p3),p4)
+    p0=9 p1=12 p2=60 p3=18 p4=100
+    post: drive 40, tone 100, crush 20, spc 180/170/70
+
+    The one you asked for. k wraps at the loop length, so the first half of
+    this expression repeats EXACTLY every loop, forever. r never repeats.
+    Put both in one expression and you have a fixed figure with noise
+    drifting over it that never lands the same way twice. p3 controls how
+    much noise (lower = more). Press K to restart the loop.
+
+11. tape wobble                                  WORD   58% FS   zc 4
+    w(lp(t*p0,p1))+d(p2*32+(t>>p3&511))
+    p0=36 p1=50 p2=200 p3=7   post: drive 30, tone 75, spc 220/190/110
+
+    The delay tap itself is modulated by a slow ramp, so the read pointer
+    moves through the buffer at a varying rate -- which is pitch shift.
+    The result slips and wanders like a stretched tape loop. p3 sets the
+    wobble rate, p2 the centre delay.
+
+12. bar switch                                   WORD   57% FS   zc 2
+    lp(t*((n&3)==3?p0:p1)^(t>>p2),p3)
+    p0=27 p1=40 p2=10 p3=45   post: drive 50, tone 85, spc 170/160/70
+
+    n is a monotonic bar counter, so (n&3)==3 is true on every fourth bar.
+    The fundamental drops for one bar in four and then returns. This is how
+    you get structure over minutes instead of milliseconds -- try (n&7),
+    or nest two conditions.
+
+13. collapse                                     WORD   54% FS   zc 4
+    lp(((t>>p0)*(t>>p1)*(t>>p2))&0xffff,p3)
+    p0=6 p1=8 p2=10 p3=35
+    post: drive 90, tone 60, crush 30, spc 150/200/100
+
+    Three shifted ramps multiplied together. The product overflows 16 bits
+    constantly and the &0xffff wraps it, so the waveform tears itself apart
+    on a schedule set by the shifts. Heavily filtered afterwards, which
+    leaves the tearing as texture and the periodicity as pitch. The
+    heaviest patch here; drive is at 90 for a reason.
+
+14. static field                                 WORD   19% FS   zc 275
+    (lp(r>>p0,p1)*((t>>p2&p3)+1))>>3
+    p0=14 p1=20 p2=13 p3=7
+    post: drive 20, tone 55, spc 240/210/120
+
+    Filtered noise whose amplitude is modulated by a slow bitwise ramp: a
+    bed that breathes. p1 is how dark the noise is, p3 how deep the
+    breathing. Sits underneath anything else. Turn the master gain down and
+    leave it running.
+
+
+-------------------------------------------------------------------------
+TRIGGERED NOISE RACK -- hits, not samples
+-------------------------------------------------------------------------
+
+The six sources below are in the SOURCE row after the eleven continuous
+bytebeat engines. Selecting one enables the sequencer and seeds a rhythm when
+the layer is empty. `tr` is 1 for one sample at each hit, `age` resets to 0,
+and `vel` is 148 for a normal hit or 256 for an accent. `bp(x,f,q)` is a
+resonant body: f is its pitch coefficient and high q rings longer.
+
+thump
+  bp(tr*vel*4096,p0,p1)
+  p0=2 p1=244
+
+  An impulse striking a low resonator. p0 moves the body from sub-bass into
+  a knock; p1 moves from dead impact toward a long mechanical ring.
+
+burst
+  hp(lp(r>>p0,p1),p2)
+  p0=18 p1=88 p2=8
+
+  A filtered white-noise strike. The layer gate supplies its amplitude
+  envelope; p0 is grain, p1 the upper edge, p2 the lower edge. Hat, snare,
+  steam valve and torn speaker are neighboring settings.
+
+metal
+  bp(((((age*p0)^(age*p1))&65535)-32768),p2,p3)
+  p0=23 p1=31 p2=24 p3=235
+
+  Two bitwise partials restart in the same phase on every hit and excite a
+  resonator. p0/p1 set the interval, p2 the struck body's pitch, p3 its ring.
+
+dust
+  ((r&255)<p0?(r>>p1):0)
+  p0=12 p1=18
+
+  Random microscopic impacts inside the gate. p0 is density and p1 is grain
+  size. Lower probability on the sequence lane makes the whole texture skip;
+  p0 changes what happens inside each surviving hit.
+
+rumble
+  lp((r>>p0)+bp(tr*vel*512,p1,p2),p3)
+  p0=21 p1=3 p2=242 p3=24
+
+  Low moving noise wrapped around a struck body. It supplies weight beneath a
+  beat without becoming a clean kick.
+
+feedback
+  bp((tr*vel*512)+(r>>p0),p1,p2)
+  p0=24 p1=10 p2=250
+
+  A near-unstable resonator continually fed with noise and hit impulses. High
+  p2 keeps its history; SPACE FREEZE can catch the larger phrase around it.
+
+The new sequence lanes are part of these patches. Ratchets generate multiple
+sample-accurate `tr` impulses in one step; probability is decided once before
+the ratchet; parameter locks can change any p knob or post control per step.
+
+
+-------------------------------------------------------------------------
+THINGS TO TRY
+-------------------------------------------------------------------------
+
+Turn ONE knob slowly. That is the instrument. A shift amount swept by hand
+across four or five values does more than any expression you can write.
+
+Sweep TONE down to 1 and back. Everything here becomes a different piece.
+
+Replace t with k in any of the classic patches (1-5) and they become loops.
+
+Wrap anything in w(...) and add + (d(20000)>>1) to give it a room.
+
+Take a bright patch, set crush high and tone low. That is the whole death
+industrial recipe in two knobs.
+
+Set bpm to 40 and bars to 8 and let a loop patch run for ten minutes.
+
+Use two registers as a counter and a comparator to build a gate:
+  s0 = s0+1, then (s0%(p0*100+1) < p1*10) * <your patch>
+
+To hear real low-sample-rate aliasing rather than ALSA's interpolation of
+it, start with -R and press { a few times.
+
+Headless check of a patch before you commit to it:
+  ./bytebeat -E 'your expression' -p 12,8,63 -n 200
