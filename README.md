@@ -1,149 +1,111 @@
-# Bytebeat
+# MORGUE
 
-Bytebeat is a sample-free terminal instrument: an eight-layer bytebeat synth,
-triggered noise drum machine, expressive step sequencer, effects rack, and
-master phrase looper in one ncurses interface.
+An instrument for dark noise, ambience and terror: an eight-voice bytebeat
+synthesizer with a drum machine, granular wells, a master phrase looper, a
+cavernous reverb bus, and a song timeline — behind a cold, clinical,
+autopsy-archive interface. Everything you hear is a live-compiled integer
+expression; the panel just puts hands on it.
 
-It still live-compiles ordinary bytebeat expressions. The groovebox is built
-from that same language rather than hiding another synth behind the panel:
-`thump`, `burst`, `metal`, `dust`, `rumble`, and `feedback` are expressions you
-can open, rewrite, and break into something new.
+![RACK — the voice station](docs/morgue_rack.png)
 
-## Build and run
+Two front ends drive **one realtime C engine**: this JUCE desktop app
+(macOS) and the original [ncurses terminal instrument](docs/TUI.md) (Linux).
+The engine renders the same samples for both, and a **2,966-check headless
+regression suite** exercises the whole thing — DSP, sequencer, looper,
+timeline, sessions — on any machine with a C compiler, no sound card
+required.
 
-On Debian or Ubuntu:
+## The console
+
+| Workspace | What it does |
+|---|---|
+| **RACK** | The voice station. 16 curated patches, 22 expression generators, a live bytebeat editor, knobs with roles inferred from the compiled bytecode, per-voice post chain, 16-step sequencer with pitch/ratchet/probability/parameter-lock lanes. |
+| **ARRANGE** | The song timeline. Record any voice or the drum bus into bar-aligned clips, drag/trim/loop them across 64 bars, place WAVs from the locker, seek by clicking the ruler. |
+| **GRAIN LICKS** | The drum machine: 8 sample slots × 16 steps with per-step pitch and velocity, choke groups, mute/solo. A synthetic kit is preloaded so it grooves before you touch anything. |
+| **GRAIN MASS** | Four sample wells: load anything, pitch it ±24 semitones, reverse it, loop it. PLAY ALL starts every well together on the next bar. |
+| **SURVIVOR** | The master phrase looper, live: capture the finished bus at a bar boundary, then overdub, feed back, halve, reverse and stutter it. |
+| **MIXER** | Faders, mutes and meters for every voice, plus **RETURN A — the CHAMBER**: a master reverb bus with per-voice sends. |
+| **HW/SYNC** | MIDI in: notes trigger and re-pitch the focused voice, CC1 rides p0. |
+| **EXPORT** | Stem rendering (planned — the sheet is real, the render is not yet). |
+
+Press `?` anywhere for the field manual.
+
+![ARRANGE — the song timeline](docs/morgue_arrange.png)
+
+## Directed sound design
+
+The instrument refuses to make you choose between writing math and pulling a
+slot-machine lever:
+
+- **PATCH MORGUE** — sixteen named, known-good voices (CONCRETE FLOOR,
+  COLD ROOM, DISTRICT ALARM, GLASS AUTOPSY…). Click one; it sounds.
+- **VOICE DESIGN** — five macros that always mean the same thing — PITCH ·
+  MOTION · DIRT · DARK · ROOM — driving whichever knobs of the current
+  voice carry that meaning, worked out from the compiled bytecode.
+- **SCULPT** — mutation with a direction: DARKER / BRIGHTER, CALMER /
+  BUSIER, TIGHTER / HUGER, with STEP BACK to undo. Nudges, never gambles.
+- **GROW** — renders the focused voice as a self-looping specimen WAV
+  (whole bars at your tempo, slow parameter drift, a few cents of tape
+  warble) straight into the locker, ready for a well or a timeline lane.
+
+And when you do want the math: the expression editor is right there, compiles
+on RETURN with no glitch, and a failed compile keeps the old program running.
+
+![MIXER — twelve strips and the CHAMBER](docs/morgue_mixer.png)
+
+## Build
+
+macOS (the GUI):
+
+```sh
+git clone --recursive https://github.com/dodontommy/bytebeat.git
+cd bytebeat
+cmake -S . -B build -G Ninja
+cmake --build build --target MORGUE
+open build/MORGUE.app
+```
+
+Requires CMake ≥ 3.20 and a C11/C++17 toolchain (Xcode CLT). JUCE 8.0.15 is
+pinned as a submodule; the IBM Plex fonts ship embedded (OFL). If you cloned
+without `--recursive`, run `git submodule update --init`.
+
+Linux (the terminal instrument):
 
 ```sh
 sudo apt install build-essential libasound2-dev libncurses-dev
-make
-make test
-./bytebeat
+make        # the TUI
+make test   # the regression suite
 ```
 
-Use `./bytebeat -d none` when there is no local sound card. The engine still
-runs in real time and can record, stream, or feed raw PCM to another process.
+See [docs/TUI.md](docs/TUI.md) for the terminal instrument's full manual,
+including headless evaluation and streaming raw PCM over TCP.
 
-The first launch opens a five-part noise groove immediately: struck low body,
-backbeat, ratcheted metal, probabilistic dust, and a continuous bytebeat floor.
-The session autosaves as editable text at
-`~/.config/bytebeat/session.conf`.
+## The engine
 
-## Play it
+`engine.c` is the instrument: the render loop, the voices, the step sampler,
+the looper, the chamber, the timeline and the session file, with hard
+realtime rules — the audio thread never allocates, never locks, never
+blocks. Every knob is an atomic; programs, samples, clips and songs are
+published to the audio thread by single atomic pointer swaps and reclaimed
+only after two render epochs. Integer overflow is not a bug here;
+`-fwrapv` everywhere, because the overflow **is** the sound.
 
-The normal panel edits the focused layer. Arrow keys move and adjust, `Tab`
-changes column, and `<`/`>` make coarse moves.
-
-| Key | Action |
-|---|---|
-| `1`–`8` | focus a layer |
-| shifted `1`–`8` | toggle that layer |
-| `p` / `P` | generate a new voice / mutate this voice |
-| `[` `]` | darker / brighter |
-| `{` `}` | cleaner / dirtier |
-| `;` `'` | lower / higher |
-| `:` `"` | slower / faster |
-| `v` / `V` | open the sequencer / toggle it |
-| `M` | record the selected sound control as a motion loop |
-| `Z` | open the performance view and master phrase looper |
-| `i` or `Enter` | edit the expression directly |
-| `z` | start or finish a WAV recording |
-| `?` | complete in-app help |
-
-### Sequence a voice
-
-Press `v`. The editor has five lanes:
-
-- gate: off, hit, or accent;
-- pitch: -12 to +12 semitones;
-- ratchet: one to four sample-accurate retriggers per step;
-- probability: one decision per main step;
-- parameter lock: any `p0`–`p7`, level, drive, tone, crush, SPACE, or decay
-  value stored on a step.
-
-Move with left/right and change lane with `Tab`. Use up/down to change a cell,
-`Space` to toggle it, `1`–`4` for a ratchet, `[`/`]` to choose a lock target,
-and `l` to capture its live value. `m` changes the selected lock lane between
-hard steps and interpolated motion. `e` fills a Euclidean rhythm, `r`
-randomizes, `c` clears the current lane, and `x` clears the full pattern.
-
-In the normal panel, select a VOICE or POST sound control and press `M`; turn
-it while the transport runs, then press `M` again. The movement repeats over
-the pattern as an interpolated parameter-lock lane.
-
-### Loop and perform
-
-Press `Z` for the eight-track performance view. It keeps patterns, levels,
-clocked effects, and the master phrase controls visible at once.
-
-| Key | Action |
-|---|---|
-| `r` | arm a 1–4 bar capture at the next bar boundary |
-| `Space` | play or stop the captured phrase |
-| `o` | toggle overdub |
-| `f` | freeze the focused layer's SPACE delay |
-| arrows / `<` `>` | choose and adjust phrase controls |
-| `x` | clear the captured phrase |
-| `Z` or `Esc` | return to the normal panel |
-
-The phrase looper captures the finished pre-master bus, including every layer
-and its effect tails. It supports dry/loop crossfade, overdub feedback,
-half/normal/double speed, reverse, and `1/2` through `1/16` stutter slices.
-Capture is held in RAM; its controls save with the session, while its audio is
-deliberately ephemeral.
-
-Each layer also has `SP-SYNC`, from `1/32` through two bars, and `FREEZE`,
-which stops admitting new sound and recirculates the current delay phrase at
-unity.
-
-## The expression instrument
-
-The usual bytebeat vocabulary remains intact: `t`, `k`, `n`, `bt`, `bl`,
-`ll`, `sr`, noise `r`, knobs `p0`–`p7`, registers `s0`–`s3`, delay `d()` and
-`w()`, plus `lp()` and `hp()` filters.
-
-Triggered synthesis adds:
+The signal path, per voice:
 
 ```text
-tr          1 for exactly the first sample of each hit
-age         samples since the latest hit
-vel         148 for a normal hit, 256 for an accent
-bp(x,f,q)   resonant band-pass body; f is pitch, q is ring time
+expression -> gate -> drive -> tone -> crush -> SPACE -> level
+           -> eight-voice sum + drums + clips -> CHAMBER return
+           -> phrase looper -> master gain -> output
 ```
 
-For example, the shipped low drum is only this:
+Sessions autosave as editable plain text at `~/MORGUE/session.conf`.
+Recordings, captured clips and grown specimens land beside it, in the
+locker.
 
-```text
-bp(tr*vel*4096,p0,p1)
-```
+## Documents
 
-The gate envelope is before each layer's post chain, so echoes and frozen
-SPACE tails continue after a hit closes. The master path is:
-
-```text
-expression -> gate -> drive -> tone -> crush -> SPACE -> layer level
-           -> eight-layer sum -> phrase looper -> master gain -> output
-```
-
-## Headless and remote use
-
-```sh
-./bytebeat -E 'bp(tr*vel*4096,p0,p1)' -p 8,244 -n 200
-./bytebeat -d none -s 9000
-ffplay -nodisp -f s16le -ar 44100 -ac 1 -i tcp://HOST:9000
-./bytebeat -O | ffplay -nodisp -f s16le -ar 44100 -ac 1 -
-```
-
-`-L` binds the stream to localhost, `-r` chooses a sample rate, and `-R`
-disables ALSA software resampling for real low-rate aliasing. Run
-`./bytebeat --help` for every command-line option.
-
-## Verification and design notes
-
-`make test` runs more than 2,800 headless checks: expression triggers and resonance,
-all 17 rack engines in every stage combination, generator determinism and
-audibility, Euclidean rhythms, clocked/frozen delay behavior, phrase capture,
-bar alignment, playback rates, slices, reverse and overdub, and v3/v4 session
-compatibility.
-
-[NOTES.md](NOTES.md) is the implementation tour and design rationale.
-[EXAMPLES.txt](EXAMPLES.txt) is the expression cookbook.
+- [docs/TUI.md](docs/TUI.md) — the terminal instrument
+- [DESIGN_SPEC.md](DESIGN_SPEC.md) — product spec and the R1–R9 roadmap
+- [design_handoff_morgue_gui/](design_handoff_morgue_gui/) — the pixel spec this GUI implements
+- [HANDOFF.md](HANDOFF.md) — engineering state, for whoever builds next
+- [NOTES.md](NOTES.md) — implementation tour · [EXAMPLES.txt](EXAMPLES.txt) — expression cookbook
