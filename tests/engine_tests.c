@@ -1161,6 +1161,196 @@ static void test_port_paths(void)
 /*  Driver                                                                   */
 /* ======================================================================== */
 
+
+/* ------------------------------------------------------------------------
+ * Arrangement transport and record source.
+ *
+ * Two things the timeline could not do: stop, and stay out of the recording.
+ * The second is the one that bit -- looping an arranged section and playing
+ * over it printed the backing into the take on every pass, so each new layer
+ * arrived with the previous ones already baked into it.
+ *
+ * The guarantee pinned here is stronger than "quieter": a BB_REC_LIVE take
+ * must be SAMPLE-IDENTICAL to the take you would have got by muting the
+ * timeline and recording normally. That is why the engine removes the clip
+ * sum before the 16-bit clamp rather than subtracting clip audio from the
+ * finished output afterwards -- dsp_clip16 is not linear, so an after-the-fact
+ * subtraction would drift exactly when the bus is hottest.
+ *
+ * Every comparison renders the same number of frames on both sides, because
+ * bb.gain ramps in over roughly 2048 frames; comparing two takes that started
+ * at different points in that ramp would fail for reasons that have nothing
+ * to do with the arrangement.
+ * ------------------------------------------------------------------------ */
+static void test_arr_transport_and_rec_src(void)
+{
+    const int rate = 8000;
+    const int N = 256;
+    static int16_t aout[9000];
+    static int16_t a[1024], b[1024];
+    static int16_t data[256];
+    ArrClip clip[1];
+    ExprError er;
+
+    for (int i = 0; i < N; i++) data[i] = (int16_t)(i * 100);
+    ArrClipBuf *ab = bb_engine_clip_create(data, N, rate);
+    test_expect(ab != NULL, "transport test publishes a clip buffer");
+    if (!ab) return;
+
+    /* One looping clip from bar 0. `voice` adds a deterministic voice
+     * underneath so there is live material to record on its own -- a layer
+     * only sounds once a program has been published to it. */
+    #define SCENARIO(voice)                                                 \
+        do {                                                                \
+            bb_engine_set_defaults();                                       \
+            bb_engine_init(rate);                                           \
+            atomic_store(&bb.gctl[GCTL_BPM], 240);                          \
+            bb_engine_reset_loop();                                         \
+            /* bb.t is a free-running static that survives set_defaults and  \
+             * init by design (the transport must outlive the host           \
+             * recreating its IO thread). Without this the voice starts at a \
+             * different point in the sample clock in every scenario, and    \
+             * two takes that should be identical are not. */                \
+            bb_engine_reset_t();                                            \
+            atomic_store(&bb.gain, 256);                                    \
+            for (int L = 0; L < BB_NLAYER; L++)                             \
+                atomic_store(&bb.layer[L].on, 0);                           \
+            if (voice) {                                                    \
+                bb_publish(0, "t*p0", &er);                                 \
+                atomic_store(&bb.layer[0].on, 1);                           \
+                atomic_store(&bb.layer[0].mode, BB_WORD);                   \
+                atomic_store(&bb.layer[0].ctl[LCTL_LEVEL], 256);            \
+                atomic_store(&bb.layer[0].param[0], 37);                    \
+            }                                                               \
+            memset(clip, 0, sizeof clip);                                   \
+            clip[0].lane = 0;                                               \
+            clip[0].start_bar = 0;                                          \
+            clip[0].len_bars = 4;                                           \
+            clip[0].loop = 1;                                               \
+            clip[0].gain = 256;                                             \
+            clip[0].audio = ab;                                             \
+            snprintf(clip[0].name, ARR_NAME_MAX, "bed");                    \
+            bb_engine_song_publish(clip, 1);                                \
+        } while (0)
+
+    /* ---- defaults preserve the old behaviour ------------------------- */
+    bb_engine_set_defaults();
+    test_expect(bb_engine_song_playing() == 1,
+                "the timeline plays by default");
+    test_expect(bb_engine_rec_src_get() == BB_REC_MASTER,
+                "REC captures the whole bus by default");
+
+    /* ---- the transport actually silences the timeline ---------------- */
+    SCENARIO(0);
+    bb_engine_render(aout, 1024, 1);
+    int sounded = 0;
+    for (int j = 0; j < 1024; j++) if (aout[j] != 0) { sounded = 1; break; }
+    test_expect(sounded, "an arranged clip sounds while the timeline plays");
+
+    SCENARIO(0);
+    bb_engine_song_play(0);
+    bb_engine_render(aout, 1024, 1);
+    int stopped_silent = 1;
+    for (int j = 0; j < 1024; j++) if (aout[j] != 0) { stopped_silent = 0; break; }
+    test_expect(stopped_silent, "a stopped timeline puts no clip audio on the bus");
+    test_expect(bb_engine_song_playing() == 0, "song_playing reports the stop");
+    bb_engine_song_play(1);
+    test_expect(bb_engine_song_playing() == 1, "song_playing reports the start");
+
+    /* ---- stopping is a MUTE, not a pause -----------------------------
+     * Stop for 600 frames then start, versus playing throughout: the same
+     * 512-frame window must contain the same clip audio, because the per-clip
+     * counters keep tracking the bar grid while stopped. If STOP had paused
+     * those counters, the resumed take would lag by exactly those 600 frames. */
+    SCENARIO(0);
+    bb_engine_song_play(0);
+    bb_engine_render(aout, 600, 1);
+    bb_engine_song_play(1);
+    bb_engine_render(a, 512, 1);
+
+    SCENARIO(0);
+    bb_engine_render(aout, 600, 1);
+    bb_engine_render(b, 512, 1);
+
+    int grid_ok = 1;
+    for (int j = 0; j < 512; j++) if (a[j] != b[j]) { grid_ok = 0; break; }
+    test_expect(grid_ok, "PLAY resumes on the bar grid, not where STOP left off");
+
+    /* ---- BB_REC_LIVE: heard, but not printed ------------------------- */
+    bb_engine_rec_src(BB_REC_LIVE);
+    test_expect(bb_engine_rec_src_get() == BB_REC_LIVE, "rec source round-trips");
+    bb_engine_rec_src(BB_REC_MASTER);
+    test_expect(bb_engine_rec_src_get() == BB_REC_MASTER, "rec source resets");
+
+    /* The take: timeline playing, recording LIVE. */
+    SCENARIO(1);
+    bb_engine_rec_src(BB_REC_LIVE);
+    /* bb.gain ramps toward its target at 32 per frame and gain_cur is a
+     * static that survives set_defaults, so two takes that render the same
+     * number of frames can still sample different points on that ramp
+     * depending on what ran before them. Settle it first -- both takes
+     * pre-roll identically, so the clip position stays aligned too. */
+    bb_engine_render(aout, 4096, 1);
+    unsigned w0 = atomic_load(&bb.sink_w);
+    bb_engine_render(aout, 1024, 1);
+    test_expect(atomic_load(&bb.sink_w) - w0 == 1024u,
+                "the sink advances one frame per rendered frame");
+    for (unsigned j = 0; j < 1024; j++) a[j] = bb.sink[(w0 + j) & BB_SINK_MASK];
+
+    int arrangement_heard = 0;
+    for (int j = 0; j < 1024; j++)
+        if (aout[j] != a[j]) { arrangement_heard = 1; break; }
+    test_expect(arrangement_heard,
+                "BB_REC_LIVE still sends the arrangement to the speakers");
+
+    /* The reference: identical scenario, timeline muted, recorded normally. */
+    SCENARIO(1);
+    bb_engine_rec_src(BB_REC_MASTER);
+    bb_engine_song_play(0);
+    bb_engine_render(aout, 4096, 1);          /* same settle as the take */
+    unsigned r0 = atomic_load(&bb.sink_w);
+    bb_engine_render(aout, 1024, 1);
+    for (unsigned j = 0; j < 1024; j++) b[j] = bb.sink[(r0 + j) & BB_SINK_MASK];
+
+    int nonzero = 0;
+    for (int j = 0; j < 1024; j++) if (b[j] != 0) { nonzero = 1; break; }
+    test_expect(nonzero, "the reference take is not just silence");
+
+    int identical = 1;
+    for (int j = 0; j < 1024; j++) if (a[j] != b[j]) { identical = 0; break; }
+    test_expect(identical,
+                "a BB_REC_LIVE take is sample-identical to muting the timeline");
+
+    /* ---- with the timeline stopped the two sources agree ------------- */
+    SCENARIO(1);
+    bb_engine_song_play(0);
+    bb_engine_rec_src(BB_REC_LIVE);
+    bb_engine_render(aout, 4096, 1);          /* settle the gain ramp */
+    unsigned s0 = atomic_load(&bb.sink_w);
+    bb_engine_render(aout, 512, 1);
+    for (unsigned j = 0; j < 512; j++) a[j] = bb.sink[(s0 + j) & BB_SINK_MASK];
+
+    SCENARIO(1);
+    bb_engine_song_play(0);
+    bb_engine_rec_src(BB_REC_MASTER);
+    bb_engine_render(aout, 4096, 1);          /* settle the gain ramp */
+    unsigned s1 = atomic_load(&bb.sink_w);
+    bb_engine_render(aout, 512, 1);
+    int agree = 1;
+    for (unsigned j = 0; j < 512; j++)
+        if (bb.sink[(s1 + j) & BB_SINK_MASK] != a[j]) { agree = 0; break; }
+    test_expect(agree, "the two record sources agree while the timeline is stopped");
+
+    #undef SCENARIO
+    bb_engine_rec_src(BB_REC_MASTER);
+    bb_engine_song_play(1);
+    bb_engine_song_publish(NULL, 0);
+    bb_engine_reclaim();
+    bb_engine_reclaim();
+    bb_engine_clip_release(ab);
+}
+
+
 static int self_test_mode(void)
 {
     test_checks = test_failures = 0;
@@ -1189,6 +1379,7 @@ static int self_test_mode(void)
      * changed total never has to be guessed at. */
     int historical = test_checks;
     test_port_paths();
+    test_arr_transport_and_rec_src();
 
     if (test_failures) {
         fprintf(stderr, "%d of %d checks failed\n", test_failures, test_checks);

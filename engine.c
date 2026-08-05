@@ -400,6 +400,27 @@ void bb_engine_song_seek(int bar)
     atomic_store(&bb.arr_seek_bar, bar < 0 ? -1 : bar);
 }
 
+void bb_engine_song_play(int on)
+{
+    atomic_store(&bb.arr_play, on ? 1 : 0);
+}
+
+int bb_engine_song_playing(void)
+{
+    return atomic_load(&bb.arr_play);
+}
+
+void bb_engine_rec_src(int src)
+{
+    atomic_store(&bb.rec_src,
+                 src == BB_REC_LIVE ? BB_REC_LIVE : BB_REC_MASTER);
+}
+
+int bb_engine_rec_src_get(void)
+{
+    return atomic_load(&bb.rec_src);
+}
+
 /* UI thread, from bb_engine_reclaim() -- same proof as bb_reclaim(). */
 static void arr_song_reclaim(void)
 {
@@ -1150,6 +1171,13 @@ void bb_engine_render(int16_t *out, int frames, int channels)
      * ourselves -- stops the copy. The ARMED->RECORDING and
      * RECORDING->DONE edges below are single-shot compare-exchanges so a
      * concurrent cancel is never overwritten. */
+    /* Snapshot the arrangement transport and the record source once per
+     * period rather than per frame: they are UI-driven, a period is at most a
+     * few milliseconds, and a value that changes underneath the render loop
+     * mid-buffer would put a discontinuity in the middle of a block. */
+    const int arr_on  = atomic_load_explicit(&bb.arr_play, memory_order_relaxed);
+    const int rec_src = atomic_load_explicit(&bb.rec_src,  memory_order_relaxed);
+
     int cap_st = atomic_load(&bb.arr_rec_status);
     if (cap_st == ARR_REC_ARMED) {
         g_cap_dst  = atomic_load(&g_arr_rec_dst);
@@ -1290,6 +1318,8 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         int32_t mix = 0;
         int32_t verb_in = 0;
         int32_t cap_smp = 0;      /* armed lane's post-fader contribution */
+        int32_t clip_sum = 0;     /* this frame's arrangement playback, kept
+                                   * apart so REC can leave it out (BB_REC_LIVE) */
         uint32_t tick = k / step_len;
         uint32_t in_step = k % step_len;
 
@@ -1485,12 +1515,27 @@ void bb_engine_render(int16_t *out, int frames, int channels)
                     uint32_t idx = cp->loop ? g_arr_ctr[c] % ab->n
                                             : g_arr_ctr[c];
                     if (idx < ab->n)
-                        mix += (int32_t)(((int64_t)ab->data[idx]
-                                          * cp->gain) >> 8);
+                        clip_sum += (int32_t)(((int64_t)ab->data[idx]
+                                               * cp->gain) >> 8);
                 }
                 g_arr_ctr[c]++;
             }
         }
+
+        /* The clip sum is accumulated whether or not the timeline is playing,
+         * and only its ADDITION is gated. That is deliberate: the per-clip
+         * counters and their window-entry edges stay locked to the bar grid
+         * while stopped, so pressing PLAY drops you in at the position the
+         * song has reached rather than wherever you left off. It behaves like
+         * unmuting a track, not like releasing a pause -- which is the right
+         * model for looping a section and playing over it. bb_engine_song_seek()
+         * is still the thing that restarts a song from the top.
+         *
+         * Zeroing it when stopped also means the two REC sources agree while
+         * the timeline is silent, instead of differing by an inaudible amount. */
+        if (!arr_on)
+            clip_sum = 0;
+        mix += clip_sum;
 
         /* --- per-lane capture --------------------------------------------
          * Waits armed until the top of a bar, then copies the tapped lane
@@ -1528,11 +1573,30 @@ void bb_engine_render(int16_t *out, int frames, int channels)
             }
         }
 
+        /* The record path forks HERE, before the master clamp -- not later,
+         * next to sink_push, where it would read more naturally.
+         *
+         * dsp_clip16 is not linear. Once the bus has been clamped, the clip
+         * audio can no longer be taken back out of it exactly, and the error
+         * shows up precisely when the mix is hottest, which on this
+         * instrument is most of the time. Forking early costs one extra
+         * clamp per frame and makes the guarantee hold at every level
+         * instead of only the quiet ones. */
+        int32_t dry = (rec_src == BB_REC_LIVE) ? mix - clip_sum : mix;
+
         if (mix > 32767 || mix < -32768) clipped = 1;
         mix = dsp_clip16(mix);
 
+        int32_t pre_loop = mix;
         mix = loop_process(mix, bar_pos, bar_len, lp_bars, lp_mix, lp_fb,
                            lp_od, lp_rate, lp_rev, lp_slice);
+
+        /* The phrase looper is stateful and can only be run once per frame,
+         * so the record path takes its contribution as a delta rather than a
+         * second pass. With SURVIVOR idle that delta is exactly zero, which
+         * is the case the sample-identity check pins. */
+        dry = (rec_src == BB_REC_LIVE) ? dsp_clip16(dry) + (mix - pre_loop)
+                                       : mix;
 
         scope_push((int16_t)mix);
 
@@ -1543,7 +1607,17 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         }
         int16_t o16 = (int16_t)dsp_clip16((int32_t)(((int64_t)mix * gain_cur) >> 16));
 
-        sink_push(o16);
+        /* What goes to the recorder is not always what goes to the speakers.
+         * Under BB_REC_LIVE the arrangement is heard but not printed, so you
+         * can loop an arranged section, play over the top of it, and capture
+         * only the new layer instead of stacking the backing again on every
+         * pass. `dry` was forked off above, before the master clamp. */
+        int16_t rec16 = (rec_src == BB_REC_LIVE)
+                      ? (int16_t)dsp_clip16(
+                            (int32_t)(((int64_t)dry * gain_cur) >> 16))
+                      : o16;
+
+        sink_push(rec16);
 
         for (int c = 0; c < channels; c++)
             out[i * channels + c] = o16;
@@ -2065,6 +2139,15 @@ int bb_config_save(void)
     fprintf(f, "rate %d\n", atomic_load(&bb.req_rate));
     fprintf(f, "gain %d\n", atomic_load(&bb.gain));
     fprintf(f, "focus %d\n", atomic_load(&bb.focus));
+    /* Deliberately NOT a format-version bump. The loader skips keys it does
+     * not recognise (see the unknown-line fallthrough below), so an older
+     * build opens a session carrying these and simply ignores them, and a
+     * newer build opens an older session and keeps the defaults. Both
+     * directions are safe, which a version bump would not have been: an old
+     * binary that failed to parse a new version would still autosave on quit
+     * and write the whole song back out without them. */
+    fprintf(f, "arrplay %d\n", atomic_load(&bb.arr_play));
+    fprintf(f, "recsrc %d\n",  atomic_load(&bb.rec_src));
     fprintf(f, "looper %d %d %d %d %d %d %d\n",
             atomic_load(&bb.loop_bars), atomic_load(&bb.loop_mix),
             atomic_load(&bb.loop_feedback), atomic_load(&bb.loop_overdub),
@@ -2240,6 +2323,10 @@ int bb_config_load(void)
             atomic_store(&bb.gain, bb_clampi(v, 0, 256));
         } else if (sscanf(line, "focus %d", &v) == 1) {
             atomic_store(&bb.focus, bb_clampi(v, 0, BB_NLAYER - 1));
+        } else if (sscanf(line, "arrplay %d", &v) == 1) {
+            atomic_store(&bb.arr_play, v ? 1 : 0);
+        } else if (sscanf(line, "recsrc %d", &v) == 1) {
+            atomic_store(&bb.rec_src, bb_clampi(v, BB_REC_MASTER, BB_REC_LIVE));
         } else if (!strncmp(line, "looper ", 7)) {
             int bars, mix, fb, od, rt, rev, slice;
             if (sscanf(line, "looper %d %d %d %d %d %d %d",
@@ -2451,6 +2538,12 @@ void bb_engine_set_defaults(void)
     atomic_store(&bb.arr_rec_status, ARR_REC_IDLE);
     atomic_store(&bb.arr_rec_frames, 0);
     atomic_store(&bb.arr_seek_bar,  -1);
+    /* The timeline plays by default -- that is what it did before it had a
+     * transport of its own, and a session opening silent would read as a bug.
+     * REC defaults to the whole bus for the same reason: the new behaviour is
+     * opt-in, so nothing anyone already relies on changes underneath them. */
+    atomic_store(&bb.arr_play,       1);
+    atomic_store(&bb.rec_src,        BB_REC_MASTER);
 
     atomic_store(&bb.gctl[GCTL_BPM],   90);
     atomic_store(&bb.gctl[GCTL_BEATS],  4);

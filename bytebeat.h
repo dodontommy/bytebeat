@@ -119,6 +119,27 @@ enum { LOOP_RATE_HALF = 0, LOOP_RATE_NORMAL, LOOP_RATE_DOUBLE };
  * bb.arr_rec_status exactly the way the phrase looper publishes LOOP_*. */
 enum { ARR_REC_IDLE = 0, ARR_REC_ARMED, ARR_REC_RECORDING, ARR_REC_DONE };
 
+/* What REC (and the raw TCP sink) capture off the master bus.
+ *
+ * BB_REC_MASTER is the whole finished bus -- voices, drums, chamber, phrase
+ * looper AND the arrangement -- which is what you want when you are printing
+ * a mix.
+ *
+ * BB_REC_LIVE omits the arrangement's clip playback. That is the overdub
+ * case: loop a song you have already arranged, play over the top of it, and
+ * record only what you played, so the backing does not get printed into the
+ * take a second time and pile up on every pass.
+ *
+ * The distinction is exact rather than a subtraction after the fact, because
+ * the clip sum is accumulated separately in the render loop and the master
+ * gain stage is simply applied twice -- once with it, once without. The
+ * reason that is even possible is an accident of ordering worth writing down:
+ * clips are summed AFTER the chamber (engine.c, "R2 song playback"), so no
+ * clip ever feeds the reverb, and dropping them cannot strand a wet tail of
+ * material that is not in the recording. If a future change moves the clip
+ * sum above the chamber, this guarantee dies with it. */
+enum { BB_REC_MASTER = 0, BB_REC_LIVE };
+
 /* ---- R1 step sampler (drum-machine / FL Channel-Rack equivalent) --------
  * 8 one-shot sample slots, each with a 16-step pattern on the engine's own
  * step clock. A slot fires on every step whose gate is set: the play
@@ -315,6 +336,22 @@ struct bb_state {
     BB_ATOMIC(int)   arr_seek_bar;   /* pending seek target in absolute bars: *
                                   * UI writes, audio thread consumes at   *
                                   * the top of a period; -1 = none        */
+    BB_ATOMIC(int)   arr_play;       /* 1 = the timeline sounds, 0 = it does  *
+                                  * not. The song used to play whenever   *
+                                  * the transport ran, with no way to     *
+                                  * stop it short of deleting the clips.  *
+                                  * Stopping HOLDS the per-clip counters   *
+                                  * rather than resetting them, so PLAY    *
+                                  * resumes where the bar grid now is --   *
+                                  * seek is still the thing that restarts. */
+    BB_ATOMIC(int)   rec_src;        /* BB_REC_* -- what REC and the TCP sink *
+                                  * capture. MASTER is everything;        *
+                                  * LIVE omits the arrangement so you can  *
+                                  * loop a song and overdub against it     *
+                                  * without printing it into the take     *
+                                  * again. Exact, not approximate: clips   *
+                                  * are summed AFTER the chamber, so       *
+                                  * dropping them strands no reverb tail.  */
 
     /* --- telemetry ------------------------------------------------------ */
     BB_ATOMIC(int)   xruns;

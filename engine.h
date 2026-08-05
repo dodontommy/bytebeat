@@ -141,6 +141,26 @@ int  bb_engine_song_get(ArrClip *out, int max);
  * loop counter the way reset_loop does, and rewinding every clip window. */
 void bb_engine_song_seek(int bar);
 
+/* The arrangement's own transport, independent of the master RUN.
+ *
+ * Stopping is a mute, not a pause: the per-clip window counters keep tracking
+ * the bar grid while stopped, so PLAY drops in wherever the song has got to
+ * rather than resuming from where you stopped. bb_engine_song_seek() remains
+ * the way to restart a song from a given bar. Safe from any thread. */
+void bb_engine_song_play(int on);
+int  bb_engine_song_playing(void);
+
+/* What REC and the raw TCP sink capture: BB_REC_MASTER (everything) or
+ * BB_REC_LIVE (everything except the arrangement's clip playback).
+ *
+ * BB_REC_LIVE is the overdub case -- loop an arranged section, play over it,
+ * and print only the new layer instead of stacking the backing again on every
+ * pass. It is exact rather than an approximation, because the clip sum is
+ * kept apart in the render loop and the master gain stage is applied to the
+ * mix twice, once with it and once without, BEFORE the 16-bit clamp. */
+void bb_engine_rec_src(int src);
+int  bb_engine_rec_src_get(void);
+
 /* Arm per-lane capture: at the NEXT bar boundary the render loop starts
  * copying the post-fader mono contribution of `lane` (voice lanes: the
  * voice's summed contribution; lane 8: the sampler-bus premix; lane 9:
