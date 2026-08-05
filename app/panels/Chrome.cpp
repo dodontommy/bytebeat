@@ -6,10 +6,16 @@
 
 #include "Chrome.h"
 #include "AudioEngine.h"
+#include "Session.h"
 #include "bytebeat.h"
 #include "engine.h"
 
+/* std::abs on an int lives in <cstdlib>; <cmath> only promises the floating
+ * overloads. libc++ happens to declare both from either header, MSVC does
+ * not. std::make_unique is <memory>. */
 #include <cmath>
+#include <cstdlib>
+#include <memory>
 
 namespace morgue
 {
@@ -33,12 +39,61 @@ static int textW (const juce::Font& f, const juce::String& s)
 
 TitleBar::TitleBar()
 {
-    setTooltip (U8 ("MORGUE \xe2\x80\x94 drag to move the window. The first circle quits."));
+    setTooltip (U8 ("MORGUE \xe2\x80\x94 drag to move the window, double-click to zoom. "
+                    "The circles are close, minimise and zoom."));
 }
 
 static Rectangle<int> titleCircle (int i)
 {
     return { 10 + i * 15, 8, 9, 9 };            // gap 6 between 9px circles
+}
+
+/* Which window this bar belongs to. The console is always inside a
+ * ResizableWindow (Main.cpp's MainWindow); the null case is the offscreen
+ * snapshot path, where there is no window to control. */
+static juce::ResizableWindow* ownerWindow (juce::Component* c)
+{
+    return dynamic_cast<juce::ResizableWindow*> (c->getTopLevelComponent());
+}
+
+int TitleBar::controlAt (juce::Point<int> p) const
+{
+    for (int i = 0; i < NumControls; ++i)
+        if (titleCircle (i).expanded (2).contains (p))
+            return i;
+    return -1;
+}
+
+void TitleBar::performControl (int which)
+{
+    auto* win = ownerWindow (this);
+
+    switch (which)
+    {
+        case Close:
+            juce::JUCEApplication::getInstance()->systemRequestedQuit();
+            break;
+
+        case Minimise:
+            /* There is no native title bar to do this for us. The peer is the
+             * only thing that knows how, and it exists on every platform JUCE
+             * targets. */
+            if (win != nullptr)
+                if (auto* peer = win->getPeer())
+                    peer->setMinimised (true);
+            break;
+
+        case Zoom:
+            /* setFullScreen is JUCE's name for "as big as the work area lets
+             * you be": maximise on Windows, zoom on macOS. Both toggle back to
+             * the size the window had before. */
+            if (win != nullptr)
+                win->setFullScreen (! win->isFullScreen());
+            break;
+
+        default:
+            break;
+    }
 }
 
 void TitleBar::paint (juce::Graphics& g)
@@ -49,10 +104,14 @@ void TitleBar::paint (juce::Graphics& g)
     g.setColour (C::HAIRLINE);
     g.fillRect (b.getX(), b.getBottom() - 1, b.getWidth(), 1);
 
-    // three 9px circle outlines
-    g.setColour (C::EDGE);
-    for (int i = 0; i < 3; ++i)
+    /* three 9px circle outlines. The hovered one brightens to INK_DIM -- a
+     * hairline changing colour, which is the whole vocabulary this design
+     * allows for "this is a control". No fill, no glyph, no gradient. */
+    for (int i = 0; i < NumControls; ++i)
+    {
+        g.setColour (i == hoverControl ? C::INK_DIM : C::EDGE);
         g.drawEllipse (titleCircle (i).toFloat().reduced (0.5f), 1.0f);
+    }
 
     // masthead: 11px condensed 700, .34em (HTML title bar)
     Rectangle<int> r = b.withTrimmedRight (10).withTrimmedBottom (1);
@@ -63,15 +122,23 @@ void TitleBar::paint (juce::Graphics& g)
     g.drawText ("MORGUE", r.removeFromLeft (textW (mast, "MORGUE") + 2),
                 Justification::centredLeft);
 
-    // session path
-    r.removeFromLeft (12);
+    // serial right (increments with the active panel, spec section 3). Taken
+    // out of the run first so the path below can have the rest and be
+    // ellipsised into it rather than drawn straight through the serial.
     g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (9.0f, 0.06f));
-    g.drawText ("~/MORGUE/session.conf", r, Justification::centredLeft);
+    const juce::Font serialF = Type::mono (9.0f, 0.14f);
+    g.setFont (serialF);
+    g.drawText (serial, r.removeFromRight (textW (serialF, serial) + 2),
+                Justification::centredRight);
+    r.removeFromRight (12);
 
-    // serial right (increments with the active panel, spec section 3)
-    g.setFont (Type::mono (9.0f, 0.14f));
-    g.drawText (serial, r, Justification::centredRight);
+    /* Session path: the REAL one, from the engine. This used to be the
+     * hardcoded string "~/MORGUE/session.conf", which on Windows named a
+     * directory that does not exist. Windows paths are also long, so the
+     * middle is ellipsised rather than silently painted over the serial. */
+    r.removeFromLeft (12);
+    g.setFont (Type::mono (9.0f, 0.06f));
+    g.drawText (morgue::sessionFileDisplay(), r, Justification::centredLeft, true);
 }
 
 void TitleBar::setSerial (const juce::String& s)
@@ -83,21 +150,52 @@ void TitleBar::setSerial (const juce::String& s)
 
 void TitleBar::mouseDown (const juce::MouseEvent& e)
 {
-    if (auto* top = getTopLevelComponent())
-        dragger.startDraggingComponent (top, e.getEventRelativeTo (top));
+    /* A press on a control is a press on that control, not the start of a
+     * window drag -- otherwise the smallest tremor while clicking close
+     * dragged the window instead. A maximised window is not draggable either;
+     * dragging one would move it off its own work area. */
+    auto* win = ownerWindow (this);
+    draggingWindow = controlAt (e.getPosition()) < 0
+                     && (win == nullptr || ! win->isFullScreen());
+
+    if (draggingWindow)
+        if (auto* top = getTopLevelComponent())
+            dragger.startDraggingComponent (top, e.getEventRelativeTo (top));
 }
 
 void TitleBar::mouseDrag (const juce::MouseEvent& e)
 {
+    if (! draggingWindow)
+        return;
     if (auto* top = getTopLevelComponent())
         dragger.dragComponent (top, e.getEventRelativeTo (top), nullptr);
 }
 
 void TitleBar::mouseUp (const juce::MouseEvent& e)
 {
-    if (titleCircle (0).expanded (2).contains (e.getPosition())
-        && e.mouseWasClicked())
-        juce::JUCEApplication::getInstance()->systemRequestedQuit();
+    draggingWindow = false;
+
+    const int c = controlAt (e.getPosition());
+    if (c >= 0 && e.mouseWasClicked())
+        performControl (c);
+}
+
+void TitleBar::mouseMove (const juce::MouseEvent& e)
+{
+    const int c = controlAt (e.getPosition());
+    if (c != hoverControl) { hoverControl = c; repaint(); }
+}
+
+void TitleBar::mouseExit (const juce::MouseEvent&)
+{
+    if (hoverControl != -1) { hoverControl = -1; repaint(); }
+}
+
+void TitleBar::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    // the title-bar double-click zoom both window managers give you for free
+    if (controlAt (e.getPosition()) < 0)
+        performControl (Zoom);
 }
 
 /* ======================================================================== */
@@ -233,17 +331,19 @@ void StageTabs::mouseExit (const juce::MouseEvent&)
 
 Locker::Locker()
 {
-    setTooltip (U8 ("LOCKER \xe2\x80\x94 specimen archive of ~/MORGUE. Click a row to select it."));
+    setTooltip (U8 ("LOCKER \xe2\x80\x94 specimen archive of ") + morgue::morgueDirDisplay()
+                + U8 (". Click a row to select it."));
     list.setRowHeight (26);
     list.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
     addAndMakeVisible (list);
 
     growBtn = std::make_unique<PlateButton> ("GROW", false, false);
     growBtn->setTooltip (U8 ("GROW \xe2\x80\x94 render the FOCUSED VOICE as a "
-                             "self-looping specimen in ~/MORGUE: its expression, "
-                             "knobs and post chain, drifting slowly, 4 bars at "
-                             "the current tempo. Design the voice, then grow it. "
-                             "Loop it in a GRAIN MASS well."));
+                             "self-looping specimen in ") + morgue::morgueDirDisplay()
+                         + U8 (": its expression, "
+                               "knobs and post chain, drifting slowly, 4 bars at "
+                               "the current tempo. Design the voice, then grow it. "
+                               "Loop it in a GRAIN MASS well."));
     growBtn->onToggle = [this] (bool) { growSpecimen(); };
     addAndMakeVisible (*growBtn);
 
@@ -257,8 +357,7 @@ void Locker::growSpecimen()
 {
     if (growing.exchange (true)) return;
 
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                               .getChildFile ("MORGUE");
+    const juce::File dir = morgue::morgueDir();
     dir.createDirectory();
     const juce::String path = dir.getFullPathName();
     const unsigned seed = (unsigned) juce::Time::getMillisecondCounter()
@@ -300,8 +399,7 @@ struct LockerFileCmp
 void Locker::refresh()
 {
     files.clear();
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                               .getChildFile ("MORGUE");
+    const juce::File dir = morgue::morgueDir();
     if (dir.isDirectory())
         for (const auto& f : dir.findChildFiles (juce::File::findFiles, false))
             if (! f.isHidden())
@@ -342,7 +440,8 @@ void Locker::paint (juce::Graphics& g)
     g.setColour (C::PANEL);
     g.fillRect (b);
 
-    juce::String right = contextHint.isNotEmpty() ? contextHint : juce::String ("~/MORGUE");
+    juce::String right = contextHint.isNotEmpty() ? contextHint
+                                                  : morgue::morgueDirDisplay();
     paintHeaderBand (g, b.removeFromTop (22), "LOCKER", {}, right);
 
     // footer 20: count + PLANNED note, 8px .12em INK_FAINT, padding 0 8
@@ -358,7 +457,8 @@ void Locker::paint (juce::Graphics& g)
     {
         g.setColour (C::INK_FAINT);
         g.setFont (Type::mono (9.0f, 0.10f));
-        g.drawText ("NO SPECIMENS IN ~/MORGUE", b, Justification::centred);
+        g.drawText ("NO SPECIMENS IN " + morgue::morgueDirDisplay(), b,
+                    Justification::centred, true);
     }
 
     // right-edge divider against the main stage (spec section 3)
@@ -413,7 +513,8 @@ juce::String Locker::getTooltipForRow (int row)
 {
     if (row < 0 || row >= files.size()) return {};
     return files.getReference (row).getFileName()
-         + U8 (" \xe2\x80\x94 specimen in ~/MORGUE. Click to select.");
+         + U8 (" \xe2\x80\x94 specimen in ") + morgue::morgueDirDisplay()
+         + U8 (". Click to select.");
 }
 
 /* ======================================================================== */
@@ -552,7 +653,9 @@ TransportBar::TransportBar()
     cut.onToggle = [] (bool on) { atomic_store (&bb.panic, on ? 1 : 0); };
     addAndMakeVisible (cut);
 
-    rec.setTooltip (U8 ("REC \xe2\x80\x94 record the master output to ~/MORGUE/*.wav."));
+    rec.setTooltip (U8 ("REC \xe2\x80\x94 record the master output to ")
+                    + morgue::morgueDirDisplay() + morgue::pathSep()
+                    + U8 ("*.wav."));
     rec.onToggle = [] (bool) {};   // wired from Main
     addAndMakeVisible (rec);
 
@@ -776,6 +879,13 @@ StatusBar::StatusBar (AudioEngine& a) : audio (a)
     startTimerHz (30);
 }
 
+void StatusBar::setAlert (const juce::String& text)
+{
+    if (alert == text) return;
+    alert = text;
+    repaint();
+}
+
 void StatusBar::timerCallback()
 {
     if (atomic_load (&bb.clipping) != 0)
@@ -835,9 +945,15 @@ void StatusBar::paint (juce::Graphics& g)
              + juce::String (bufSmp) + " SMP",
          C::TAB_INACTIVE_FG);
 
-    g.setColour (C::INK_FAINT);
+    /* The right-hand slot is the hint until something goes wrong, then it is
+     * the notice. There is nowhere else in this console for a device that
+     * would not open or a session that would not write to say so, and both
+     * used to fail without a word. */
+    g.setColour (alert.isNotEmpty() ? C::BLOOD_HOT : C::INK_FAINT);
     g.setFont (f);
-    g.drawText ("PRESS ? FOR A MAP OF THIS CONSOLE", r, Justification::centredRight);
+    g.drawText (alert.isNotEmpty() ? alert
+                                   : juce::String ("PRESS ? FOR A MAP OF THIS CONSOLE"),
+                r, Justification::centredRight, true);
 }
 
 } // namespace morgue

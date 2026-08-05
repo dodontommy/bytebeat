@@ -7,11 +7,15 @@
 
 #include "LicksPanel.h"
 #include "AudioEngine.h"
+#include "Session.h"
 #include "bytebeat.h"
 #include "engine.h"
 #include "gen.h"
 
 #include <cmath>
+#include <cstdlib>          // calloc, below
+#include <functional>
+#include <memory>
 
 namespace morgue
 {
@@ -651,9 +655,14 @@ void LicksPanel::fillClear()
 void LicksPanel::loadFile (int s)
 {
     if (chooserOpen) return;
+    /* Open on the console's own directory rather than the home folder: that
+     * is where REC, GROW and the ARRANGE captures put things, so it is where
+     * the player's specimens actually are. */
     chooser = std::make_unique<juce::FileChooser> (
         "Load a specimen",
-        juce::File::getSpecialLocation (juce::File::userHomeDirectory),
+        morgue::morgueDir().isDirectory()
+            ? morgue::morgueDir()
+            : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
         "*.wav;*.aif;*.aiff;*.mp3;*.ogg;*.flac");
     chooserOpen = true;
 
@@ -743,17 +752,31 @@ void LicksPanel::filesDropped (const juce::StringArray& files, int, int y)
     }
 }
 
+/* An internal drag carries a path in its description. The guard has to be
+ * "is this an absolute path" and not "does it start with a slash": a Windows
+ * path begins with a drive letter, or with the doubled separator of a UNC
+ * share, so the old test was false for every real file on the platform and
+ * the LOCKER could never be dragged onto a slot at all. On the Mac it was
+ * merely redundant. juce::File::isAbsolutePath knows the rules for
+ * whichever platform it was compiled for, and the check still matters --
+ * juce::File's constructor asserts on a relative path, so a description that
+ * is not one must be rejected before it reaches it. */
+static bool isDroppableFile (const juce::String& p)
+{
+    return p.isNotEmpty() && juce::File::isAbsolutePath (p)
+        && juce::File (p).existsAsFile();
+}
+
 bool LicksPanel::isInterestedInDragSource (const SourceDetails& d)
 {
     const juce::String p = d.description.toString();
-    return p.startsWithChar ('/') && isAudioPath (p)
-        && juce::File (p).existsAsFile();
+    return isAudioPath (p) && isDroppableFile (p);
 }
 
 void LicksPanel::itemDropped (const SourceDetails& d)
 {
     const juce::String p = d.description.toString();
-    if (! (p.startsWithChar ('/') && juce::File (p).existsAsFile())) return;
+    if (! isDroppableFile (p)) return;
     const int s = slotAtY (d.localPosition.y);
     focusSlot (s);
     loadPath (s, juce::File (p));

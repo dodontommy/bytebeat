@@ -15,6 +15,9 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+
+#include <functional>       // every control below carries a std::function
+
 #include "Theme.h"
 
 namespace morgue

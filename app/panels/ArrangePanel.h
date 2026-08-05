@@ -78,7 +78,7 @@ public:
     /* ---- Main.cpp wiring --------------------------------------------- */
     /* Selected LOCKER row for the PLACE plate; juce::File() when none.    */
     std::function<juce::File()> getLockerSelection;
-    /* Fired after a capture writes CLIP-<LANE>-<NNNN>.wav into ~/MORGUE
+    /* Fired after a capture writes CLIP-<LANE>-<NNNN>.wav into the session dir
      * so the LOCKER list can re-scan. Message thread.                     */
     std::function<void()> onLockerRefresh;
 

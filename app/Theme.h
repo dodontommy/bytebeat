@@ -22,6 +22,18 @@ namespace morgue
  * literal that carries a multi-byte character. */
 inline juce::String U8 (const char* s) { return juce::String::fromUTF8 (s); }
 
+/* ---- the command modifier, spelled the way the player's keyboard spells it
+ * JUCE already maps ModifierKeys::commandModifier onto the correct physical
+ * key -- Cmd on macOS, Ctrl on Windows and Linux -- so the code that reads
+ * modifiers needs no #if at all. The printed copy does: a Windows player has
+ * no Cmd key, and U+2318 is not on any cap they own (nor in IBM Plex Mono),
+ * so the field manual's key cap and the knob tooltips would both be lying.
+ *   modKeyGlyph() is the key-cap form   (U+2318 / "CTRL+")
+ *   modKeyWord()  is the running-prose form ("cmd" / "ctrl"), which sits
+ *                 inside sentences such as "cmd-drag fine". */
+juce::String modKeyGlyph();
+juce::String modKeyWord();
+
 /* ---- spec section 1: colour tokens (exact hex, spec names) -------------- */
 namespace C
 {

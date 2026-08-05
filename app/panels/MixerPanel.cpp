@@ -11,6 +11,7 @@
 #include "rack.h"
 
 #include <cmath>
+#include <memory>
 
 namespace morgue
 {

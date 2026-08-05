@@ -1,10 +1,18 @@
 /* AudioEngine.cpp -- the JUCE<->engine seam implementation. */
 
 #include "AudioEngine.h"
+#include "Session.h"
 #include "bytebeat.h"
 #include "engine.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
+
+/* std::fill_n is <algorithm>, not <vector>. libc++ drags it in through the
+ * container headers, so this compiled on macOS by luck; MSVC's STL does not,
+ * and the same is true of any header a translation unit merely hopes is
+ * already included. Name what you use. */
+#include <algorithm>
+#include <cstdint>
 
 void EngineCAPlayback::audioDeviceIOCallbackWithContext (const float* const*,
                                                          int,
@@ -23,30 +31,46 @@ void EngineCAPlayback::audioDeviceIOCallbackWithContext (const float* const*,
     const int ch = juce::jmin (nOut, 8);
 
     /* Hard-realtime rule: never allocate here. The scratch buffer was
-     * preallocated in audioDeviceAboutToStart; if the device hands us more
-     * than we planned for (should not happen), output silence rather than
-     * call the allocator on the audio thread. */
-    const size_t needed = (size_t) nframes * (size_t) ch;
-    if (needed > scratch.size())
+     * preallocated in audioDeviceAboutToStart, sized for the buffer size the
+     * device advertised then.
+     *
+     * That advertised size is not a promise. WASAPI in shared mode and ASIO
+     * drivers under a control-panel change both hand the callback a bigger
+     * block at runtime without stopping the stream first, and CoreAudio does
+     * it too when the aggregate device is reconfigured. The old code answered
+     * that by writing silence for the whole buffer and returning -- which also
+     * skipped the bar-sync edge detector below, so an oversized buffer did not
+     * merely drop out, it froze every armed well until the size came back
+     * down. Render in as many passes as the scratch we own allows instead: no
+     * allocation, no lock, correct audio, and the clock keeps running. */
+    const int capFrames = ch > 0 ? (int) (scratch.size() / (size_t) ch) : 0;
+    if (capFrames <= 0)
     {
         for (int c = 0; c < nOut; ++c)
             if (out[c] != nullptr)
                 std::fill_n (out[c], (size_t) nframes, 0.0f);
         return;
     }
-    std::fill_n (scratch.data(), needed, (int16_t) 0);
-    int16_t* s = scratch.data();
-
-    bb_engine_render (s, nframes, ch);
 
     constexpr float scale = 1.0f / 32768.0f;
-    for (int c = 0; c < nOut; ++c)
+    int16_t* s = scratch.data();
+
+    for (int done = 0; done < nframes; )
     {
-        if (out[c] == nullptr)
-            continue;
-        const int sc = juce::jmin (c, ch - 1);
-        for (int i = 0; i < nframes; ++i)
-            out[c][i] = s[i * ch + sc] * scale;
+        const int blk = juce::jmin (capFrames, nframes - done);
+        std::fill_n (s, (size_t) blk * (size_t) ch, (int16_t) 0);
+
+        bb_engine_render (s, blk, ch);
+
+        for (int c = 0; c < nOut; ++c)
+        {
+            if (out[c] == nullptr)
+                continue;
+            const int sc = juce::jmin (c, ch - 1);
+            for (int i = 0; i < blk; ++i)
+                out[c][done + i] = s[i * ch + sc] * scale;
+        }
+        done += blk;
     }
 
     // Bar-synced well starts: on the engine clock's bar transition, fire
@@ -214,16 +238,27 @@ bool WavRecorder::start()
 {
     if (active) return false;
 
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                               .getChildFile ("MORGUE");
+    const juce::File dir = morgue::morgueDir();
     dir.createDirectory();
 
-    juce::String name = juce::Time::getCurrentTime().formatted ("%Y-%m-%d_%H-%M-%S") + ".wav";
-    auto file = dir.getChildFile (name);
+    /* The stamp is second-granular, so stopping and starting REC inside one
+     * second lands on a name that already exists. FileOutputStream APPENDS to
+     * an existing file (the same trap Main.cpp's screenshot writer and
+     * ArrangePanel's capture writer both note and side-step with deleteFile),
+     * which would splice a second RIFF header into the middle of the first
+     * recording and corrupt both. Take the next free -02, -03 ... instead of
+     * deleting a recording the player made moments ago, and only then clear
+     * the way for a clean, non-appending stream. */
+    const juce::String stamp = juce::Time::getCurrentTime().formatted ("%Y-%m-%d_%H-%M-%S");
+    juce::File file = dir.getChildFile (stamp + ".wav");
+    for (int n = 2; file.existsAsFile() && n <= 99; ++n)
+        file = dir.getChildFile (stamp + "-" + juce::String (n).paddedLeft ('0', 2) + ".wav");
 
+    file.deleteFile();                 // FileOutputStream appends to existing files
     auto stream = file.createOutputStream();
     if (stream == nullptr) return false;
 
+    target = file;
     out.reset (stream.release());
     framesWritten = 0;
     laps = 0;

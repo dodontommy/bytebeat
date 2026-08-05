@@ -12,7 +12,10 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <array>
 #include <atomic>
+#include <cstdint>
+#include <memory>
 #include <mutex>
+#include <vector>
 
 /* One hardware output voice for the sampler. UI loads files; the audio
  * thread reads the loaded buffer under a short lock. Control flags cross
@@ -114,12 +117,14 @@ public:
     bool isActive() const noexcept { return active; }
     unsigned frames() const noexcept { return framesWritten; }
     unsigned dropouts() const noexcept { return laps; }   // ring laps skipped
+    juce::File currentFile() const { return target; }     // what stop() finalizes
 
 private:
     bool active = false;
     unsigned framesWritten = 0;
     unsigned ringRead = 0;
     unsigned laps = 0;
+    juce::File target;
     std::unique_ptr<juce::OutputStream> out;
 };
 
@@ -128,8 +133,18 @@ class AudioEngine
 public:
     AudioEngine()
     {
-        juce::String err;
-        engine.initialise (0, 2, nullptr, true, err, nullptr);
+        /* initialise() RETURNS the error; the fifth argument is the preferred
+         * default device NAME, not an out-parameter. Handing it an empty
+         * String and dropping the return value -- which is what this call used
+         * to do -- meant a device that refused to open failed in total
+         * silence: no sound, no message, nothing in the console to explain it.
+         * Windows makes that far more likely than macOS ever did (WASAPI
+         * exclusive mode already held by another app, a disabled endpoint, no
+         * ASIO driver at all), so the error is kept and the status bar prints
+         * it. */
+        deviceErr = engine.initialise (0, 2, nullptr, true, {}, nullptr);
+        if (deviceErr.isEmpty() && engine.getCurrentAudioDevice() == nullptr)
+            deviceErr = "no audio output device";
         formats.registerBasicFormats();
         for (int i = 0; i < 4; ++i)
         {
@@ -143,6 +158,11 @@ public:
     void stop()   { engine.removeAudioCallback (&callback); }
 
     juce::AudioDeviceManager& getManager() { return engine; }
+
+    /* Empty when the output opened. Otherwise JUCE's own explanation, which
+     * the console surfaces rather than swallowing (see the constructor). */
+    juce::String deviceError() const { return deviceErr; }
+
     WavRecorder& recorder() { return wav; }
     juce::AudioFormatManager& getFormats() { return formats; }
     SamplerVoice* voice (int i) { return (i >= 0 && i < 4) ? voices[(size_t) i].get() : nullptr; }
@@ -150,6 +170,7 @@ public:
 
 private:
     juce::AudioDeviceManager engine;
+    juce::String deviceErr;                   // empty = the device opened
     juce::AudioFormatManager formats;
     EngineCAPlayback callback;
     WavRecorder wav;

@@ -14,6 +14,7 @@
  */
 
 #include "FieldManual.h"
+#include "Session.h"
 
 namespace morgue
 {
@@ -38,10 +39,14 @@ void FieldManualOverlay::mouseDown (const juce::MouseEvent&)
 
 struct ZoneCard { const char* n; const char* name; Badge::Kind k; const char* badge; const char* desc; };
 
+/* Two placeholders are substituted when the card is drawn, because neither
+ * answer is known at compile time and both were wrong on Windows:
+ *   %DIR%  the console's real directory (Session.h)
+ *   %MOD%  the command modifier as this keyboard spells it (Theme.h) */
 static const ZoneCard zones[12] =
 {
     { "01", "LOCKER",      Badge::LIVE,    "LIVE",
-      "Specimen archive of ~/MORGUE \xe2\x80\x94 recorded WAVs and project patches. Serial-tagged. Drag to a sampler slot or timeline lane." },
+      "Specimen archive of %DIR% \xe2\x80\x94 recorded WAVs and project patches. Serial-tagged. Drag to a sampler slot or timeline lane." },
     { "02", "RACK",        Badge::LIVE,    "LIVE",
       "The voice station. 8 bytebeat layers: source, expression text, p0\xe2\x80\x93p7, post chain, 16-step sequencer. RETURN compiles without a glitch." },
     { "03", "ARRANGE",     Badge::CANVAS,  "CANVAS",
@@ -57,7 +62,7 @@ static const ZoneCard zones[12] =
     { "08", "HW/SYNC",     Badge::LIVE,    "LIVE",
       "MIDI in: notes trigger the focused voice, CC drives its parameters. Learn any knob by right-click." },
     { "09", "TRANSPORT",   Badge::LIVE,    "LIVE",
-      "RUN is master on. CUT is instant silence. REC writes a real WAV to ~/MORGUE. BPM / BEATS / BARS / GAIN are live." },
+      "RUN is master on. CUT is instant silence. REC writes a real WAV to %DIR%. BPM / BEATS / BARS / GAIN are live." },
     { "10", "SCOPE",       Badge::LIVE,    "LIVE",
       "Oscilloscope of the master bus, pre-gain and pre-mute, at 30 Hz. If the line is flat, nothing is sounding." },
     { "11", "STATUS",      Badge::LIVE,    "LIVE",
@@ -91,10 +96,24 @@ static const char* const keyRows[12][2] =
     { "O",                    "Loop focused sample" },
     { "A / Z",                "Sample pitch up / down" },
     { "M",                    "Arm motion capture on the last touched knob" },
-    { "\xe2\x8c\x98Z",        "Undo last edit" },
-    { "\xe2\x8c\x98R",        "Toggle REC" },
-    { "DRAG",                 "Knobs respond to horizontal drag; \xe2\x8c\x98-drag is fine mode" },
+    { "%MOD%Z",               "Undo last edit" },
+    { "%MOD%R",               "Toggle REC" },
+    { "DRAG",                 "Knobs respond to horizontal drag; %MODW%-drag is fine mode" },
 };
+
+/* The manual's copy is written once and printed on whatever machine is
+ * running it. The placeholders are resolved here: the key cap said Cmd on a
+ * Windows keyboard that has no Cmd key, and the LOCKER card named a
+ * directory that does not exist on that machine.
+ *   %DIR%   the console's real directory
+ *   %MOD%   the modifier as a key cap    ("CTRL+" / U+2318)
+ *   %MODW%  the modifier inside a sentence ("ctrl" / "cmd") */
+static juce::String manualText (const char* raw)
+{
+    return U8 (raw).replace ("%DIR%",  morgueDirDisplay())
+                   .replace ("%MODW%", modKeyWord())
+                   .replace ("%MOD%",  modKeyGlyph());
+}
 
 /* Rule-body ink from the HTML frame (rules text #c9c4b8 -- between INK and
  * INK_DIM; no Theme token, local literal per the frame). */
@@ -266,7 +285,7 @@ void FieldManualOverlay::paint (juce::Graphics& g)
             // one-line (wrapping) description, 10px INK_DIM, lh 1.5
             inner.removeFromTop (5);
             drawWrapped (g, bodyF, C::INK_DIM,
-                         wrapText (bodyF, U8 (zones[i].desc), inner.getWidth()),
+                         wrapText (bodyF, manualText (zones[i].desc), inner.getWidth()),
                          inner.getX(), inner.getY(), lineH);
         }
     }
@@ -279,7 +298,7 @@ void FieldManualOverlay::paint (juce::Graphics& g)
         // row: pad 9/16, number col 14, gap 10, text flex, bottom faint rule
         const int textX = right.getX() + 16 + 14 + 10;
         const int textW = right.getRight() - 16 - textX;
-        juce::StringArray lines = wrapText (bodyF, goldenRules[i], textW);
+        juce::StringArray lines = wrapText (bodyF, manualText (goldenRules[i]), textW);
         Rectangle<int> row = right.removeFromTop (lines.size() * lineH + 19);
 
         g.setColour (C::BLOOD);
@@ -313,7 +332,7 @@ void FieldManualOverlay::paint (juce::Graphics& g)
             g.fillRect (row.getX(), row.getBottom() - 1, row.getWidth(), 1);
 
             // key-cap plate: min-width 64, pad 2/6, PLATE_LOW on EDGE border
-            const juce::String key = U8 (keyRows[i][0]);
+            const juce::String key = manualText (keyRows[i][0]);
             const int capW = juce::jmax (64, juce::roundToInt (
                                  juce::GlyphArrangement::getStringWidth (capF, key)) + 12);
             Rectangle<int> cap = Rectangle<int> (row.getX() + 16, 0, capW, 18)
@@ -329,7 +348,7 @@ void FieldManualOverlay::paint (juce::Graphics& g)
             // description, 10px INK_DIM, wraps and centres in the row
             const int dx = cap.getRight() + 10;
             const int dw = row.getRight() - 16 - dx;
-            juce::StringArray lines = wrapText (bodyF, U8 (keyRows[i][1]), dw);
+            juce::StringArray lines = wrapText (bodyF, manualText (keyRows[i][1]), dw);
             const int blockH = lines.size() * lineH;
             drawWrapped (g, bodyF, C::INK_DIM, lines, dx,
                          row.getCentreY() - blockH / 2, lineH);

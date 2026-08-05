@@ -7,10 +7,14 @@
  * CONSOLIDATE / automation ARM CAPTURE stay planned chrome (R3). */
 
 #include "ArrangePanel.h"
+#include "Session.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <utility>          // std::move
+#include <vector>
 
 namespace morgue
 {
@@ -441,8 +445,11 @@ void ArrangePanel::rehydrateFromSession()
 
 juce::File ArrangePanel::morgueDir() const
 {
-    return juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-               .getChildFile ("MORGUE");
+    /* One answer for the whole console, from the engine (see Session.h). The
+     * captures have to land in the directory the LOCKER scans and the title
+     * bar prints, and rebuilding "$HOME/MORGUE" here was only ever the same
+     * directory by coincidence. */
+    return morgue::morgueDir();
 }
 
 juce::File ArrangePanel::nextCaptureFile (int lane) const

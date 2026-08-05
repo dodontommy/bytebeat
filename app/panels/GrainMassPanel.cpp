@@ -8,9 +8,12 @@
 
 #include "GrainMassPanel.h"
 #include "AudioEngine.h"
+#include "Session.h"
 
 #include <cmath>
+#include <memory>
 #include <type_traits>
+#include <utility>          // std::declval, used by the detection idiom below
 #include <vector>
 
 namespace morgue
@@ -548,9 +551,13 @@ void GrainMassPanel::loadFileInto (int well, const juce::File& f)
 
 void GrainMassPanel::loadInto (int well)
 {
+    /* Open on the console's own directory: REC, GROW and the ARRANGE
+     * captures all write there, so that is where the specimens are. */
     chooser = std::make_unique<juce::FileChooser> (
         "Load a specimen",
-        juce::File::getSpecialLocation (juce::File::userHomeDirectory),
+        morgue::morgueDir().isDirectory()
+            ? morgue::morgueDir()
+            : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
         "*.wav;*.aif;*.aiff;*.mp3;*.ogg;*.flac");
 
     // slot captured by value at launch time; SafePointer guards teardown

@@ -18,14 +18,37 @@
  *
  * The rings (scope, sink) are single-producer / single-consumer, written by
  * audio and read by UI, with atomic cursors. No locks anywhere.
+ *
+ * The atomics are spelled BB_ATOMIC(T) rather than atomic_int / _Atomic(T)
+ * because this header is read by BOTH halves of the program: the engine, which
+ * is C11, and the JUCE GUI, which is C++17. `_Atomic` is a C keyword that C++
+ * does not have -- Clang accepts it in C++ as an extension, which is the only
+ * reason this file ever compiled, and MSVC and g++ do not. bb_atomic.h maps
+ * BB_ATOMIC(T) to _Atomic(T) in C and std::atomic<T> in C++, and static-asserts
+ * that the two agree on size, alignment and lock-freedom, because both threads
+ * are reading the same bytes of `bb` through different declarations of it.
+ *
+ * The whole body of this header is inside ONE extern "C" block, and the
+ * #includes are deliberately outside it. Both halves matter. The extern "C"
+ * has to cover the DATA declarations (`bb`, `bb_expr`, `bb_rack`,
+ * `bb_lctl_info`, ...) and not just the functions: on a mangling ABI like
+ * MSVC's, a variable declared without it gets a C++-mangled name in the GUI
+ * and a plain C name in the engine, and the two simply never meet at link
+ * time. The #includes have to be outside it because a C++ standard header
+ * dragged into a C-linkage region is ill-formed -- templates may not have C
+ * language linkage.
  */
 #ifndef BYTEBEAT_H
 #define BYTEBEAT_H
 
 #include <stdint.h>
-#include <stdatomic.h>
 #include <signal.h>
+#include "bb_atomic.h"
 #include "expr.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define BB_NPARAM       8
 #define BB_NLAYER       8
@@ -117,18 +140,18 @@ enum {
 };
 
 typedef struct {
-    atomic_int  on;                    /* slot audible?                  */
-    atomic_int  gate[BB_STEPS];        /* SMP_GATE_*                    */
-    atomic_int  pitch[BB_STEPS];       /* semitone offset, -12..+12     */
-    atomic_int  vel[BB_STEPS];         /* per-step velocity, 0..255     */
-    atomic_int  ctl[SMP_CTL_COUNT];    /* LEVEL 0..256, CHOKE 0..4      */
-    atomic_int  mute;                  /* 1 = silenced by hand          */
-    atomic_int  solo;                  /* 1 = only soloed slots sound   */
+    BB_ATOMIC(int)  on;                    /* slot audible?                  */
+    BB_ATOMIC(int)  gate[BB_STEPS];        /* SMP_GATE_*                    */
+    BB_ATOMIC(int)  pitch[BB_STEPS];       /* semitone offset, -12..+12     */
+    BB_ATOMIC(int)  vel[BB_STEPS];         /* per-step velocity, 0..255     */
+    BB_ATOMIC(int)  ctl[SMP_CTL_COUNT];    /* LEVEL 0..256, CHOKE 0..4      */
+    BB_ATOMIC(int)  mute;                  /* 1 = silenced by hand          */
+    BB_ATOMIC(int)  solo;                  /* 1 = only soloed slots sound   */
 
     /* Post-level abs peak of the slot's contribution to the master bus,
      * 0..32767. Audio thread max-holds it once per period; the UI reads
      * with atomic_exchange(&peak, 0) and applies its own display decay. */
-    atomic_int  peak;
+    BB_ATOMIC(int)  peak;
 } SamplerSlot;
 
 /* Largest period we will ever ask ALSA for. The audio thread's scratch
@@ -195,41 +218,41 @@ typedef struct {
 typedef struct {
     /* The UI thread compiles into a fresh Program and publishes it here.
      * The audio thread picks it up once per period. See bb_publish(). */
-    _Atomic(Program *) prog;
+    BB_ATOMIC(Program *) prog;
 
-    atomic_int  on;                     /* audible?                        */
-    atomic_int  mode;                   /* BB_BYTE / BB_SIGNED / BB_WORD   */
-    atomic_int  param[BB_NPARAM];       /* p0..p7, 0..255                  */
-    atomic_int  ctl[LCTL_COUNT];
+    BB_ATOMIC(int)  on;                     /* audible?                        */
+    BB_ATOMIC(int)  mode;                   /* BB_BYTE / BB_SIGNED / BB_WORD   */
+    BB_ATOMIC(int)  param[BB_NPARAM];       /* p0..p7, 0..255                  */
+    BB_ATOMIC(int)  ctl[LCTL_COUNT];
 
-    atomic_int  seq_on;
-    atomic_int  seq_gate[BB_STEPS];     /* GATE_OFF / ON / ACCENT          */
-    atomic_int  seq_pitch[BB_STEPS];    /* semitone offset, -12..+12       */
-    atomic_int  seq_ratchet[BB_STEPS];  /* retriggers in one step, 1..4    */
-    atomic_int  seq_prob[BB_STEPS];     /* probability that step fires     */
-    atomic_int  seq_lock[BB_LOCK_COUNT][BB_STEPS]; /* -1 = live knob       */
-    atomic_uint motion_mask;            /* interpolated automation lanes   */
+    BB_ATOMIC(int)  seq_on;
+    BB_ATOMIC(int)  seq_gate[BB_STEPS];     /* GATE_OFF / ON / ACCENT          */
+    BB_ATOMIC(int)  seq_pitch[BB_STEPS];    /* semitone offset, -12..+12       */
+    BB_ATOMIC(int)  seq_ratchet[BB_STEPS];  /* retriggers in one step, 1..4    */
+    BB_ATOMIC(int)  seq_prob[BB_STEPS];     /* probability that step fires     */
+    BB_ATOMIC(int)  seq_lock[BB_LOCK_COUNT][BB_STEPS]; /* -1 = live knob       */
+    BB_ATOMIC(unsigned) motion_mask;        /* interpolated automation lanes   */
 
     /* MIDI / hardware hooks. The UI thread writes a one-shot impulse and the
      * audio thread consumes it on the next sample -- no lock, same pattern as
      * every other control. */
-    atomic_int  mtrig;                  /* 1 = fire a hit, consumed once   */
-    atomic_int  mvel;                   /* velocity 1..256 for that hit    */
-    atomic_int  mtrans;                 /* semitone transpose, -24..+24    */
+    BB_ATOMIC(int)  mtrig;                  /* 1 = fire a hit, consumed once   */
+    BB_ATOMIC(int)  mvel;                   /* velocity 1..256 for that hit    */
+    BB_ATOMIC(int)  mtrans;                 /* semitone transpose, -24..+24    */
 
     /* Post-fader abs peak of this voice's contribution to the master mix,
      * 0..32767. Audio thread max-holds it once per period; the UI reads
      * with atomic_exchange(&peak, 0) and applies its own display decay. */
-    atomic_int  peak;
+    BB_ATOMIC(int)  peak;
 
     /* Send into the CHAMBER return bus (reverb), 0..255. Post-fader, so a
      * silent voice sends nothing and the mixer fader rides the send too. */
-    atomic_int  send;
+    BB_ATOMIC(int)  send;
 } Layer;
 
 struct bb_state {
     Layer        layer[BB_NLAYER];
-    atomic_int   focus;         /* layer the UI is editing               */
+    BB_ATOMIC(int)   focus;         /* layer the UI is editing               */
 
     /* 8 one-shot sample slots sequenced on the step clock (see above).   */
     SamplerSlot  sampler[BB_SAMPLER];
@@ -237,24 +260,24 @@ struct bb_state {
     /* Incremented by the audio thread at the top of every period. The UI
      * thread uses it to know when a retired Program can no longer be in
      * use. See bb_reclaim() in main.c for why this is sufficient. */
-    atomic_ullong epoch;
+    BB_ATOMIC(unsigned long long) epoch;
 
     /* --- transport ------------------------------------------------------ */
-    atomic_int   rate;          /* rate ALSA actually gave us            */
-    atomic_int   req_rate;      /* rate the user asked for               */
-    atomic_uint  t;             /* published sample counter (display)    */
-    atomic_int   reset_t;
-    atomic_int   reset_loop;
-    atomic_uint  k;             /* published loop position               */
-    atomic_uint  bar;
-    atomic_int   seq_pos;       /* published playhead step, -1 if off    */
+    BB_ATOMIC(int)   rate;          /* rate ALSA actually gave us            */
+    BB_ATOMIC(int)   req_rate;      /* rate the user asked for               */
+    BB_ATOMIC(unsigned) t;          /* published sample counter (display)    */
+    BB_ATOMIC(int)   reset_t;
+    BB_ATOMIC(int)   reset_loop;
+    BB_ATOMIC(unsigned) k;          /* published loop position               */
+    BB_ATOMIC(unsigned) bar;
+    BB_ATOMIC(int)   seq_pos;       /* published playhead step, -1 if off    */
 
     /* --- master --------------------------------------------------------- */
-    atomic_int   gctl[GCTL_COUNT];
-    atomic_int   gain;          /* 0..256                                */
-    atomic_int   mute;
-    atomic_int   panic;
-    atomic_int   bypass;        /* all post chains off                   */
+    BB_ATOMIC(int)   gctl[GCTL_COUNT];
+    BB_ATOMIC(int)   gain;          /* 0..256                                */
+    BB_ATOMIC(int)   mute;
+    BB_ATOMIC(int)   panic;
+    BB_ATOMIC(int)   bypass;        /* all post chains off                   */
 
     /* --- RETURN A: the CHAMBER (master reverb bus) ----------------------
      * Per-voice sends live in Layer.send; the step-sampler bus has one
@@ -262,56 +285,56 @@ struct bb_state {
      * BEFORE the clip, the phrase looper and the sink, so REC and
      * SURVIVOR capture the tail like everything else. verb_level 0 is
      * bit-exact bypass. */
-    atomic_int   verb_size;     /* decay length, 0..255                  */
-    atomic_int   verb_tone;     /* damping: 0 = dark cavern, 255 = bright */
-    atomic_int   verb_level;    /* return level into the master, 0..256  */
-    atomic_int   smp_send;      /* LICKS sampler-bus send, 0..255        */
-    atomic_int   verb_peak;     /* return abs peak for the RETURN A meter */
+    BB_ATOMIC(int)   verb_size;     /* decay length, 0..255                  */
+    BB_ATOMIC(int)   verb_tone;     /* damping: 0 = dark cavern, 255 = bright */
+    BB_ATOMIC(int)   verb_level;    /* return level into the master, 0..256  */
+    BB_ATOMIC(int)   smp_send;      /* LICKS sampler-bus send, 0..255        */
+    BB_ATOMIC(int)   verb_peak;     /* return abs peak for the RETURN A meter */
 
     /* --- master phrase looper ----------------------------------------- */
-    atomic_int   loop_cmd;       /* UI writes, audio thread consumes     */
-    atomic_int   loop_status;    /* LOOP_* published by audio thread     */
-    atomic_int   loop_bars;      /* capture length, 1..4 bars            */
-    atomic_int   loop_mix;       /* dry/loop crossfade, 0..256           */
-    atomic_int   loop_feedback;  /* retained audio while overdubbing     */
-    atomic_int   loop_overdub;
-    atomic_int   loop_rate;      /* half / normal / double               */
-    atomic_int   loop_reverse;
-    atomic_int   loop_slice;     /* 1,2,4,8,16: repeated fraction        */
-    atomic_uint  loop_pos;
-    atomic_uint  loop_frames;
+    BB_ATOMIC(int)   loop_cmd;       /* UI writes, audio thread consumes     */
+    BB_ATOMIC(int)   loop_status;    /* LOOP_* published by audio thread     */
+    BB_ATOMIC(int)   loop_bars;      /* capture length, 1..4 bars            */
+    BB_ATOMIC(int)   loop_mix;       /* dry/loop crossfade, 0..256           */
+    BB_ATOMIC(int)   loop_feedback;  /* retained audio while overdubbing     */
+    BB_ATOMIC(int)   loop_overdub;
+    BB_ATOMIC(int)   loop_rate;      /* half / normal / double               */
+    BB_ATOMIC(int)   loop_reverse;
+    BB_ATOMIC(int)   loop_slice;     /* 1,2,4,8,16: repeated fraction        */
+    BB_ATOMIC(unsigned) loop_pos;
+    BB_ATOMIC(unsigned) loop_frames;
 
     /* --- R2 arrangement timeline ---------------------------------------
      * Command/status traffic for the song. The song itself (clip list +
      * audio) is published through bb_engine_song_publish() as one atomic
      * pointer swap, exactly like a Program -- it never lives in this
      * struct. */
-    atomic_int   arr_rec_status; /* ARR_REC_*, published by audio thread  */
-    atomic_uint  arr_rec_frames; /* capture progress in frames, audio     *
+    BB_ATOMIC(int)   arr_rec_status; /* ARR_REC_*, published by audio thread  */
+    BB_ATOMIC(unsigned) arr_rec_frames; /* capture progress in frames, audio  *
                                   * thread writes, UI reads               */
-    atomic_int   arr_seek_bar;   /* pending seek target in absolute bars: *
+    BB_ATOMIC(int)   arr_seek_bar;   /* pending seek target in absolute bars: *
                                   * UI writes, audio thread consumes at   *
                                   * the top of a period; -1 = none        */
 
     /* --- telemetry ------------------------------------------------------ */
-    atomic_int   xruns;
-    atomic_int   cpu_us;
-    atomic_int   budget_us;
-    atomic_int   running;
-    atomic_int   clipping;      /* master bus hit the rails last period  */
+    BB_ATOMIC(int)   xruns;
+    BB_ATOMIC(int)   cpu_us;
+    BB_ATOMIC(int)   budget_us;
+    BB_ATOMIC(int)   running;
+    BB_ATOMIC(int)   clipping;      /* master bus hit the rails last period  */
 
     /* --- scope ring (audio writes, UI reads; a torn read here is a
      *     cosmetic glitch in an ASCII waveform, so no atomics on data) */
     int16_t      scope[BB_SCOPE_LEN];
-    atomic_uint  scope_w;
+    BB_ATOMIC(unsigned) scope_w;
 
     /* --- sink ring: two independent read cursors so a stalled network
      *     client cannot corrupt or stall the .wav being written */
     int16_t      sink[BB_SINK_LEN];
-    atomic_uint  sink_w;
-    atomic_uint  file_r;
-    atomic_uint  net_r;
-    atomic_int   sink_lost;
+    BB_ATOMIC(unsigned) sink_w;
+    BB_ATOMIC(unsigned) file_r;
+    BB_ATOMIC(unsigned) net_r;
+    BB_ATOMIC(int)   sink_lost;
 };
 
 extern struct bb_state bb;
@@ -341,10 +364,6 @@ extern int  bb_custom[BB_NLAYER];
  * header patch-up on the way out. */
 extern volatile sig_atomic_t bb_quit_signal;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /* Compile `src` and, if it compiles, hand it to the given layer. Returns 1
  * on success; on failure that layer keeps playing whatever it had, which is
  * why a syntax error never interrupts the sound. */
@@ -359,7 +378,7 @@ int         bb_config_load(void);
 const char *bb_config_path(void);
 
 #ifdef __cplusplus
-}
+}   /* extern "C" */
 #endif
 
 #endif /* BYTEBEAT_H */

@@ -19,6 +19,7 @@
  */
 
 #include "bytebeat.h"
+#include "bb_platform.h"
 #include "dsp.h"
 #include "engine.h"
 #include "rack.h"
@@ -28,10 +29,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <time.h>
 #include <math.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+
+/* The only OS-specific include left in this file, and only because the
+ * flush-to-medium call in bb_config_save() needs a file descriptor out of a
+ * FILE*. Everything else the platform is asked for goes through
+ * bb_platform.h; see the comment on cfg_flush_to_disk(). */
+#if defined(_WIN32)
+#  include <io.h>       /* _fileno, _commit */
+#else
+#  include <unistd.h>   /* fileno, fsync    */
+#  if defined(__APPLE__)
+#    include <fcntl.h>  /* F_FULLFSYNC      */
+#  endif
+#endif
 
 /* ---- session state (owned here, declared in bytebeat.h) ------------------ */
 struct bb_state bb;
@@ -1263,12 +1274,17 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         g_ctx[L].ll = (int32_t)loop_len;
     }
 
-    int target_gain = (mute || pan) ? 0 : (gtgt << 8);
+    /* gtgt is published 0..256 by everything that writes bb.gain, but it is
+     * read here raw, and a signed left shift of a negative value is undefined
+     * -- so shift the bit pattern, not the number. Identical result for every
+     * value the master fader can actually hold. */
+    int target_gain = (mute || pan) ? 0 : (int)((uint32_t)gtgt << 8);
     int clipped = 0;
     int32_t layer_pk[BB_NLAYER] = { 0 };   /* per-voice abs peak (meters) */
 
-    struct timespec c0, c1;
-    clock_gettime(CLOCK_MONOTONIC, &c0);
+    /* bb_now_us() is a user-mode counter read on every platform: no syscall,
+     * no allocation, no lock. Safe here; see bb_platform.h. */
+    uint64_t c0 = bb_now_us();
 
     for (int i = 0; i < frames; i++) {
         int32_t mix = 0;
@@ -1381,11 +1397,19 @@ void bb_engine_render(int16_t *out, int frames, int channels)
 
             g_ctx[L].dw = (g_ctx[L].dw + 1u) & EXPR_DELAY_MASK;
 
+            /* The shifts go through uint32_t. `(v & 0xff) - 128` is negative
+             * for the whole bottom half of BYTE mode and a signed left shift
+             * of a negative value is undefined behaviour -- Clang only made it
+             * behave because the Makefile passes -fwrapv, and MSVC has no
+             * -fwrapv to pass. Shifting the unsigned bit pattern and
+             * reinterpreting it is the same bits on every compiler, which is
+             * exactly the trick expr.c's U()/S() already play with the VM's
+             * arithmetic. Not one sample changes. */
             int32_t s;
             switch (sn->mode) {
-            case BB_BYTE:   s = (int32_t)((v & 0xff) - 128) << 8;  break;
-            case BB_SIGNED: s = (int32_t)(int8_t)(v & 0xff) << 8;  break;
-            default:        s = (int32_t)(int16_t)(v & 0xffff);    break;
+            case BB_BYTE:   s = (int32_t)((uint32_t)((v & 0xff) - 128) << 8); break;
+            case BB_SIGNED: s = (int32_t)((uint32_t)(int8_t)(v & 0xff) << 8); break;
+            default:        s = (int32_t)(int16_t)(v & 0xffff);               break;
             }
 
             if (sn->seq_on) s = (int32_t)(((int64_t)s * g_env[L]) >> 16);
@@ -1530,12 +1554,22 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         bar_pos++;   if (bar_pos  >= bar_len)  { bar_pos = 0; bar_count++; }
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &c1);
-    long us = (c1.tv_sec - c0.tv_sec) * 1000000L
-            + (c1.tv_nsec - c0.tv_nsec) / 1000L;
-    atomic_store_explicit(&bb.cpu_us,    (int)us,    memory_order_relaxed);
+    /* Both readings come from the same monotonic counter, so the subtraction
+     * cannot go negative and the unsigned arithmetic is exact. The clamp only
+     * fires if this period took over half an hour, which would mean the render
+     * thread was suspended mid-callback -- publish the ceiling rather than a
+     * wrapped-around number that would read as "instant". */
+    uint64_t c1 = bb_now_us();
+    uint64_t us = c1 - c0;
+    atomic_store_explicit(&bb.cpu_us,
+                          (int)(us > (uint64_t)INT32_MAX
+                                    ? INT32_MAX : (int32_t)us),
+                          memory_order_relaxed);
+    /* 1000000LL, not 1000000L: `long` is 32 bits on Windows, and at 4096
+     * frames a period 1000000L * frames overflows it and publishes a negative
+     * budget, which makes the CPU meter read as permanently over. */
     atomic_store_explicit(&bb.budget_us,
-                          (int)((1000000L * frames) / (rate > 0 ? rate : 1)),
+                          (int)((1000000LL * frames) / (rate > 0 ? rate : 1)),
                           memory_order_relaxed);
     atomic_store_explicit(&bb.clipping, clipped, memory_order_relaxed);
 
@@ -1688,11 +1722,14 @@ static int32_t specimen_core(int16_t *dst, uint32_t total, uint32_t xf,
         int32_t v = expr_eval(pr, &cx);
         cx.dw = (cx.dw + 1u) & EXPR_DELAY_MASK;
 
+        /* Same unsigned-shift reinterpretation as the render loop -- see the
+         * comment there. A specimen must be bit-identical to the live voice
+         * or it is not a specimen of anything. */
         int32_t s;
         switch (mode) {
-        case BB_BYTE:   s = (int32_t)((v & 0xff) - 128) << 8;  break;
-        case BB_SIGNED: s = (int32_t)(int8_t)(v & 0xff) << 8;  break;
-        default:        s = (int32_t)(int16_t)(v & 0xffff);    break;
+        case BB_BYTE:   s = (int32_t)((uint32_t)((v & 0xff) - 128) << 8); break;
+        case BB_SIGNED: s = (int32_t)((uint32_t)(int8_t)(v & 0xff) << 8); break;
+        default:        s = (int32_t)(int16_t)(v & 0xffff);               break;
         }
 
         if (post) {
@@ -1778,10 +1815,35 @@ static void spc_geometry(int bars, int *rate, uint32_t *beat_len,
     if (*xf > *total / 4u) *xf = *total / 4u;
 }
 
+/* Join a directory and a leaf name with the platform's separator.
+ *
+ * Every path in this file used to be built with a hardcoded '/'. That still
+ * WORKS on Windows -- the Win32 API has accepted forward slashes forever --
+ * but the roots arrive from the GUI as "C:\Users\<name>\MORGUE", so the result
+ * was a path that changed direction halfway through. It shows up in error
+ * messages and in the session file, and anyone who pastes one into a shell
+ * gets to find out which half of it their shell believes.
+ *
+ * A trailing separator on `dir` is trimmed so joining never doubles one. On
+ * Unix only '/' counts as a separator -- a backslash is a perfectly legal
+ * character in a filename there, and eating it would rename someone's folder
+ * out from under them. */
+static void path_join(char *dst, size_t dstsz,
+                      const char *dir, const char *leaf)
+{
+    size_t n = strlen(dir);
+#if defined(_WIN32)
+    while (n > 0 && (dir[n - 1] == '/' || dir[n - 1] == '\\')) n--;
+#else
+    while (n > 0 && dir[n - 1] == '/') n--;
+#endif
+    snprintf(dst, dstsz, "%.*s%s%s", (int)n, dir, BB_PATH_SEP, leaf);
+}
+
 static int spc_write_wav(const char *path, const int16_t *buf,
                          uint32_t total, int rate)
 {
-    FILE *f = fopen(path, "wb");
+    FILE *f = bb_fopen(path, "wb");
     if (!f) return -1;
 
     uint32_t dlen = total * 2u;
@@ -1803,7 +1865,7 @@ static int spc_write_wav(const char *path, const int16_t *buf,
           && fwrite(buf, 2, total, f) == total;
     ok = ok && !ferror(f);
     ok = (fclose(f) == 0) && ok;
-    if (!ok) remove(path);
+    if (!ok) bb_remove(path);
     return ok ? 0 : -1;
 }
 
@@ -1825,7 +1887,7 @@ int bb_engine_render_specimen(const char *dir, unsigned seed,
 
     char name[64], path[720];
     snprintf(name, sizeof name, "SPC-%04X.wav", seed & 0xFFFFu);
-    snprintf(path, sizeof path, "%s/%s", dir, name);
+    path_join(path, sizeof path, dir, name);
 
     int rc = spc_write_wav(path, buf, total, rate);
     free(buf);
@@ -1877,7 +1939,7 @@ int bb_engine_render_specimen_voice(const char *dir, unsigned seed, int bars,
     char name[64], path[720];
     snprintf(name, sizeof name, "SPC-V%02d-%04X.wav",
              layer + 1, seed & 0xFFFFu);
-    snprintf(path, sizeof path, "%s/%s", dir, name);
+    path_join(path, sizeof path, dir, name);
 
     int rc = spc_write_wav(path, buf, total, rate);
     free(buf);
@@ -1897,18 +1959,39 @@ int bb_config_set_root(const char *dir)
 {
     if (!dir) return -1;
     snprintf(cfg_dir, sizeof cfg_dir, "%s", dir);
-    snprintf(cfg_path, sizeof cfg_path, "%s/session.conf", cfg_dir);
+    path_join(cfg_path, sizeof cfg_path, cfg_dir, "session.conf");
     return 0;
 }
 
+/* The fallback root, used only when nobody called bb_config_set_root() first.
+ * The GUI always does (app/Main.cpp, before anything reads a path), so in
+ * practice this is the headless path: the regression suite, and whatever
+ * replaces the TUI. It still has to be RIGHT, because the day it is wrong is
+ * the day someone's session lands in a directory nobody thinks to look in. */
 static void cfg_paths(void)
 {
+#if defined(_WIN32)
+    /* Windows has neither $HOME nor XDG. USERPROFILE first, because that is
+     * where the GUI puts its root -- a headless run and a GUI run should find
+     * the SAME session rather than quietly keeping two. LOCALAPPDATA and
+     * APPDATA are the conventional places after that (LOCALAPPDATA first: a
+     * session is machine-local state, and roaming it across a domain login
+     * would drag the WAV paths it references somewhere they do not exist). */
+    const char *profile = getenv("USERPROFILE");
+    const char *local   = getenv("LOCALAPPDATA");
+    const char *appdata = getenv("APPDATA");
+    if      (profile && *profile) path_join(cfg_dir, sizeof cfg_dir, profile, "MORGUE");
+    else if (local   && *local)   path_join(cfg_dir, sizeof cfg_dir, local,   "MORGUE");
+    else if (appdata && *appdata) path_join(cfg_dir, sizeof cfg_dir, appdata, "MORGUE");
+    else                          snprintf(cfg_dir, sizeof cfg_dir, "MORGUE");
+#else
     const char *xdg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
     if (xdg && *xdg) snprintf(cfg_dir, sizeof cfg_dir, "%s/bytebeat", xdg);
     else if (home)   snprintf(cfg_dir, sizeof cfg_dir, "%s/.config/bytebeat", home);
     else             snprintf(cfg_dir, sizeof cfg_dir, ".bytebeat");
-    snprintf(cfg_path, sizeof cfg_path, "%s/session.conf", cfg_dir);
+#endif
+    path_join(cfg_path, sizeof cfg_path, cfg_dir, "session.conf");
 }
 
 const char *bb_config_path(void)
@@ -1917,28 +2000,64 @@ const char *bb_config_path(void)
     return cfg_path;
 }
 
-static void mkdirs(const char *path)
+/* Push a stream all the way to the medium.
+ *
+ * fclose() is NOT this. fclose() flushes the C library's buffer into the
+ * operating system's page cache and returns; the bytes may sit there for
+ * seconds. If the machine loses power in that window the directory entry
+ * created by the replace below can be on disk while the contents are not, and
+ * what comes back is a session file the filesystem swears is complete and that
+ * is in fact zero-length. That is the failure mode this whole write-then-
+ * replace dance exists to prevent, so it is worth the extra call.
+ *
+ * Returns 0 if the data is on the device. The file is left open; the caller
+ * still has to fclose() it. */
+static int cfg_flush_to_disk(FILE *f)
 {
-    char tmp[600];
-    snprintf(tmp, sizeof tmp, "%s", path);
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') { *p = '\0'; mkdir(tmp, 0755); *p = '/'; }
-    }
-    mkdir(tmp, 0755);
+    if (fflush(f) != 0) return -1;
+
+#if defined(_WIN32)
+    int fd = _fileno(f);
+    if (fd < 0) return -1;
+    return _commit(fd) == 0 ? 0 : -1;
+#elif defined(__APPLE__)
+    int fd = fileno(f);
+    if (fd < 0) return -1;
+    /* On Darwin, fsync() only promises the drive has been TOLD; the drive is
+     * free to keep the bytes in its own write cache. F_FULLFSYNC is the call
+     * that waits for the medium. Some filesystems (network mounts, a few
+     * FUSE ones) return ENOTSUP for it, so fall back rather than fail the
+     * save over something the user cannot fix. */
+    if (fcntl(fd, F_FULLFSYNC, 0) != -1) return 0;
+    return fsync(fd) == 0 ? 0 : -1;
+#else
+    int fd = fileno(f);
+    if (fd < 0) return -1;
+    return fsync(fd) == 0 ? 0 : -1;
+#endif
 }
 
 int bb_config_save(void)
 {
     if (cfg_path[0] == '\0') cfg_paths();
-    mkdirs(cfg_dir);
+    /* Best effort, exactly as before: if the directory cannot be made, the
+     * open below fails and reports it properly. */
+    (void)bb_mkdirs(cfg_dir);
 
-    /* Write to a temporary sibling and rename over the live file only once
-     * everything is verifiably on disk. fopen(cfg_path, "w") would truncate
-     * the only good copy the instant it opens; if the disk then fills, the
-     * session is gone even though we would report success. */
+    /* Write to a temporary sibling and replace the live file only once
+     * everything is on disk. fopen(cfg_path, "w") would truncate the only good
+     * copy the instant it opens; if the disk then fills, the session is gone
+     * even though we would report success.
+     *
+     * "On disk" is meant literally -- see cfg_flush_to_disk() above, and
+     * bb_replace_atomic(), which asks the OS to commit the directory change
+     * too. The one thing still left to the filesystem's own ordering is the
+     * PARENT directory's entry; every journalling filesystem this program will
+     * meet orders that behind the rename, and prying it open would mean
+     * opening the directory as a file purely to fsync it. */
     char tmp_path[608];
     snprintf(tmp_path, sizeof tmp_path, "%s.tmp", cfg_path);
-    FILE *f = fopen(tmp_path, "w");
+    FILE *f = bb_fopen(tmp_path, "w");
     if (!f) return -1;
 
     fprintf(f, "# bytebeat session -- plain text, edit it if you like\n");
@@ -2042,13 +2161,19 @@ int bb_config_save(void)
                     (int)strlen(clips[c].name), clips[c].name, clips[c].path);
     }
 
-    /* ferror catches fprintf failures above; fclose reports buffered writes
-     * that die on the way to disk (ENOSPC/EDQUOT). Only a fully flushed tmp
-     * file may replace the previous good session. */
+    /* ferror catches fprintf failures above; cfg_flush_to_disk forces the
+     * buffered writes out and is where ENOSPC/EDQUOT actually surfaces;
+     * fclose is the last chance to hear about either. Only a tmp file that
+     * is verifiably on the medium may replace the previous good session.
+     *
+     * bb_replace_atomic rather than rename(): Windows' rename() REFUSES when
+     * the destination exists, so every save after the first one silently did
+     * nothing and left a .tmp behind. */
     int bad = ferror(f);
+    if (!bad && cfg_flush_to_disk(f) != 0) bad = 1;
     if (fclose(f) != 0) bad = 1;
-    if (bad || rename(tmp_path, cfg_path) != 0) {
-        remove(tmp_path);
+    if (bad || bb_replace_atomic(tmp_path, cfg_path) != 0) {
+        bb_remove(tmp_path);
         return -1;
     }
     return 0;
@@ -2074,7 +2199,7 @@ static void read_ints(const char *p, atomic_int *dst, int n, int lo, int hi)
 int bb_config_load(void)
 {
     if (cfg_path[0] == '\0') cfg_paths();
-    FILE *f = fopen(cfg_path, "r");
+    FILE *f = bb_fopen(cfg_path, "r");
     if (!f) return 0;
 
     /* Big enough for the longest legal line: an aclip carrying a full
@@ -2085,8 +2210,23 @@ int bb_config_load(void)
     cfg_nclips = 0;
 
     while (fgets(line, sizeof line, f)) {
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
+        /* Strip the WHOLE line terminator, CR as well as LF, and do it here
+         * rather than per-field.
+         *
+         * A session written on Windows has CRLF line endings (the writer opens
+         * the file in text mode, and git's autocrlf will do it to a checkout
+         * regardless), and sessions travel: this is a file people copy between
+         * a laptop and a studio machine. The numeric fields survive a stray
+         * CR because strtol and sscanf stop at it, which is exactly why this
+         * was easy to miss -- but three fields are strings that run to the end
+         * of the line: an `expr` (the expression itself), and an `aclip`'s name
+         * and source-WAV path. Each of those would silently acquire a trailing
+         * carriage return, and a clip path with an invisible control character
+         * on the end simply does not open. So: one strip, at the boundary,
+         * covering every field that will ever be added below. */
+        size_t ln = strlen(line);
+        while (ln > 0 && (line[ln - 1] == '\n' || line[ln - 1] == '\r'))
+            line[--ln] = '\0';
         if (line[0] == '#' || line[0] == '\0') continue;
 
         int v, L;

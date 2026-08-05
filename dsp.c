@@ -54,7 +54,14 @@ void post_reset(PostState *ps)
 
 int32_t dsp_dcblock(PostState *ps, int32_t x)
 {
-    int64_t y = (((int64_t)(x - ps->dc_x1)) << 16)
+    /* The scaling shift goes through uint64_t. `x - dc_x1` is negative for
+     * half of every waveform, and a signed left shift of a negative value is
+     * undefined behaviour -- Clang only behaved because the Makefile passes
+     * -fwrapv, and MSVC has no -fwrapv to pass. Shifting the unsigned bit
+     * pattern and reinterpreting it produces the identical value on every
+     * compiler; this is the same U()/S() trick expr.c plays with the VM's
+     * arithmetic. Nothing about the filter changes. */
+    int64_t y = (int64_t)((uint64_t)(int64_t)(x - ps->dc_x1) << 16)
               + ((ps->dc_y1 * DC_R) >> 16);
     ps->dc_x1 = x;
     ps->dc_y1 = y;
@@ -89,7 +96,10 @@ static inline int32_t saturate(int32_t x)
  * see the comment in expr.c for why the naive int32 version silently dies. */
 static inline int32_t onepole(int64_t *st, int32_t x, int32_t c)
 {
-    int64_t target = (int64_t)x << 8;
+    /* Unsigned shift for the same reason as dsp_dcblock: x is a signed
+     * sample, it is negative half the time, and `<<` on a negative signed
+     * value is undefined. Same bits, defined everywhere. */
+    int64_t target = (int64_t)((uint64_t)(int64_t)x << 8);
     *st += ((target - *st) * c) >> 8;
     return (int32_t)(*st >> 8);
 }

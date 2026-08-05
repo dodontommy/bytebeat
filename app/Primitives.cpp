@@ -4,7 +4,9 @@
  * rounded corners, no shadows. */
 
 #include "Primitives.h"
+
 #include <cmath>
+#include <utility>          // std::move
 
 namespace morgue
 {
@@ -822,9 +824,19 @@ void paintHeaderBand (juce::Graphics& g, Rectangle<int> band,
 
     if (rightText.isNotEmpty())
     {
+        /* Claim only the width the text needs, capped at half the band, and
+         * ellipsise inside it. The right hint used to be drawn across the
+         * whole remaining band, which was invisible while it said "~/MORGUE"
+         * but runs straight under the title the moment it says
+         * "C:\Users\somebody\MORGUE" instead. */
+        const juce::Font rf = Type::mono (8.0f, 0.10f);
+        const int want = (int) std::ceil (
+            juce::GlyphArrangement::getStringWidth (rf, rightText)) + 2;
+        Rectangle<int> rr = r.removeFromRight (
+            juce::jmin (want, juce::jmax (0, r.getWidth() / 2)));
         g.setColour (C::INK_FAINT);
-        g.setFont (Type::mono (8.0f, 0.10f));
-        g.drawText (rightText, r, Justification::centredRight);
+        g.setFont (rf);
+        g.drawText (rightText, rr, Justification::centredRight, true);
     }
 
     g.setColour (C::INK);

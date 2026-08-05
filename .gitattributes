@@ -1,0 +1,33 @@
+# Line endings are not cosmetic here.
+#
+# core.autocrlf is true on the Windows box, so without this file the working
+# tree is CRLF for every file while the index is LF. That is mostly harmless
+# for source, but session.conf is parsed by hand in engine.c and the loader
+# historically stripped only '\n' -- a CRLF session file silently corrupted
+# every string-valued field: expressions, clip names, clip paths. The loader is
+# tolerant now, but a project that commutes between a Windows desk and a
+# MacBook should not depend on that tolerance in both directions.
+#
+# Normalise text to LF in the repository. Git still checks it out however the
+# platform wants; it is the stored form that is being pinned.
+* text=auto eol=lf
+
+# Binary assets git must never translate, diff, or "fix".
+*.ttf   binary
+*.otf   binary
+*.png   binary
+*.jpg   binary
+*.icns  binary
+*.ico   binary
+*.wav   binary
+*.aiff  binary
+*.flac  binary
+*.mp3   binary
+*.zip   binary
+*.pdf   binary
+
+# Session and recipe files are text and must stay diffable -- being able to
+# read what changed between two takes is the point of keeping them as text.
+*.conf  text eol=lf
+*.morgue-tag  text eol=lf
+*.morgue-rcp  text eol=lf

@@ -9,6 +9,9 @@
 #include "bytebeat.h"
 #include "engine.h"
 
+#include <cmath>            // std::ceil, used by the local textW helper
+#include <memory>
+
 namespace morgue
 {
 

@@ -11,6 +11,7 @@
  */
 
 #include "ExportSheet.h"
+#include "Session.h"
 
 namespace morgue
 {
@@ -376,7 +377,11 @@ void ExportSheet::paint (juce::Graphics& g)
         g.drawRect (f, 1);
         g.setColour (DEST_INK);
         g.setFont (Type::mono (9.0f));
-        g.drawText ("~/MORGUE/stems/0418/", f.reduced (8, 0), Justification::centredLeft);
+        /* Planned chrome, but it must name a directory that could exist on
+         * this machine: "~/MORGUE/stems/0418/" is not a path on Windows. */
+        const juce::String sep = morgue::pathSep();
+        g.drawText (morgue::morgueDirDisplay() + sep + "stems" + sep + "0418" + sep,
+                    f.reduced (8, 0), Justification::centredLeft, true);
     }
 
     // two info lines (count/size track the checkboxes and the per-stem sizes)

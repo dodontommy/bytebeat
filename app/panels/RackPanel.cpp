@@ -21,6 +21,9 @@
 
 #include <cmath>
 #include <cstdio>
+#include <functional>
+#include <memory>
+#include <vector>
 
 namespace morgue
 {
@@ -33,7 +36,7 @@ namespace
     /* HTML supporting literal: expression text / sounding-voice number. */
     const juce::Colour inkCode { 0xffc9c4b8 };
 
-    juce::String mdot()  { return U8 (" · "); }   // " · "
+    juce::String mdot()  { return U8 (" \xc2\xb7 "); }   // " \xc2\xb7 "
 
     int textW (const juce::Font& f, const juce::String& s)
     {
@@ -101,9 +104,9 @@ public:
     {
         setMouseClickGrabsKeyboardFocus (false);
         setTooltip (juce::String::formatted ("VOICE %02d", idx + 1)
-                    + U8 (" — focus this layer for editing and MIDI; the lamp "
+                    + U8 (" \xe2\x80\x94 focus this layer for editing and MIDI; the lamp "
                           "shows it is sounding. SHIFT-click toggles it "
-                          "on/off. Keys 1–8, SHIFT+1–8."));
+                          "on/off. Keys 1\xe2\x80\x93""8, SHIFT+1\xe2\x80\x93""8."));
     }
 
     std::function<void (int)> onSelect;
@@ -225,7 +228,7 @@ public:
     {
         setWantsKeyboardFocus (true);
         setMouseClickGrabsKeyboardFocus (true);
-        setTooltip (U8 ("EXPRESSION — bytebeat program for the focused voice. "
+        setTooltip (U8 ("EXPRESSION \xe2\x80\x94 bytebeat program for the focused voice. "
                         "RETURN compiles hot, shift-RETURN inserts a line; a failed "
                         "compile keeps the previous program running."));
     }
@@ -560,9 +563,9 @@ public:
         for (int i = 0; i < BB_STEPS; ++i)
             vals[i] = -1;
         setMouseClickGrabsKeyboardFocus (false);
-        setTooltip (U8 ("LOCK LANE — per-step lock for the last-touched knob; "
+        setTooltip (U8 ("LOCK LANE \xe2\x80\x94 per-step lock for the last-touched knob; "
                         "drag sets a step, right-click returns it to the live knob. "
-                        "0–max of the target control."));
+                        "0\xe2\x80\x93max of the target control."));
     }
 
     std::function<void (int step, int value)> onEdit;   // -1 clears to live knob
@@ -651,13 +654,13 @@ RackPanel::RackPanel()
         voicePlates.add (v);
     }
 
-    rollBtn.setTooltip   (U8 ("ROLL — replaces the focused voice with a freshly "
+    rollBtn.setTooltip   (U8 ("ROLL \xe2\x80\x94 replaces the focused voice with a freshly "
                               "rolled one: expression, knobs, pattern. Action."));
-    mutateBtn.setTooltip (U8 ("MUTATE — mutates the focused voice in place, "
+    mutateBtn.setTooltip (U8 ("MUTATE \xe2\x80\x94 mutates the focused voice in place, "
                               "keeping its character. Action."));
-    bodyBtn.setTooltip   (U8 ("BODY — wraps the source in a low-pass body stage "
+    bodyBtn.setTooltip   (U8 ("BODY \xe2\x80\x94 wraps the source in a low-pass body stage "
                               "and recompiles without a glitch. Toggle."));
-    spaceBtn.setTooltip  (U8 ("SPACE — wraps the voice in a feedback-delay space "
+    spaceBtn.setTooltip  (U8 ("SPACE \xe2\x80\x94 wraps the voice in a feedback-delay space "
                               "stage and recompiles without a glitch. Toggle."));
 
     rollBtn.onToggle   = [this] (bool) { rollVoice (false); };
@@ -680,7 +683,7 @@ RackPanel::RackPanel()
     {
         auto* s = new SourceCell (i, rack_src_name (i));
         s->setTooltip (juce::String (rack_src_name (i)).toUpperCase()
-                       + U8 (" — ") + rack_src_desc (i)
+                       + U8 (" \xe2\x80\x94 ") + rack_src_desc (i)
                        + " Audition on select; no-glitch swap.");
         s->onSelect = [this] (int src) {
             applyRack (src, bb_rack[layer].body, bb_rack[layer].space, true);
@@ -699,7 +702,7 @@ RackPanel::RackPanel()
     {
         auto* c = new SourceCell (i, rack_patch (i)->name);
         c->setTooltip (juce::String (rack_patch (i)->name)
-                       + U8 (" — a complete voice: ") + rack_patch (i)->src
+                       + U8 (" \xe2\x80\x94 a complete voice: ") + rack_patch (i)->src
                        + U8 (" source, envelope, post chain and chamber send. "
                              "Click to load it onto the focused voice."));
         c->onSelect = [this] (int p) { applyPatch (p); };
@@ -711,15 +714,15 @@ RackPanel::RackPanel()
     {
         struct MDef { const char* nm; const char* tip; };
         const MDef md[MACRO_COUNT] = {
-            { "PITCH",  "PITCH — every pitch-carrying knob of this voice, "
+            { "PITCH",  "PITCH \xe2\x80\x94 every pitch-carrying knob of this voice, "
                         "scaled together. 128 is the voice as designed." },
-            { "MOTION", "MOTION — how fast the voice's internal pattern "
+            { "MOTION", "MOTION \xe2\x80\x94 how fast the voice's internal pattern "
                         "moves. Down is glacial, up is frantic." },
-            { "DIRT",   "DIRT — noise, drive and bitcrush together. "
+            { "DIRT",   "DIRT \xe2\x80\x94 noise, drive and bitcrush together. "
                         "Down is clean, up is rotten." },
-            { "DARK",   "DARK — every filter in the voice, inverted. "
+            { "DARK",   "DARK \xe2\x80\x94 every filter in the voice, inverted. "
                         "Up closes the lid." },
-            { "ROOM",   "ROOM — resonance, echo and the chamber send. "
+            { "ROOM",   "ROOM \xe2\x80\x94 resonance, echo and the chamber send. "
                         "Up puts the voice in the building." },
         };
         for (int a = 0; a < MACRO_COUNT; ++a)
@@ -735,12 +738,12 @@ RackPanel::RackPanel()
 
         struct SDef { const char* nm; int axis, dir; const char* tip; };
         const SDef sd[6] = {
-            { "DARKER",   MACRO_DARK,  +1, "DARKER — push the voice down into the floor." },
-            { "CALMER",   MACRO_MOTION,-1, "CALMER — slow the voice's internal movement." },
-            { "TIGHTER",  MACRO_ROOM,  -1, "TIGHTER — dry the voice out, close the room." },
-            { "BRIGHTER", MACRO_DARK,  -1, "BRIGHTER — open the filters back up." },
-            { "BUSIER",   MACRO_MOTION,+1, "BUSIER — speed the voice's internal movement." },
-            { "HUGER",    MACRO_ROOM,  +1, "HUGER — more ring, more echo, more chamber." },
+            { "DARKER",   MACRO_DARK,  +1, "DARKER \xe2\x80\x94 push the voice down into the floor." },
+            { "CALMER",   MACRO_MOTION,-1, "CALMER \xe2\x80\x94 slow the voice's internal movement." },
+            { "TIGHTER",  MACRO_ROOM,  -1, "TIGHTER \xe2\x80\x94 dry the voice out, close the room." },
+            { "BRIGHTER", MACRO_DARK,  -1, "BRIGHTER \xe2\x80\x94 open the filters back up." },
+            { "BUSIER",   MACRO_MOTION,+1, "BUSIER \xe2\x80\x94 speed the voice's internal movement." },
+            { "HUGER",    MACRO_ROOM,  +1, "HUGER \xe2\x80\x94 more ring, more echo, more chamber." },
         };
         for (const auto& s : sd)
         {
@@ -754,7 +757,7 @@ RackPanel::RackPanel()
         }
         stepBackBtn = std::make_unique<PlateButton> ("STEP BACK", false, false);
         stepBackBtn->setMouseClickGrabsKeyboardFocus (false);
-        stepBackBtn->setTooltip (U8 ("STEP BACK — undo the last sculpt nudge."));
+        stepBackBtn->setTooltip (U8 ("STEP BACK \xe2\x80\x94 undo the last sculpt nudge."));
         stepBackBtn->onToggle = [this] (bool) { popUndo(); };
         addAndMakeVisible (*stepBackBtn);
     }
@@ -766,9 +769,10 @@ RackPanel::RackPanel()
         k->setSubLabel ("p" + juce::String (i));
         k->setMouseClickGrabsKeyboardFocus (false);
         k->setTooltip (juce::String::formatted ("p%d", i)
-                       + U8 (" — expression parameter; role inferred from the "
-                             "compiled bytecode. 0–255; drag side-to-side, "
-                             "cmd-drag fine, double-click default, scroll ±1."));
+                       + U8 (" \xe2\x80\x94 expression parameter; role inferred from the "
+                             "compiled bytecode. 0\xe2\x80\x93""255; drag side-to-side, ")
+                       + modKeyWord()
+                       + U8 ("-drag fine, double-click default, scroll \xc2\xb1""1."));
         const int p = i;
         k->onChange = [this, p] (int v) {
             atomic_store (&bb.layer[layer].param[p], v);
@@ -782,17 +786,17 @@ RackPanel::RackPanel()
     struct ChainDef { const char* nm; int ctl; int lock; const char* tip; };
     const ChainDef chain[6] = {
         { "DRIVE", LCTL_DRIVE,    LOCK_DRIVE,
-          "DRIVE — post-chain saturation for this voice. 0–255." },
+          "DRIVE \xe2\x80\x94 post-chain saturation for this voice. 0\xe2\x80\x93""255." },
         { "TONE",  LCTL_TONE,     LOCK_TONE,
-          "TONE — post-chain tone filter cutoff. 0–255." },
+          "TONE \xe2\x80\x94 post-chain tone filter cutoff. 0\xe2\x80\x93""255." },
         { "CRUSH", LCTL_CRUSH,    LOCK_CRUSH,
-          "CRUSH — bit/rate crush amount. 0–255." },
+          "CRUSH \xe2\x80\x94 bit/rate crush amount. 0\xe2\x80\x93""255." },
         { "TIME",  LCTL_SPC_TIME, LOCK_SPC_TIME,
-          "TIME — SPACE delay time. 0–255; clocked when SP-SYNC is set." },
+          "TIME \xe2\x80\x94 SPACE delay time. 0\xe2\x80\x93""255; clocked when SP-SYNC is set." },
         { "FBACK", LCTL_SPC_FB,   LOCK_SPC_FB,
-          "FBACK — SPACE feedback amount. 0–255." },
+          "FBACK \xe2\x80\x94 SPACE feedback amount. 0\xe2\x80\x93""255." },
         { "MIX",   LCTL_SPC_MIX,  LOCK_SPC_MIX,
-          "MIX — SPACE wet/dry balance. 0–255." },
+          "MIX \xe2\x80\x94 SPACE wet/dry balance. 0\xe2\x80\x93""255." },
     };
     for (const ChainDef& cd : chain)
     {
@@ -1489,8 +1493,8 @@ void RackPanel::paint (juce::Graphics& g)
 
     paintHeaderBand (g, b.removeFromTop (headerBandH),
                      "RACK",
-                     U8 ("VOICE STATION · 8-LAYER BYTEBEAT"),
-                     juce::String ("SPEC ") + SerialNo::RACK + U8 (" · REV 11"),
+                     U8 ("VOICE STATION \xc2\xb7 8-LAYER BYTEBEAT"),
+                     juce::String ("SPEC ") + SerialNo::RACK + U8 (" \xc2\xb7 REV 11"),
                      Badge::LIVE, "LIVE");
 
     /* ---- voice strip ---------------------------------------------------- */
@@ -1508,8 +1512,8 @@ void RackPanel::paint (juce::Graphics& g)
     {
         const juce::Font hf = Type::mono (8.0f, 0.10f);
         Rectangle<int> hr = rcStrip.reduced (10, 0).withTrimmedBottom (1);
-        const juce::String h2 = U8 ("FOCUS → MIDI NOTE / CC");
-        const juce::String h1 = U8 ("GATE ENV · DC-BLOCK ALWAYS ON");
+        const juce::String h2 = U8 ("FOCUS \xe2\x86\x92 MIDI NOTE / CC");
+        const juce::String h1 = U8 ("GATE ENV \xc2\xb7 DC-BLOCK ALWAYS ON");
         g.setFont (hf);
         g.setColour (C::INK_DIM);
         g.drawText (h2, hr.removeFromRight (textW (hf, h2)), Justification::centredRight);
@@ -1537,7 +1541,7 @@ void RackPanel::paint (juce::Graphics& g)
     g.fillRect (rcSourceFoot.getX(), rcSourceFoot.getY(), rcSourceFoot.getWidth(), 1);
     g.setColour (C::INK_FAINT);
     g.setFont (Type::mono (8.0f, 0.10f));
-    g.drawText (U8 ("AUDITION ON SELECT · NO-GLITCH SWAP"),
+    g.drawText (U8 ("AUDITION ON SELECT \xc2\xb7 NO-GLITCH SWAP"),
                 rcSourceFoot.reduced (8, 0), Justification::centredLeft);
 
     /* ---- expression rows ------------------------------------------------ */
@@ -1545,7 +1549,7 @@ void RackPanel::paint (juce::Graphics& g)
                    juce::String ("EXPRESSION") + mdot()
                    + juce::String::formatted ("VOICE %02d", layer + 1) + mdot()
                    + "BYTEBEAT VM",
-                   U8 ("RETURN = COMPILE · CURSOR HELD"));
+                   U8 ("RETURN = COMPILE \xc2\xb7 CURSOR HELD"));
     g.setColour (C::HAIRLINE);
     g.fillRect (rcExprHead.getX(), rcExprHead.getBottom() - 1, rcExprHead.getWidth(), 1);
     if (expr != nullptr)
@@ -1553,8 +1557,8 @@ void RackPanel::paint (juce::Graphics& g)
 
     /* ---- VOICE DESIGN rows ---------------------------------------------- */
     paintLabelRow (g, rcDesignHead,
-                   U8 ("VOICE DESIGN · FIVE HANDS ON WHATEVER IS LOADED"),
-                   U8 ("128 = AS DESIGNED · SCULPT NUDGES, NEVER GAMBLES"));
+                   U8 ("VOICE DESIGN \xc2\xb7 FIVE HANDS ON WHATEVER IS LOADED"),
+                   U8 ("128 = AS DESIGNED \xc2\xb7 SCULPT NUDGES, NEVER GAMBLES"));
     g.setColour (C::HAIRLINE);
     g.fillRect (rcDesignHead.getX(), rcDesignHead.getBottom() - 1,
                 rcDesignHead.getWidth(), 1);
@@ -1563,16 +1567,16 @@ void RackPanel::paint (juce::Graphics& g)
 
     /* ---- p0-p7 rows ----------------------------------------------------- */
     paintLabelRow (g, rcParamHead,
-                   U8 ("EXPRESSION PARAMETERS · p0–p7 · "
+                   U8 ("EXPRESSION PARAMETERS \xc2\xb7 p0\xe2\x80\x93p7 \xc2\xb7 "
                        "ROLE INFERRED FROM BYTECODE"),
-                   U8 ("0–255 · DRAG SIDE-TO-SIDE · "
-                       "RIGHT-CLICK → LEARN (R8)"));
+                   U8 ("0\xe2\x80\x93""255 \xc2\xb7 DRAG SIDE-TO-SIDE \xc2\xb7 "
+                       "RIGHT-CLICK \xe2\x86\x92 LEARN (R8)"));
     g.setColour (C::HAIRLINE);
     g.fillRect (rcParamHead.getX(), rcParamHead.getBottom() - 1, rcParamHead.getWidth(), 1);
     g.fillRect (rcParamArea.getX(), rcParamArea.getBottom(), rcParamArea.getWidth(), 1);
 
     /* ---- post chain ------------------------------------------------------ */
-    paintLabelRow (g, rcPostHead, U8 ("POST CHAIN · PER-VOICE DIRT"));
+    paintLabelRow (g, rcPostHead, U8 ("POST CHAIN \xc2\xb7 PER-VOICE DIRT"));
     g.setColour (C::HAIRLINE);
     g.fillRect (rcPostHead.getX(), rcPostHead.getBottom() - 1, rcPostHead.getWidth(), 1);
     g.fillRect (rcPostCol.getRight() - 1, rcPostCol.getY(), 1, rcPostCol.getHeight());
@@ -1580,7 +1584,7 @@ void RackPanel::paint (juce::Graphics& g)
 
     g.setColour (C::INK_FAINT);
     g.setFont (Type::mono (8.0f, 0.10f));
-    g.drawText (U8 ("DRIVE → TONE → CRUSH → SPACE(T/FB/MIX)"),
+    g.drawText (U8 ("DRIVE \xe2\x86\x92 TONE \xe2\x86\x92 CRUSH \xe2\x86\x92 SPACE(T/FB/MIX)"),
                 rcPostFoot.reduced (10, 0), Justification::centredLeft);
     {
         const juce::String tag = "R4 INSERTS PLANNED";
@@ -1600,14 +1604,14 @@ void RackPanel::paint (juce::Graphics& g)
         Rectangle<int> hr = rcSeqHead.reduced (10, 0);
         g.setColour (C::INK_DIM);
         g.setFont (Type::label());
-        const juce::String t1 = U8 ("SEQUENCER · 1 BAR / 16TH");
+        const juce::String t1 = U8 ("SEQUENCER \xc2\xb7 1 BAR / 16TH");
         g.drawText (t1, hr, Justification::centredLeft);
         const int w1 = textW (Type::label(), t1);
         g.setColour (C::INK_FAINT);
         g.setFont (Type::mono (8.0f, 0.10f));
-        g.drawText (U8 ("CLICK CELL → OFF / HIT / ACCENT"),
+        g.drawText (U8 ("CLICK CELL \xe2\x86\x92 OFF / HIT / ACCENT"),
                     hr.withTrimmedLeft (w1 + 10), Justification::centredLeft);
-        g.drawText (U8 ("EUCLID · PROB · RATCHET"),
+        g.drawText (U8 ("EUCLID \xc2\xb7 PROB \xc2\xb7 RATCHET"),
                     hr, Justification::centredRight);
         g.setColour (C::HAIRLINE);
         g.fillRect (rcSeqHead.getX(), rcSeqHead.getBottom() - 1, rcSeqHead.getWidth(), 1);
