@@ -1,0 +1,98 @@
+name: build
+
+# MORGUE was Clang-only for most of its life and nobody knew, because it was
+# only ever built on one machine. bytebeat.h pulled C11 <stdatomic.h> into C++
+# translation units, which Apple Clang tolerates as an extension and MSVC and
+# g++ both reject -- so "it works on my Mac" hid a defect that made the whole
+# project unbuildable everywhere else.
+#
+# This matrix exists so that can never be true again. It is the only thing that
+# actually verifies the cross-platform claim; everything else is assertion.
+
+on:
+  push:
+    branches: [ main, windows-port ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ------------------------------------------------------------------
+  # The engine and its regression suite, with NO JUCE.
+  #
+  # Deliberately a separate job from the GUI, and deliberately runs
+  # WITHOUT checking out the submodule: the suite is the thing that
+  # proves the instrument still sounds the same, and it must never be
+  # gated on a 94 MB dependency or on a windowing system. If this job
+  # is green the engine is correct on that platform, full stop.
+  # ------------------------------------------------------------------
+  engine:
+    name: engine + suite (${{ matrix.os }}, ${{ matrix.cc }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  cc: gcc,    preset: linux-gcc-relwithdebinfo }
+          - { os: ubuntu-latest,  cc: clang,  preset: linux-clang-relwithdebinfo }
+          - { os: macos-latest,   cc: clang,  preset: macos-clang-relwithdebinfo }
+          - { os: windows-latest, cc: msvc,   preset: windows-msvc-relwithdebinfo }
+    steps:
+      - uses: actions/checkout@v4        # no submodules: JUCE is not needed here
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build engine and tests
+        run: cmake --build --preset ${{ matrix.preset }} --target morgue-tests
+
+      - name: Run the regression suite
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+
+  # ------------------------------------------------------------------
+  # The full console. Needs JUCE, and on Linux needs JUCE's system deps.
+  # ------------------------------------------------------------------
+  console:
+    name: MORGUE (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  preset: linux-gcc-relwithdebinfo }
+          - { os: macos-latest,   preset: macos-clang-relwithdebinfo }
+          - { os: windows-latest, preset: windows-msvc-relwithdebinfo }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive        # JUCE 8.0.15, pinned
+
+      # JUCE's Linux dependencies. JUCE_WEB_BROWSER=0 in CMakeLists is what
+      # keeps libwebkit2gtk off this list -- left at its default it becomes a
+      # hard build dependency for an instrument that never opens a web view.
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libfreetype6-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+            libxinerama-dev libxrandr-dev libxrender-dev \
+            libglu1-mesa-dev mesa-common-dev
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build the console
+        run: cmake --build --preset ${{ matrix.preset }} --target MORGUE
