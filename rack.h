@@ -24,6 +24,10 @@
 #ifndef RACK_H
 #define RACK_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "bytebeat.h"
 #include "knob.h"
 
@@ -47,6 +51,28 @@ typedef struct {
     RackSlot slot[RACK_MAX_SLOTS];
     int      nslot;
 } RackBuild;
+
+/* ---- the patch morgue ---------------------------------------------------
+ * A curated bank of named, known-good voices: a source plus the settings
+ * that make it a SOUND (params, post chain, envelope, chamber send).
+ * Composing starts from one of these, not from a blank layer or a random
+ * roll. Data only -- the front end applies it through its normal paths, so
+ * every value lands in the same atomics a hand on a knob would reach. */
+#define RACK_PATCH_SET 4
+typedef struct {
+    const char *name;         /* evidence-tag label, caps          */
+    const char *src;          /* source-table name                 */
+    unsigned char body, space, seq;
+    unsigned char decay;      /* LCTL_DECAY; 0 = hold              */
+    unsigned char drive, tone, crush;
+    unsigned char spc_t, spc_fb, spc_mix;
+    unsigned char send;       /* CHAMBER send                      */
+    unsigned char nset;       /* sparse param overrides over seeds */
+    struct { unsigned char idx, val; } set[RACK_PATCH_SET];
+} RackPatch;
+
+int              rack_npatch(void);
+const RackPatch *rack_patch(int i);
 
 /* A rack that makes a sound the moment it is applied. */
 void rack_default(Rack *r);
@@ -77,5 +103,9 @@ void        rack_src_shape_text(int i, char *buf, size_t n);
  * because `ramp` wants BYTE (it IS a byte counter) and `pair` wants WORD. */
 int         rack_src_mode(int i);
 int         rack_src_triggered(int i);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RACK_H */

@@ -167,6 +167,58 @@ static const Src SRC[] = {
     { "RING",  "toward the top, the loop refuses to die.", 0, KV_Q, 250 },
   }, BB_WORD, 1 },
 
+/* The cold wing. Sustained, tunable sources for the synth side of the
+ * instrument: pads, organs, sirens, bells. All of them ride the semitone
+ * voice clock, so the sequencer's per-step PITCH lane plays them as
+ * melodies; all of them are voiced to sit in front of the CHAMBER send. */
+
+{ "cold", "lp(((t*p%d&511)+(t*p%d&511))*24,p%d)",
+  "two cold saws a fixed interval apart. the pad -- sequence it in semitones.",
+  3, {
+    { "PITCH", "the lower saw. this is the root.", 0, KV_MUL, 4 },
+    { "FIFTH", "the upper saw. 3:2 of PITCH is a fifth; nearby is a beating "
+               "cluster.", 0, KV_MUL, 6 },
+    { "DARK",  "lowpass over the pair. the winter control.", 0, KV_CUT, 56 },
+  }, BB_WORD, 0 },
+
+{ "vapor", "lp(((t*p%d&511)+(t*p%d&511))*24,"
+           "(bt*320/bl>160?320-bt*320/bl:bt*320/bl)+p%d)",
+  "the saw pair under a filter that breathes with the beat.",
+  3, {
+    { "PITCH",  "the lower saw.", 0, KV_MUL, 4 },
+    { "THIRD",  "the upper saw; near 5:4 it turns minor daylight grey.",
+      0, KV_MUL, 5 },
+    { "BREATH", "how far the filter opens at the top of each breath.",
+      0, KV_CUT, 20 },
+  }, BB_WORD, 0 },
+
+{ "hymn", "((t*p%d&255)>p%d?9000:-9000)+((t*p%d&255)>127?4500:-4500)",
+  "hollow pulse organ, one register above another. WIDTH thins it to a reed.",
+  3, {
+    { "PITCH",  "the fundamental register.", 0, KV_MUL, 4 },
+    { "WIDTH",  "pulse width. 127 is hollow and square; low is a reed.",
+      0, KV_MASK, 127 },
+    { "QUINT",  "the upper register. 2x PITCH is an octave organ stop.",
+      0, KV_MUL, 8 },
+  }, BB_WORD, 0 },
+
+{ "siren", "bp((r>>p%d),(bt*p%d/bl)+p%d,250)",
+  "a starved resonator dragged across each beat. the whine, the alarm.",
+  3, {
+    { "FEED",  "noise feeding the whine; lower is stronger.", 0, KV_NOISE, 20 },
+    { "SWEEP", "how far the pitch is dragged over one beat.", 0, KV_AMOUNT, 18 },
+    { "PITCH", "where the sweep starts.", 0, KV_RESON, 6 },
+  }, BB_WORD, 0 },
+
+{ "glass", "bp((((age*p%d)&2047)-1024),p%d,p%d)",
+  "a single tuned partial striking a long resonator. cold bell.",
+  3, {
+    { "PARTIAL", "the strike tone; move it against PITCH for shades of "
+                 "inharmonic.", 0, KV_MUL, 9 },
+    { "PITCH",   "frequency of the ringing body.", 0, KV_RESON, 16 },
+    { "RING",    "how long the glass keeps sounding.", 0, KV_Q, 246 },
+  }, BB_WORD, 1 },
+
 };
 #define N_SRC ((int)(sizeof SRC / sizeof SRC[0]))
 
@@ -193,6 +245,35 @@ static const RackSlot SLOT_SPC_T =
 static const RackSlot SLOT_SPC_F =
     { "FEED",  "how much comes back. near the top it will run away -- that is allowed.",
       0, KV_AMOUNT, 150 };
+
+/* ---- the patch morgue ----------------------------------------------------
+ * Sixteen voices that are SOUNDS, not starting points. The first five are
+ * the proven first-run groove voices under their working names; the rest
+ * are curated settings of the remaining sources, cold wing included.
+ * Params not overridden here come from the source's own seed values, which
+ * the suite verifies audible for every source. */
+static const RackPatch PATCH[] = {
+    { "CONCRETE FLOOR",  "thump",    0,0,1, 198, 55,105, 0,  120,150, 40,  40, 0, {{0,0}} },
+    { "BACKROOM SNARE",  "burst",    0,0,1, 228, 70,175, 8,  100,130, 35,  30, 0, {{0,0}} },
+    { "AUTOPSY BELL",    "metal",    1,0,1, 242, 45,150, 20,  80,120, 25,  96, 0, {{0,0}} },
+    { "SAND IN VENTS",   "dust",     1,1,1, 172, 35, 90, 28, 160,190, 75,  70, 0, {{0,0}} },
+    { "BASEMENT TONE",   "fold",     1,1,0,   0, 40, 65, 0,  190,175, 80, 120, 0, {{0,0}} },
+    { "COLD ROOM",       "cold",     0,1,0,   0,  0,255, 0,  180,170, 60, 140, 0, {{0,0}} },
+    { "GREY DAYLIGHT",   "vapor",    0,1,0,   0,  0,255, 0,  170,150, 45, 120, 0, {{0,0}} },
+    { "BLACK ORGAN",     "hymn",     1,0,0,   0, 30,140, 0,  100,  0,  0,  90, 0, {{0,0}} },
+    { "DISTRICT ALARM",  "siren",    0,1,0,   0, 20,220, 0,  200,180, 55, 110, 0, {{0,0}} },
+    { "GLASS AUTOPSY",   "glass",    0,0,1, 250,  0,255, 0,  100,  0,  0, 130, 0, {{0,0}} },
+    { "MEAT LOCKER HUM", "stack",    1,0,0,   0, 25, 90, 0,  100,  0,  0,  60, 0, {{0,0}} },
+    { "TAPE WIND",       "noise",    1,1,0,   0,  0, 60, 0,  190,190, 90,  80, 1, {{0,16}} },
+    { "WIRE MOTHER",     "feedback", 0,0,1,   0,  0,255, 0,  100,  0,  0, 100, 0, {{0,0}} },
+    { "CELLAR PULSE",    "pulse",    1,0,1, 120, 45,120, 0,  100,  0,  0,  40, 0, {{0,0}} },
+    { "RUST CHIME",      "ring",     1,0,1, 210,  0,130, 0,  100,  0,  0,  90, 0, {{0,0}} },
+    { "FLUORESCENT ROT", "crackle",  0,1,0,   0,  0,200, 40, 140,170, 70,  70, 0, {{0,0}} },
+};
+#define N_PATCH ((int)(sizeof PATCH / sizeof PATCH[0]))
+
+int              rack_npatch(void)   { return N_PATCH; }
+const RackPatch *rack_patch(int i)   { return &PATCH[((i % N_PATCH) + N_PATCH) % N_PATCH]; }
 
 /* ---- public ------------------------------------------------------------- */
 

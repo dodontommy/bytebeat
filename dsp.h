@@ -11,6 +11,10 @@
 #ifndef DSP_H
 #define DSP_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
 typedef struct {
@@ -47,5 +51,9 @@ int32_t dsp_dcblock(PostState *ps, int32_t x);
 /* Hard-limit to the int16 range. Exposed because the audio thread needs it
  * after applying master gain too. */
 int32_t dsp_clip16(int32_t x);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* DSP_H */

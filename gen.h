@@ -15,6 +15,10 @@
 #ifndef GEN_H
 #define GEN_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "bytebeat.h"
 #include "rack.h"
 
@@ -60,5 +64,9 @@ void gen_euclid(int n, int pulses, int *gate);
  * Exposed because the UI wants to report the level of hand-edited patches
  * too, not just generated ones. */
 int  gen_measure(const Voice *v);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* GEN_H */

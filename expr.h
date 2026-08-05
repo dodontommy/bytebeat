@@ -7,6 +7,10 @@
 #ifndef EXPR_H
 #define EXPR_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -156,5 +160,9 @@ int32_t expr_eval(const Program *pr, ExprCtx *c);
 
 /* Human-readable one-line summary of the language, for the help overlay. */
 const char *const *expr_help_lines(int *count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* EXPR_H */

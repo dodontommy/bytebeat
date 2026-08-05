@@ -1,0 +1,1528 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@600;700&display=swap" rel="stylesheet" />
+<style>
+  body { margin:0; background:#050505; }
+  a { color:#8b1e14; text-decoration:none; }
+  a:hover { color:#c2301f; }
+</style>
+</helmet>
+
+<div style="display:flex;flex-direction:column;gap:56px;padding:56px;background:#050505;font-family:'IBM Plex Mono',monospace;align-items:flex-start">
+
+<section style="display:flex;flex-direction:column;gap:14px;width:1440px">
+  <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:44px;letter-spacing:.22em;color:#ded9ce;line-height:1">MORGUE</div>
+  <div style="font-size:11px;letter-spacing:.2em;color:#8a8579">GUI SPECIFICATION SHEET · 1440 × 900 · JUCE 8.0.15 / macOS · ALL COORDINATES IN LOGICAL PX AT 1.0 SCALE</div>
+  <div style="height:1px;background:#232220"></div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+    <sc-for list="{{ index }}" as="ix" hint-placeholder-count="10">
+      <div style="display:flex;gap:8px;font-size:10px;letter-spacing:.1em;border-left:1px solid #232220;padding-left:8px">
+        <span style="color:#8b1e14">{{ ix.n }}</span>
+        <span style="color:#ded9ce">{{ ix.name }}</span>
+        <span style="color:#55524b;margin-left:auto">{{ ix.status }}</span>
+      </div>
+    </sc-for>
+  </div>
+</section>
+
+<!-- ══════════ 01 RACK ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">01</span><span style="color:#ded9ce">RACK — VOICE STATION</span><span>TAB 1/8 · LIVE · THE HEART OF THE INSTRUMENT</span></div>
+  <div data-screen-label="01 RACK" style="width:1440px;height:900px;background:#0a0a0a;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px;overflow:hidden">
+
+    <div style="height:26px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;background:#121110;border-bottom:1px solid #232220">
+      <div style="display:flex;gap:6px"><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div></div>
+      <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:11px;letter-spacing:.34em">MORGUE</div>
+      <div style="font-size:9px;color:#55524b;letter-spacing:.06em">~/MORGUE/session.conf</div>
+      <div style="margin-left:auto;font-size:9px;color:#55524b;letter-spacing:.14em">N.72-0418</div>
+    </div>
+
+    <div style="height:30px;flex:none;display:flex;background:#0e0d0c;border-bottom:1px solid #232220">
+      <sc-for list="{{ tabsRack }}" as="t" hint-placeholder-count="8">
+        <div style="display:flex;align-items:center;padding:0 15px;font-size:10px;letter-spacing:.18em;color:{{ t.fg }};background:{{ t.bg }};border-right:1px solid #232220;border-bottom:2px solid {{ t.line }}">{{ t.label }}</div>
+      </sc-for>
+      <div style="margin-left:auto;display:flex;align-items:center;padding:0 12px;font-size:9px;letter-spacing:.14em;color:#6b6760;border-left:1px solid #232220">INFO / ?</div>
+    </div>
+
+    <div style="flex:1;min-height:0;display:flex">
+
+      <div style="width:236px;flex:none;display:flex;flex-direction:column;border-right:1px solid #232220;background:#0c0b0a">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>LOCKER</span><span style="margin-left:auto;color:#55524b">~/MORGUE</span></div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <sc-for list="{{ lockerFiles }}" as="f" hint-placeholder-count="12">
+            <div style="display:flex;align-items:center;gap:8px;height:26px;flex:none;padding:0 8px;border-bottom:1px solid #17161500;background:{{ f.bg }}">
+              <div style="width:52px;font-size:8px;letter-spacing:.06em;color:{{ f.serialFg }}">{{ f.serial }}</div>
+              <div style="flex:1;font-size:10px;color:{{ f.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.name }}</div>
+              <div style="font-size:8px;color:#55524b">{{ f.meta }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="height:20px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;border-top:1px solid #232220;font-size:8px;letter-spacing:.12em;color:#55524b"><span>14 SPECIMENS</span><span style="margin-left:auto">R7 DRAG-DROP: PLANNED</span></div>
+
+        <div style="height:198px;flex:none;border-top:1px solid #232220;display:flex;flex-direction:column;background:#060606">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>SCOPE</span><span style="margin-left:auto;color:#55524b">MASTER · 30Hz</span></div>
+          <div style="flex:1;position:relative;padding:6px">
+            <div style="position:absolute;left:6px;right:6px;top:50%;height:1px;background:#232220"></div>
+            <svg viewBox="0 0 220 140" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+              <polyline points="{{ scopePts }}" fill="none" stroke="#ded9ce" stroke-width="1" vector-effect="non-scaling-stroke"></polyline>
+            </svg>
+          </div>
+          <div style="height:18px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;font-size:8px;letter-spacing:.1em;color:#55524b"><span>PRE-GAIN</span><span>PRE-MUTE</span><span style="margin-left:auto;color:#8a8579">PK -1.8dB</span></div>
+        </div>
+      </div>
+
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+
+        <div style="height:24px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.18em;color:#8a8579">
+          <span style="color:#3a3833">+</span><span style="color:#ded9ce;font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;letter-spacing:.24em;font-size:11px">RACK</span><span>VOICE STATION · 8-LAYER BYTEBEAT</span>
+          <span style="margin-left:auto;color:#55524b">SPEC N.72-0418 · REV 11</span><span style="border:1px solid #8b1e14;color:#c2301f;padding:1px 5px;font-size:8px;letter-spacing:.14em">LIVE</span>
+        </div>
+
+        <div style="height:46px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #232220;background:#0e0d0c">
+          <div style="font-size:8px;letter-spacing:.14em;color:#55524b;width:34px">VOICE</div>
+          <div style="display:flex;gap:3px">
+            <sc-for list="{{ voices }}" as="v" hint-placeholder-count="8">
+              <div style="width:30px;height:26px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:{{ v.bg }};border:1px solid {{ v.bd }};color:{{ v.fg }};font-size:10px;letter-spacing:.04em">
+                <span>{{ v.n }}</span>
+                <div style="width:4px;height:4px;background:{{ v.dot }};margin-top:2px"></div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="width:1px;height:26px;background:#232220"></div>
+          <div style="display:flex;gap:4px">
+            <div style="height:26px;display:flex;align-items:center;padding:0 12px;background:#1b1a17;border:1px solid #3a3833;font-size:10px;letter-spacing:.16em;color:#ded9ce">ROLL</div>
+            <div style="height:26px;display:flex;align-items:center;padding:0 12px;background:#1b1a17;border:1px solid #3a3833;font-size:10px;letter-spacing:.16em;color:#ded9ce">MUTATE</div>
+          </div>
+          <div style="width:1px;height:26px;background:#232220"></div>
+          <div style="display:flex;gap:4px">
+            <div style="height:26px;display:flex;align-items:center;gap:6px;padding:0 10px;background:#2a0d09;border:1px solid #8b1e14;font-size:10px;letter-spacing:.16em;color:#e8ddd4"><div style="width:5px;height:5px;background:#c2301f"></div>BODY</div>
+            <div style="height:26px;display:flex;align-items:center;gap:6px;padding:0 10px;background:#131211;border:1px solid #3a3833;font-size:10px;letter-spacing:.16em;color:#6b6760"><div style="width:5px;height:5px;background:#2a2927"></div>SPACE</div>
+          </div>
+          <div style="margin-left:auto;display:flex;gap:14px;font-size:8px;letter-spacing:.1em;color:#55524b"><span>GATE ENV · DC-BLOCK ALWAYS ON</span><span style="color:#8a8579">FOCUS → MIDI NOTE / CC</span></div>
+        </div>
+
+        <div style="flex:1;min-height:0;display:flex">
+
+          <div style="width:222px;flex:none;border-right:1px solid #232220;display:flex;flex-direction:column;background:#0c0b0a">
+            <div style="height:20px;flex:none;display:flex;align-items:center;padding:0 8px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579">SOURCE · 17 GENERATORS</div>
+            <div style="flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;gap:1px;padding:6px;align-content:start">
+              <sc-for list="{{ sources }}" as="s" hint-placeholder-count="17">
+                <div style="height:22px;display:flex;align-items:center;gap:5px;padding:0 6px;background:{{ s.bg }};border:1px solid {{ s.bd }};font-size:9px;letter-spacing:.1em;color:{{ s.fg }}">
+                  <span style="color:{{ s.numFg }};font-size:8px">{{ s.n }}</span><span>{{ s.name }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;border-top:1px solid #232220;font-size:8px;letter-spacing:.1em;color:#55524b">AUDITION ON SELECT · NO-GLITCH SWAP</div>
+          </div>
+
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+
+            <div style="flex:none;display:flex;flex-direction:column;border-bottom:1px solid #232220">
+              <div style="height:20px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579"><span>EXPRESSION · VOICE 02 · BYTEBEAT VM</span><span style="margin-left:auto;color:#55524b">RETURN = COMPILE · CURSOR HELD</span></div>
+              <div style="height:122px;background:#060606;padding:8px 10px;display:flex;flex-direction:column;gap:3px;font-size:12px;line-height:1.5;color:#c9c4b8">
+                <div><span style="color:#55524b">01 </span>t*((t&gt;&gt;9|t&gt;&gt;13)&amp;15)&amp;127</div>
+                <div><span style="color:#55524b">02 </span>+ (((t&gt;&gt;p0)^(t&gt;&gt;p1)) &amp; p2)</div>
+                <div><span style="color:#55524b">03 </span>* env(p6) &gt;&gt; (p3&amp;7)</div>
+                <div style="display:flex;align-items:center;gap:0"><span style="color:#55524b">04 </span><span style="width:8px;height:15px;background:#8b1e14"></span></div>
+                <div style="margin-top:auto;display:flex;gap:12px;font-size:9px;color:#55524b;letter-spacing:.08em"><span>4 LINES · 71 BYTES</span><span style="color:#7c8a5a">COMPILED 00:00:03 AGO</span><span style="margin-left:auto">VM OPS 214/512</span></div>
+              </div>
+            </div>
+
+            <div style="flex:none;border-bottom:1px solid #232220">
+              <div style="height:20px;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579"><span>EXPRESSION PARAMETERS · p0–p7 · ROLE INFERRED FROM BYTECODE</span><span style="margin-left:auto;color:#55524b">0–255 · DRAG SIDE-TO-SIDE · RIGHT-CLICK → LEARN (R8)</span></div>
+              <div style="display:flex;gap:0;padding:8px 6px">
+                <sc-for list="{{ pKnobs }}" as="k" hint-placeholder-count="8">
+                  <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">
+                    <div style="width:44px;height:44px;border-radius:50%;background:#171614;border:1px solid {{ k.ring }};position:relative">
+                      <div style="position:absolute;left:50%;top:4px;width:1px;height:15px;background:{{ k.cut }};transform-origin:50% 18px;transform:rotate({{ k.deg }}deg)"></div>
+                      <div style="position:absolute;inset:9px;border-radius:50%;border:1px solid #201f1c"></div>
+                    </div>
+                    <div style="font-size:8px;letter-spacing:.1em;color:{{ k.fg }}">{{ k.label }}</div>
+                    <div style="font-size:10px;color:{{ k.valFg }};letter-spacing:.06em">{{ k.val }}</div>
+                    <div style="font-size:7px;color:#3a3833">p{{ k.i }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="flex:1;min-height:0;display:flex">
+              <div style="flex:none;width:420px;border-right:1px solid #232220;display:flex;flex-direction:column">
+                <div style="height:20px;flex:none;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579">POST CHAIN · PER-VOICE DIRT</div>
+                <div style="flex:1;display:flex;align-items:center;gap:0;padding:0 6px">
+                  <sc-for list="{{ postKnobs }}" as="k" hint-placeholder-count="6">
+                    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">
+                      <div style="width:40px;height:40px;border-radius:50%;background:#171614;border:1px solid {{ k.ring }};position:relative">
+                        <div style="position:absolute;left:50%;top:4px;width:1px;height:13px;background:{{ k.cut }};transform-origin:50% 16px;transform:rotate({{ k.deg }}deg)"></div>
+                      </div>
+                      <div style="font-size:8px;letter-spacing:.1em;color:{{ k.fg }}">{{ k.label }}</div>
+                      <div style="font-size:10px;color:{{ k.valFg }}">{{ k.val }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="height:20px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;border-top:1px solid #232220;font-size:8px;letter-spacing:.1em;color:#55524b"><span>DRIVE → TONE → CRUSH → SPACE(T/FB/MIX)</span><span style="margin-left:auto;border:1px solid #6b4a2a;color:#8a5a2b;padding:0 4px">R4 INSERTS PLANNED</span></div>
+              </div>
+
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+                <div style="height:20px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579"><span>SEQUENCER · 1 BAR / 16TH</span><span style="color:#55524b">CLICK CELL → OFF / HIT / ACCENT</span><span style="margin-left:auto;color:#55524b">EUCLID · PROB · RATCHET</span></div>
+                <div style="flex:1;display:flex;flex-direction:column;gap:6px;padding:8px 10px">
+                  <div style="display:flex;gap:2px">
+                    <sc-for list="{{ steps }}" as="c" hint-placeholder-count="16">
+                      <div style="flex:1;height:38px;background:{{ c.bg }};border:1px solid {{ c.bd }};display:flex;align-items:center;justify-content:center;position:relative">
+                        <div style="width:6px;height:6px;background:{{ c.dot }}"></div>
+                        <div style="position:absolute;bottom:1px;right:2px;font-size:6px;color:{{ c.numFg }}">{{ c.n }}</div>
+                      </div>
+                    </sc-for>
+                  </div>
+                  <div style="display:flex;gap:2px;align-items:flex-end">
+                    <sc-for list="{{ lockLane }}" as="l" hint-placeholder-count="16">
+                      <div style="flex:1;height:40px;background:#0c0b0a;border:1px solid #1c1b19;display:flex;align-items:flex-end">
+                        <div style="width:100%;height:{{ l.h }}%;background:{{ l.fill }}"></div>
+                      </div>
+                    </sc-for>
+                  </div>
+                  <div style="display:flex;gap:10px;font-size:8px;letter-spacing:.1em;color:#55524b"><span>LOCK LANE 01/16 · p1 FILTER · MOTION: SMOOTH</span><span style="margin-left:auto;color:#8a8579">M = CAPTURE MOTION (R3)</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#121110;border-top:1px solid #2a2927">
+      <div style="display:flex;gap:4px">
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4;font-size:11px;letter-spacing:.18em">RUN<div style="width:5px;height:5px;background:#c2301f"></div></div>
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">CUT<div style="width:5px;height:5px;background:#2a2927"></div></div>
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">REC<div style="width:5px;height:5px;background:#2a2927"></div></div>
+        <div style="width:52px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#6b6760;font-size:11px;letter-spacing:.18em">?</div>
+      </div>
+      <div style="width:1px;height:38px;background:#2a2927"></div>
+      <div style="display:flex;gap:16px">
+        <sc-for list="{{ transportKnobs }}" as="k" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:34px;height:34px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative">
+              <div style="position:absolute;left:50%;top:3px;width:1px;height:12px;background:#ded9ce;transform-origin:50% 14px;transform:rotate({{ k.deg }}deg)"></div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:1px">
+              <div style="font-size:8px;letter-spacing:.14em;color:#8a8579">{{ k.label }}</div>
+              <div style="font-size:15px;letter-spacing:.04em;color:#ded9ce">{{ k.val }}</div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin-left:auto;display:flex;flex-direction:column;gap:3px;align-items:flex-end">
+        <div style="font-size:8px;letter-spacing:.12em;color:#55524b">MASTER · POST-GAIN</div>
+        <div style="display:flex;gap:2px;align-items:flex-end;height:22px">
+          <div style="width:120px;height:7px;background:#0c0b0a;border:1px solid #232220;display:flex"><div style="width:72%;background:#8b1e14"></div><div style="width:9%;background:#b8862b"></div></div>
+        </div>
+        <div style="font-size:8px;color:#55524b;letter-spacing:.1em">L -3.1 / R -2.7 dBFS</div>
+      </div>
+    </div>
+
+    <div style="height:20px;flex:none;display:flex;align-items:center;gap:16px;padding:0 10px;background:#0e0d0c;border-top:1px solid #232220;font-size:9px;letter-spacing:.12em;color:#6b6760">
+      <span>BAR 003</span><span>STEP 07/16</span><span style="color:#8a8579">CPU 41%</span><span style="color:#3a3833">CLIP</span><span>44100 Hz · 128 SMP</span>
+      <span style="margin-left:auto;color:#55524b">PRESS ? FOR A MAP OF THIS CONSOLE</span>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════ 02 ARRANGE ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">02</span><span style="color:#ded9ce">ARRANGE — MORGUE PLAYLIST</span><span>TAB 2/8 · R2 + R3 PLANNED · TIMELINE, CLIPS, AUTOMATION</span></div>
+  <div data-screen-label="02 ARRANGE" style="width:1440px;height:900px;background:#0a0a0a;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px;overflow:hidden">
+
+    <div style="height:26px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;background:#121110;border-bottom:1px solid #232220">
+      <div style="display:flex;gap:6px"><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div></div>
+      <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:11px;letter-spacing:.34em">MORGUE</div>
+      <div style="font-size:9px;color:#55524b">~/MORGUE/session.conf</div>
+      <div style="margin-left:auto;font-size:9px;color:#55524b;letter-spacing:.14em">N.72-0418</div>
+    </div>
+    <div style="height:30px;flex:none;display:flex;background:#0e0d0c;border-bottom:1px solid #232220">
+      <sc-for list="{{ tabsArr }}" as="t" hint-placeholder-count="8">
+        <div style="display:flex;align-items:center;padding:0 15px;font-size:10px;letter-spacing:.18em;color:{{ t.fg }};background:{{ t.bg }};border-right:1px solid #232220;border-bottom:2px solid {{ t.line }}">{{ t.label }}</div>
+      </sc-for>
+      <div style="margin-left:auto;display:flex;align-items:center;padding:0 12px;font-size:9px;letter-spacing:.14em;color:#6b6760;border-left:1px solid #232220">INFO / ?</div>
+    </div>
+
+    <div style="flex:1;min-height:0;display:flex">
+      <div style="width:236px;flex:none;display:flex;flex-direction:column;border-right:1px solid #232220;background:#0c0b0a">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>LOCKER</span><span style="margin-left:auto;color:#55524b">DRAG → LANE</span></div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <sc-for list="{{ lockerFiles }}" as="f" hint-placeholder-count="12">
+            <div style="display:flex;align-items:center;gap:8px;height:26px;flex:none;padding:0 8px;background:{{ f.bg }}">
+              <div style="width:52px;font-size:8px;color:{{ f.serialFg }}">{{ f.serial }}</div>
+              <div style="flex:1;font-size:10px;color:{{ f.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.name }}</div>
+              <div style="font-size:8px;color:#55524b">{{ f.meta }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="height:20px;flex:none;display:flex;align-items:center;padding:0 8px;border-top:1px solid #232220;font-size:8px;letter-spacing:.12em;color:#55524b">14 SPECIMENS</div>
+        <div style="height:198px;flex:none;border-top:1px solid #232220;display:flex;flex-direction:column;background:#060606">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>SCOPE</span></div>
+          <div style="flex:1;position:relative;padding:6px">
+            <div style="position:absolute;left:6px;right:6px;top:50%;height:1px;background:#232220"></div>
+            <svg viewBox="0 0 220 140" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ scopePts }}" fill="none" stroke="#ded9ce" stroke-width="1" vector-effect="non-scaling-stroke"></polyline></svg>
+          </div>
+          <div style="height:18px;flex:none;display:flex;align-items:center;padding:0 8px;font-size:8px;color:#55524b">SONG POS 011:03:2</div>
+        </div>
+      </div>
+
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+        <div style="height:24px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.18em;color:#8a8579">
+          <span style="color:#3a3833">+</span><span style="color:#ded9ce;font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;letter-spacing:.24em;font-size:11px">ARRANGE</span><span>MORGUE PLAYLIST · 64 BARS</span>
+          <span style="margin-left:auto;color:#55524b">SNAP 1/4 · ZOOM 2 BAR/IN</span><span style="border:1px solid #6b4a2a;color:#8a5a2b;padding:1px 5px;font-size:8px;letter-spacing:.14em">R2 PLANNED</span>
+        </div>
+
+        <div style="height:30px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;border-bottom:1px solid #232220;background:#0e0d0c;font-size:9px;letter-spacing:.14em;color:#8a8579">
+          <div style="display:flex;gap:3px">
+            <div style="padding:3px 8px;background:#1b1a17;border:1px solid #3a3833;color:#ded9ce">SELECT</div>
+            <div style="padding:3px 8px;background:#131211;border:1px solid #232220;color:#6b6760">DRAW</div>
+            <div style="padding:3px 8px;background:#131211;border:1px solid #232220;color:#6b6760">TRIM</div>
+            <div style="padding:3px 8px;background:#131211;border:1px solid #232220;color:#6b6760">SLIP</div>
+          </div>
+          <div style="width:1px;height:18px;background:#232220"></div>
+          <div style="display:flex;gap:3px"><div style="padding:3px 8px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4">ARM LANE</div><div style="padding:3px 8px;background:#131211;border:1px solid #232220;color:#6b6760">LOOP CLIP</div><div style="padding:3px 8px;background:#131211;border:1px solid #232220;color:#6b6760">CONSOLIDATE</div></div>
+          <div style="margin-left:auto;color:#55524b;font-size:8px">MULTITRACK REC ROUTES PER-VOICE OUT → LANE</div>
+        </div>
+
+        <div style="height:22px;flex:none;display:flex;border-bottom:1px solid #232220;background:#0c0b0a">
+          <div style="width:120px;flex:none;border-right:1px solid #232220;display:flex;align-items:center;padding:0 8px;font-size:8px;letter-spacing:.12em;color:#55524b">BAR</div>
+          <div style="flex:1;display:flex;position:relative">
+            <sc-for list="{{ bars }}" as="b" hint-placeholder-count="32">
+              <div style="flex:1;border-right:1px solid {{ b.line }};display:flex;align-items:center;padding-left:3px;font-size:8px;color:{{ b.fg }}">{{ b.n }}</div>
+            </sc-for>
+            <div style="position:absolute;left:34.4%;top:0;bottom:0;width:1px;background:#c2301f"></div>
+          </div>
+        </div>
+
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;position:relative">
+          <sc-for list="{{ lanes }}" as="ln" hint-placeholder-count="10">
+            <div style="height:{{ ln.h }}px;flex:none;display:flex;border-bottom:1px solid #1c1b19">
+              <div style="width:120px;flex:none;border-right:1px solid #232220;background:#0c0b0a;display:flex;align-items:center;gap:6px;padding:0 6px">
+                <div style="width:5px;height:5px;background:{{ ln.armDot }}"></div>
+                <div style="font-size:9px;letter-spacing:.08em;color:{{ ln.fg }};flex:1;white-space:nowrap;overflow:hidden">{{ ln.name }}</div>
+                <div style="font-size:7px;color:#55524b">{{ ln.kind }}</div>
+              </div>
+              <div style="flex:1;position:relative;background:{{ ln.bg }}">
+                <sc-for list="{{ ln.clips }}" as="cl" hint-placeholder-count="2">
+                  <div style="position:absolute;top:2px;bottom:2px;left:{{ cl.left }}%;width:{{ cl.w }}%;background:{{ cl.bg }};border:1px solid {{ cl.bd }};display:flex;flex-direction:column;justify-content:space-between;overflow:hidden">
+                    <div style="font-size:8px;letter-spacing:.06em;color:{{ cl.fg }};padding:1px 3px;background:{{ cl.bd }};white-space:nowrap">{{ cl.name }}</div>
+                    <div style="height:{{ cl.wave }}px;margin:0 2px 2px;background:repeating-linear-gradient(90deg,{{ cl.fg }} 0 1px,transparent 1px 3px);opacity:.5"></div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-for>
+          <div style="position:absolute;left:120px;right:0;top:0;bottom:0;pointer-events:none"><div style="position:absolute;left:34.4%;top:0;bottom:0;width:1px;background:#c2301f"></div></div>
+        </div>
+
+        <div style="height:96px;flex:none;border-top:1px solid #2a2927;display:flex;flex-direction:column;background:#0c0b0a">
+          <div style="height:20px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.14em;color:#8a8579"><span>MOTION · AUTOMATION LANE</span><span style="color:#ded9ce">V02 · p1 FILTER</span><span style="color:#55524b">MODE: SMOOTH</span><span style="border:1px solid #8b1e14;color:#c2301f;padding:0 4px">ARM CAPTURE</span><span style="margin-left:auto;color:#55524b">R3 · STEP | SMOOTH · CLICK-DRAG TO DRAW</span></div>
+          <div style="flex:1;display:flex">
+            <div style="width:120px;flex:none;border-right:1px solid #232220;display:flex;flex-direction:column;justify-content:space-between;padding:4px 6px;font-size:8px;color:#55524b"><span>255</span><span>128</span><span>000</span></div>
+            <div style="flex:1;position:relative;padding:4px 0">
+              <div style="position:absolute;left:0;right:0;top:50%;height:1px;background:#1c1b19"></div>
+              <svg viewBox="0 0 1000 60" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ autoPts }}" fill="none" stroke="#8a5a2b" stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>
+              <div style="position:absolute;left:34.4%;top:0;bottom:0;width:1px;background:#c2301f"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#121110;border-top:1px solid #2a2927">
+      <div style="display:flex;gap:4px">
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4;font-size:11px;letter-spacing:.18em">RUN<div style="width:5px;height:5px;background:#c2301f"></div></div>
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">CUT<div style="width:5px;height:5px;background:#2a2927"></div></div>
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4;font-size:11px;letter-spacing:.18em">REC<div style="width:5px;height:5px;background:#c2301f"></div></div>
+        <div style="width:52px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#6b6760;font-size:11px">?</div>
+      </div>
+      <div style="width:1px;height:38px;background:#2a2927"></div>
+      <div style="display:flex;gap:16px">
+        <sc-for list="{{ transportKnobs }}" as="k" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:34px;height:34px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:12px;background:#ded9ce;transform-origin:50% 14px;transform:rotate({{ k.deg }}deg)"></div></div>
+            <div style="display:flex;flex-direction:column;gap:1px"><div style="font-size:8px;letter-spacing:.14em;color:#8a8579">{{ k.label }}</div><div style="font-size:15px;color:#ded9ce">{{ k.val }}</div></div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin-left:auto;display:flex;flex-direction:column;gap:2px;align-items:flex-end;font-size:9px;color:#8a8579;letter-spacing:.1em"><span>SONG 011:03:2</span><span style="color:#55524b;font-size:8px">SCRUB → bb.k</span></div>
+    </div>
+    <div style="height:20px;flex:none;display:flex;align-items:center;gap:16px;padding:0 10px;background:#0e0d0c;border-top:1px solid #232220;font-size:9px;letter-spacing:.12em;color:#6b6760">
+      <span>BAR 011</span><span>STEP 14/16</span><span style="color:#b8862b">CPU 68%</span><span style="color:#3a3833">CLIP</span><span>REC → LANE 03</span><span style="margin-left:auto;color:#55524b">PRESS ? FOR A MAP OF THIS CONSOLE</span>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════ 03 GRAIN LICKS ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">03</span><span style="color:#ded9ce">GRAIN LICKS — STEP SAMPLER</span><span>TAB 3/8 · R1 PLANNED · RECORD → SEQUENCE A RHYTHM</span></div>
+  <div data-screen-label="03 GRAIN LICKS" style="width:1440px;height:900px;background:#0a0a0a;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px;overflow:hidden">
+    <div style="height:26px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;background:#121110;border-bottom:1px solid #232220">
+      <div style="display:flex;gap:6px"><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div></div>
+      <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:11px;letter-spacing:.34em">MORGUE</div>
+      <div style="margin-left:auto;font-size:9px;color:#55524b;letter-spacing:.14em">N.72-0419</div>
+    </div>
+    <div style="height:30px;flex:none;display:flex;background:#0e0d0c;border-bottom:1px solid #232220">
+      <sc-for list="{{ tabsLicks }}" as="t" hint-placeholder-count="8"><div style="display:flex;align-items:center;padding:0 15px;font-size:10px;letter-spacing:.18em;color:{{ t.fg }};background:{{ t.bg }};border-right:1px solid #232220;border-bottom:2px solid {{ t.line }}">{{ t.label }}</div></sc-for>
+      <div style="margin-left:auto;display:flex;align-items:center;padding:0 12px;font-size:9px;color:#6b6760;border-left:1px solid #232220">INFO / ?</div>
+    </div>
+    <div style="flex:1;min-height:0;display:flex">
+      <div style="width:236px;flex:none;display:flex;flex-direction:column;border-right:1px solid #232220;background:#0c0b0a">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>LOCKER</span><span style="margin-left:auto;color:#55524b">DRAG → SLOT</span></div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <sc-for list="{{ lockerFiles }}" as="f" hint-placeholder-count="12">
+            <div style="display:flex;align-items:center;gap:8px;height:26px;flex:none;padding:0 8px;background:{{ f.bg }}">
+              <div style="width:52px;font-size:8px;color:{{ f.serialFg }}">{{ f.serial }}</div><div style="flex:1;font-size:10px;color:{{ f.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.name }}</div><div style="font-size:8px;color:#55524b">{{ f.meta }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="height:198px;flex:none;border-top:1px solid #232220;display:flex;flex-direction:column;background:#060606">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>SCOPE</span></div>
+          <div style="flex:1;position:relative;padding:6px"><div style="position:absolute;left:6px;right:6px;top:50%;height:1px;background:#232220"></div><svg viewBox="0 0 220 140" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ scopePts }}" fill="none" stroke="#ded9ce" stroke-width="1" vector-effect="non-scaling-stroke"></polyline></svg></div>
+        </div>
+      </div>
+
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+        <div style="height:24px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.18em;color:#8a8579">
+          <span style="color:#3a3833">+</span><span style="color:#ded9ce;font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;letter-spacing:.24em;font-size:11px">GRAIN LICKS</span><span>STEP SAMPLER · 8 SLOTS × 16 STEPS</span>
+          <span style="margin-left:auto;color:#55524b">CLOCK: bb.seq_pos · RENDERS TO MASTER BUS</span><span style="border:1px solid #6b4a2a;color:#8a5a2b;padding:1px 5px;font-size:8px">R1 PLANNED</span>
+        </div>
+        <div style="height:28px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid #232220;background:#0e0d0c;font-size:9px;letter-spacing:.12em;color:#8a8579">
+          <span style="color:#55524b">PATTERN</span><div style="display:flex;gap:2px"><div style="padding:2px 7px;background:#1b1a17;border:1px solid #3a3833;color:#ded9ce">A</div><div style="padding:2px 7px;background:#131211;border:1px solid #232220;color:#6b6760">B</div><div style="padding:2px 7px;background:#131211;border:1px solid #232220;color:#6b6760">C</div><div style="padding:2px 7px;background:#131211;border:1px solid #232220;color:#6b6760">D</div></div>
+          <div style="width:1px;height:16px;background:#232220"></div><span style="color:#55524b">FILL</span><div style="display:flex;gap:2px"><div style="padding:2px 7px;background:#131211;border:1px solid #232220;color:#8a8579">EUCLID</div><div style="padding:2px 7px;background:#131211;border:1px solid #232220;color:#8a8579">RAND</div><div style="padding:2px 7px;background:#131211;border:1px solid #232220;color:#8a8579">CLEAR</div></div>
+          <div style="margin-left:auto;display:flex;gap:12px;font-size:8px;color:#55524b"><span>ONE-SHOT RESETS pos=0</span><span>CHOKE GROUPS 1–4</span></div>
+        </div>
+        <div style="height:22px;flex:none;display:flex;border-bottom:1px solid #232220;background:#0c0b0a">
+          <div style="width:300px;flex:none;border-right:1px solid #232220"></div>
+          <div style="flex:1;display:flex">
+            <sc-for list="{{ steps }}" as="c" hint-placeholder-count="16"><div style="flex:1;display:flex;align-items:center;justify-content:center;font-size:8px;color:{{ c.numFg }};border-right:1px solid #1c1b19;background:{{ c.headBg }}">{{ c.n }}</div></sc-for>
+          </div>
+          <div style="width:140px;flex:none;border-left:1px solid #232220"></div>
+        </div>
+
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column">
+          <sc-for list="{{ licks }}" as="s" hint-placeholder-count="8">
+            <div style="flex:1;min-height:0;display:flex;border-bottom:1px solid #1c1b19">
+              <div style="width:300px;flex:none;border-right:1px solid #232220;background:#0c0b0a;display:flex;align-items:center;gap:8px;padding:0 8px">
+                <div style="width:16px;font-size:9px;color:#55524b">{{ s.n }}</div>
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+                  <div style="font-size:10px;letter-spacing:.06em;color:{{ s.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.name }}</div>
+                  <div style="font-size:7px;color:#55524b;letter-spacing:.08em">{{ s.meta }}</div>
+                </div>
+                <div style="display:flex;gap:2px">
+                  <div style="width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:8px;background:{{ s.mBg }};border:1px solid {{ s.mBd }};color:{{ s.mFg }}">M</div>
+                  <div style="width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:8px;background:{{ s.sBg }};border:1px solid {{ s.sBd }};color:{{ s.sFg }}">S</div>
+                </div>
+                <div style="width:1px;height:24px;background:#232220"></div>
+                <div style="display:flex;gap:6px">
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:1px"><div style="width:26px;height:26px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:2px;width:1px;height:10px;background:#ded9ce;transform-origin:50% 11px;transform:rotate({{ s.pitchDeg }}deg)"></div></div><div style="font-size:6px;color:#55524b">PIT</div></div>
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:1px"><div style="width:26px;height:26px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:2px;width:1px;height:10px;background:#ded9ce;transform-origin:50% 11px;transform:rotate({{ s.velDeg }}deg)"></div></div><div style="font-size:6px;color:#55524b">VEL</div></div>
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:1px"><div style="width:26px;height:26px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:2px;width:1px;height:10px;background:#ded9ce;transform-origin:50% 11px;transform:rotate({{ s.lvlDeg }}deg)"></div></div><div style="font-size:6px;color:#55524b">LVL</div></div>
+                </div>
+              </div>
+              <div style="flex:1;display:flex;gap:0">
+                <sc-for list="{{ s.cells }}" as="c" hint-placeholder-count="16">
+                  <div style="flex:1;border-right:1px solid #1c1b19;padding:3px;display:flex">
+                    <div style="flex:1;background:{{ c.bg }};border:1px solid {{ c.bd }};display:flex;align-items:center;justify-content:center"><div style="width:5px;height:5px;background:{{ c.dot }}"></div></div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="width:140px;flex:none;border-left:1px solid #232220;display:flex;align-items:center;gap:6px;padding:0 8px">
+                <div style="font-size:7px;color:#55524b;letter-spacing:.08em">CHOKE</div>
+                <div style="padding:1px 5px;font-size:8px;background:{{ s.chokeBg }};border:1px solid {{ s.chokeBd }};color:{{ s.chokeFg }}">{{ s.choke }}</div>
+                <div style="margin-left:auto;width:6px;height:26px;background:#0c0b0a;border:1px solid #232220;display:flex;align-items:flex-end"><div style="width:100%;height:{{ s.meter }}%;background:#8b1e14"></div></div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+    <div style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#121110;border-top:1px solid #2a2927">
+      <div style="display:flex;gap:4px">
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4;font-size:11px;letter-spacing:.18em">RUN<div style="width:5px;height:5px;background:#c2301f"></div></div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">CUT</div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">REC</div>
+      </div>
+      <div style="width:1px;height:38px;background:#2a2927"></div>
+      <div style="display:flex;gap:16px">
+        <sc-for list="{{ transportKnobs }}" as="k" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:34px;height:34px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:12px;background:#ded9ce;transform-origin:50% 14px;transform:rotate({{ k.deg }}deg)"></div></div>
+            <div style="display:flex;flex-direction:column;gap:1px"><div style="font-size:8px;letter-spacing:.14em;color:#8a8579">{{ k.label }}</div><div style="font-size:15px;color:#ded9ce">{{ k.val }}</div></div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin-left:auto;font-size:8px;color:#55524b;letter-spacing:.12em">SLOT TRIGGERS SYNC TO GLOBAL 16TH GRID</div>
+    </div>
+    <div style="height:20px;flex:none;display:flex;align-items:center;gap:16px;padding:0 10px;background:#0e0d0c;border-top:1px solid #232220;font-size:9px;color:#6b6760;letter-spacing:.12em"><span>BAR 003</span><span>STEP 07/16</span><span style="color:#8a8579">CPU 46%</span><span style="color:#3a3833">CLIP</span><span style="margin-left:auto;color:#55524b">PRESS ? FOR A MAP OF THIS CONSOLE</span></div>
+  </div>
+</section>
+
+<!-- ══════════ 04 GRAIN MASS ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">04</span><span style="color:#ded9ce">GRAIN MASS — SAMPLER / TAPE</span><span>TAB 4/8 · LIVE (LOAD/PLAY/PITCH/REVERSE/LOOP) · GRANULAR PLANNED</span></div>
+  <div data-screen-label="04 GRAIN MASS" style="width:1440px;height:900px;background:#0a0a0a;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px;overflow:hidden">
+    <div style="height:26px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;background:#121110;border-bottom:1px solid #232220">
+      <div style="display:flex;gap:6px"><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div></div>
+      <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:11px;letter-spacing:.34em">MORGUE</div>
+      <div style="margin-left:auto;font-size:9px;color:#55524b;letter-spacing:.14em">N.72-0420</div>
+    </div>
+    <div style="height:30px;flex:none;display:flex;background:#0e0d0c;border-bottom:1px solid #232220">
+      <sc-for list="{{ tabsMass }}" as="t" hint-placeholder-count="8"><div style="display:flex;align-items:center;padding:0 15px;font-size:10px;letter-spacing:.18em;color:{{ t.fg }};background:{{ t.bg }};border-right:1px solid #232220;border-bottom:2px solid {{ t.line }}">{{ t.label }}</div></sc-for>
+      <div style="margin-left:auto;display:flex;align-items:center;padding:0 12px;font-size:9px;color:#6b6760;border-left:1px solid #232220">INFO / ?</div>
+    </div>
+    <div style="flex:1;min-height:0;display:flex">
+      <div style="width:236px;flex:none;display:flex;flex-direction:column;border-right:1px solid #232220;background:#0c0b0a">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>LOCKER</span></div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <sc-for list="{{ lockerFiles }}" as="f" hint-placeholder-count="12">
+            <div style="display:flex;align-items:center;gap:8px;height:26px;flex:none;padding:0 8px;background:{{ f.bg }}"><div style="width:52px;font-size:8px;color:{{ f.serialFg }}">{{ f.serial }}</div><div style="flex:1;font-size:10px;color:{{ f.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.name }}</div><div style="font-size:8px;color:#55524b">{{ f.meta }}</div></div>
+          </sc-for>
+        </div>
+        <div style="height:198px;flex:none;border-top:1px solid #232220;display:flex;flex-direction:column;background:#060606">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>SCOPE</span></div>
+          <div style="flex:1;position:relative;padding:6px"><div style="position:absolute;left:6px;right:6px;top:50%;height:1px;background:#232220"></div><svg viewBox="0 0 220 140" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ scopePts }}" fill="none" stroke="#ded9ce" stroke-width="1" vector-effect="non-scaling-stroke"></polyline></svg></div>
+        </div>
+      </div>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+        <div style="height:24px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.18em;color:#8a8579">
+          <span style="color:#3a3833">+</span><span style="color:#ded9ce;font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;letter-spacing:.24em;font-size:11px">GRAIN MASS</span><span>4 WELLS · WAV/AIFF/MP3/OGG/FLAC</span>
+          <span style="margin-left:auto;color:#55524b">DOUBLE-CLICK A WELL TO LOAD</span><span style="border:1px solid #8b1e14;color:#c2301f;padding:1px 5px;font-size:8px">LIVE</span>
+        </div>
+        <div style="flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:1px;background:#232220">
+          <sc-for list="{{ wells }}" as="w" hint-placeholder-count="4">
+            <div style="background:#0c0b0a;display:flex;flex-direction:column;min-height:0">
+              <div style="height:22px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.14em;color:#8a8579">
+                <span style="color:#55524b">WELL {{ w.n }}</span><span style="color:{{ w.fg }}">{{ w.name }}</span><span style="margin-left:auto;color:#55524b;font-size:8px">{{ w.meta }}</span>
+                <div style="width:5px;height:5px;background:{{ w.dot }}"></div>
+              </div>
+              <div style="flex:1;min-height:0;position:relative;background:#060606;margin:8px;border:1px solid #1c1b19;display:flex;align-items:center;justify-content:center">
+                <svg viewBox="0 0 600 120" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ w.pts }}" fill="none" stroke="{{ w.wave }}" stroke-width="1" vector-effect="non-scaling-stroke"></polyline></svg>
+                <div style="position:absolute;left:0;right:0;top:50%;height:1px;background:#1c1b19"></div>
+                <div style="position:absolute;left:{{ w.play }}%;top:0;bottom:0;width:1px;background:{{ w.head }}"></div>
+                <div style="position:absolute;left:6px;top:4px;font-size:7px;letter-spacing:.12em;color:#3a3833">{{ w.hint }}</div>
+              </div>
+              <div style="height:56px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-top:1px solid #232220">
+                <div style="display:flex;gap:3px">
+                  <div style="width:44px;height:24px;display:flex;align-items:center;justify-content:center;background:{{ w.playBg }};border:1px solid {{ w.playBd }};color:{{ w.playFg }};font-size:9px;letter-spacing:.12em">PLAY</div>
+                  <div style="width:44px;height:24px;display:flex;align-items:center;justify-content:center;background:#131211;border:1px solid #3a3833;color:#8a8579;font-size:9px;letter-spacing:.12em">STOP</div>
+                  <div style="width:30px;height:24px;display:flex;align-items:center;justify-content:center;background:{{ w.revBg }};border:1px solid {{ w.revBd }};color:{{ w.revFg }};font-size:9px">R</div>
+                  <div style="width:30px;height:24px;display:flex;align-items:center;justify-content:center;background:{{ w.loopBg }};border:1px solid {{ w.loopBd }};color:{{ w.loopFg }};font-size:9px">O</div>
+                </div>
+                <div style="width:1px;height:30px;background:#232220"></div>
+                <div style="display:flex;gap:10px">
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:2px"><div style="width:32px;height:32px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:11px;background:#ded9ce;transform-origin:50% 13px;transform:rotate({{ w.pitchDeg }}deg)"></div></div><div style="font-size:7px;color:#8a8579;letter-spacing:.1em">PITCH</div></div>
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:2px"><div style="width:32px;height:32px;border-radius:50%;background:#171614;border:1px solid #2a2927;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:11px;background:#4a4842;transform-origin:50% 13px;transform:rotate(-135deg)"></div></div><div style="font-size:7px;color:#4a4842;letter-spacing:.1em">GRAIN</div></div>
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:2px"><div style="width:32px;height:32px;border-radius:50%;background:#171614;border:1px solid #2a2927;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:11px;background:#4a4842;transform-origin:50% 13px;transform:rotate(-135deg)"></div></div><div style="font-size:7px;color:#4a4842;letter-spacing:.1em">ERASE</div></div>
+                </div>
+                <div style="margin-left:auto;display:flex;flex-direction:column;gap:2px;align-items:flex-end;font-size:7px;color:#55524b;letter-spacing:.08em"><span>{{ w.rate }}</span><span style="color:#8a5a2b">GRAIN/ERASE: PLANNED</span></div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="height:26px;flex:none;display:flex;align-items:center;gap:14px;padding:0 10px;border-top:1px solid #232220;background:#0e0d0c;font-size:8px;letter-spacing:.12em;color:#55524b">
+          <span>SAMPLES MIX ON TOP OF ENGINE OUTPUT</span><span>A / Z = PITCH · R = REVERSE · O = LOOP</span><span style="margin-left:auto;color:#8a5a2b">VISION: SLICING · TAPE ERASER · CROSS-MOD WITH VOICES</span>
+        </div>
+      </div>
+    </div>
+    <div style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#121110;border-top:1px solid #2a2927">
+      <div style="display:flex;gap:4px">
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4;font-size:11px;letter-spacing:.18em">RUN<div style="width:5px;height:5px;background:#c2301f"></div></div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">CUT</div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">REC</div>
+      </div>
+      <div style="width:1px;height:38px;background:#2a2927"></div>
+      <div style="display:flex;gap:16px">
+        <sc-for list="{{ transportKnobs }}" as="k" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:8px"><div style="width:34px;height:34px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:12px;background:#ded9ce;transform-origin:50% 14px;transform:rotate({{ k.deg }}deg)"></div></div><div style="display:flex;flex-direction:column;gap:1px"><div style="font-size:8px;letter-spacing:.14em;color:#8a8579">{{ k.label }}</div><div style="font-size:15px;color:#ded9ce">{{ k.val }}</div></div></div>
+        </sc-for>
+      </div>
+    </div>
+    <div style="height:20px;flex:none;display:flex;align-items:center;gap:16px;padding:0 10px;background:#0e0d0c;border-top:1px solid #232220;font-size:9px;color:#6b6760;letter-spacing:.12em"><span>BAR 003</span><span>STEP 07/16</span><span style="color:#8a8579">CPU 52%</span><span style="color:#3a3833">CLIP</span><span style="margin-left:auto;color:#55524b">PRESS ? FOR A MAP OF THIS CONSOLE</span></div>
+  </div>
+</section>
+
+<!-- ══════════ 05 SURVIVOR ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">05</span><span style="color:#ded9ce">SURVIVOR — MASTER PHRASE LOOPER</span><span>TAB 5/8 · LIVE · PERFORMANCE VIEW</span></div>
+  <div data-screen-label="05 SURVIVOR" style="width:1440px;height:900px;background:#0a0a0a;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px;overflow:hidden">
+    <div style="height:26px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;background:#121110;border-bottom:1px solid #232220">
+      <div style="display:flex;gap:6px"><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div></div>
+      <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:11px;letter-spacing:.34em">MORGUE</div>
+      <div style="margin-left:auto;font-size:9px;color:#55524b;letter-spacing:.14em">N.72-0421</div>
+    </div>
+    <div style="height:30px;flex:none;display:flex;background:#0e0d0c;border-bottom:1px solid #232220">
+      <sc-for list="{{ tabsSurv }}" as="t" hint-placeholder-count="8"><div style="display:flex;align-items:center;padding:0 15px;font-size:10px;letter-spacing:.18em;color:{{ t.fg }};background:{{ t.bg }};border-right:1px solid #232220;border-bottom:2px solid {{ t.line }}">{{ t.label }}</div></sc-for>
+      <div style="margin-left:auto;display:flex;align-items:center;padding:0 12px;font-size:9px;color:#6b6760;border-left:1px solid #232220">INFO / ?</div>
+    </div>
+    <div style="flex:1;min-height:0;display:flex">
+      <div style="width:236px;flex:none;display:flex;flex-direction:column;border-right:1px solid #232220;background:#0c0b0a">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>LOCKER</span></div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <sc-for list="{{ lockerFiles }}" as="f" hint-placeholder-count="12">
+            <div style="display:flex;align-items:center;gap:8px;height:26px;flex:none;padding:0 8px;background:{{ f.bg }}"><div style="width:52px;font-size:8px;color:{{ f.serialFg }}">{{ f.serial }}</div><div style="flex:1;font-size:10px;color:{{ f.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.name }}</div><div style="font-size:8px;color:#55524b">{{ f.meta }}</div></div>
+          </sc-for>
+        </div>
+        <div style="height:198px;flex:none;border-top:1px solid #232220;display:flex;flex-direction:column;background:#060606">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>SCOPE</span></div>
+          <div style="flex:1;position:relative;padding:6px"><div style="position:absolute;left:6px;right:6px;top:50%;height:1px;background:#232220"></div><svg viewBox="0 0 220 140" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ scopePts }}" fill="none" stroke="#ded9ce" stroke-width="1" vector-effect="non-scaling-stroke"></polyline></svg></div>
+        </div>
+      </div>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+        <div style="height:24px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.18em;color:#8a8579">
+          <span style="color:#3a3833">+</span><span style="color:#ded9ce;font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;letter-spacing:.24em;font-size:11px">SURVIVOR</span><span>MASTER PHRASE LOOPER · CAPTURES PRE-MASTER BUS + TAILS</span>
+          <span style="margin-left:auto;color:#55524b">ARM SNAPS TO NEXT BAR BOUNDARY</span><span style="border:1px solid #8b1e14;color:#c2301f;padding:1px 5px;font-size:8px">LIVE</span>
+        </div>
+        <div style="height:120px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid #232220;background:#0e0d0c">
+          <div style="width:150px;height:74px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:#2a0d09;border:1px solid #8b1e14"><div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:22px;letter-spacing:.2em;color:#f0e6dc">ARM</div><div style="display:flex;align-items:center;gap:6px;font-size:8px;letter-spacing:.14em;color:#c2301f"><div style="width:6px;height:6px;background:#c2301f"></div>ARMED · 1 BAR</div></div>
+          <div style="width:150px;height:74px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:#161513;border:1px solid #3a3833"><div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:22px;letter-spacing:.2em;color:#ded9ce">PLAY</div><div style="display:flex;align-items:center;gap:6px;font-size:8px;letter-spacing:.14em;color:#6b6760"><div style="width:6px;height:6px;background:#2a2927"></div>LOOP IDLE</div></div>
+          <div style="width:150px;height:74px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:#161513;border:1px solid #3a3833"><div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:22px;letter-spacing:.2em;color:#8a8579">CLEAR</div><div style="font-size:8px;letter-spacing:.14em;color:#55524b">WIPE BUFFER</div></div>
+          <div style="width:1px;height:76px;background:#232220"></div>
+          <div style="display:flex;flex-direction:column;gap:6px;font-size:9px;letter-spacing:.1em;color:#8a8579">
+            <div style="display:flex;gap:10px"><span style="color:#55524b">BUFFER</span><span style="color:#ded9ce">1 BAR · 2.000 s · 88 200 SMP</span></div>
+            <div style="display:flex;gap:10px"><span style="color:#55524b">SOURCE</span><span>PRE-MASTER · 8 LAYERS + SAMPLER + FX TAILS</span></div>
+            <div style="display:flex;gap:10px"><span style="color:#55524b">CAPTURE</span><span style="color:#c2301f">AT BAR 004 · IN 1.4 s</span></div>
+          </div>
+          <div style="margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:4px"><div style="font-size:8px;color:#55524b;letter-spacing:.12em">LOOP OUT</div><div style="width:140px;height:8px;background:#0c0b0a;border:1px solid #232220;display:flex"><div style="width:64%;background:#8b1e14"></div></div></div>
+        </div>
+        <div style="flex:none;height:210px;display:flex;flex-direction:column;border-bottom:1px solid #232220">
+          <div style="height:20px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579"><span>LOOP BUFFER · CAPTURED PHRASE</span><span style="margin-left:auto;color:#55524b">SLICE GRID 1/8 SHOWN</span></div>
+          <div style="flex:1;position:relative;background:#060606;margin:10px;border:1px solid #1c1b19">
+            <svg viewBox="0 0 1000 160" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ loopPts }}" fill="none" stroke="#c9c4b8" stroke-width="1" vector-effect="non-scaling-stroke"></polyline></svg>
+            <div style="position:absolute;left:0;right:0;top:50%;height:1px;background:#1c1b19"></div>
+            <sc-for list="{{ sliceGrid }}" as="g" hint-placeholder-count="8"><div style="position:absolute;left:{{ g.left }}%;top:0;bottom:0;width:1px;background:#232220"></div></sc-for>
+            <div style="position:absolute;left:41%;top:0;bottom:0;width:1px;background:#c2301f"></div>
+          </div>
+        </div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column">
+          <div style="height:20px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579"><span>LOOP CONTROL</span><span style="margin-left:auto;color:#55524b">MIX · FB · OD · HALF · REV · SLICE</span></div>
+          <div style="flex:1;display:flex;align-items:center;padding:0 20px">
+            <sc-for list="{{ survKnobs }}" as="k" hint-placeholder-count="6">
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px">
+                <div style="width:76px;height:76px;border-radius:50%;background:#171614;border:1px solid {{ k.ring }};position:relative">
+                  <div style="position:absolute;left:50%;top:6px;width:2px;height:26px;background:{{ k.cut }};transform-origin:50% 32px;transform:rotate({{ k.deg }}deg)"></div>
+                  <div style="position:absolute;inset:16px;border-radius:50%;border:1px solid #201f1c"></div>
+                </div>
+                <div style="font-size:10px;letter-spacing:.16em;color:{{ k.fg }}">{{ k.label }}</div>
+                <div style="font-size:12px;color:{{ k.valFg }}">{{ k.val }}</div>
+                <div style="font-size:7px;color:#3a3833;letter-spacing:.08em">{{ k.note }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#121110;border-top:1px solid #2a2927">
+      <div style="display:flex;gap:4px">
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4;font-size:11px;letter-spacing:.18em">RUN<div style="width:5px;height:5px;background:#c2301f"></div></div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">CUT</div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">REC</div>
+      </div>
+      <div style="width:1px;height:38px;background:#2a2927"></div>
+      <div style="display:flex;gap:16px">
+        <sc-for list="{{ transportKnobs }}" as="k" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:8px"><div style="width:34px;height:34px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:12px;background:#ded9ce;transform-origin:50% 14px;transform:rotate({{ k.deg }}deg)"></div></div><div style="display:flex;flex-direction:column;gap:1px"><div style="font-size:8px;letter-spacing:.14em;color:#8a8579">{{ k.label }}</div><div style="font-size:15px;color:#ded9ce">{{ k.val }}</div></div></div>
+        </sc-for>
+      </div>
+      <div style="margin-left:auto;font-size:8px;color:#55524b;letter-spacing:.12em">CUT DOES NOT WIPE THE LOOP</div>
+    </div>
+    <div style="height:20px;flex:none;display:flex;align-items:center;gap:16px;padding:0 10px;background:#0e0d0c;border-top:1px solid #232220;font-size:9px;color:#6b6760;letter-spacing:.12em"><span>BAR 003</span><span>STEP 12/16</span><span style="color:#8a8579">CPU 44%</span><span style="color:#c2301f">CLIP</span><span style="margin-left:auto;color:#55524b">PRESS ? FOR A MAP OF THIS CONSOLE</span></div>
+  </div>
+</section>
+
+<!-- ══════════ 06 MIXER ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">06</span><span style="color:#ded9ce">MIXER — LEVELS, INSERTS, SENDS</span><span>TAB 6/8 · LIVE (FADER/MUTE/METER) · R4+R5 INSERTS/SENDS/PAN/GROUPS PLANNED</span></div>
+  <div data-screen-label="06 MIXER" style="width:1440px;height:900px;background:#0a0a0a;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px;overflow:hidden">
+    <div style="height:26px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;background:#121110;border-bottom:1px solid #232220">
+      <div style="display:flex;gap:6px"><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div></div>
+      <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:11px;letter-spacing:.34em">MORGUE</div>
+      <div style="margin-left:auto;font-size:9px;color:#55524b;letter-spacing:.14em">N.72-0422</div>
+    </div>
+    <div style="height:30px;flex:none;display:flex;background:#0e0d0c;border-bottom:1px solid #232220">
+      <sc-for list="{{ tabsMix }}" as="t" hint-placeholder-count="8"><div style="display:flex;align-items:center;padding:0 15px;font-size:10px;letter-spacing:.18em;color:{{ t.fg }};background:{{ t.bg }};border-right:1px solid #232220;border-bottom:2px solid {{ t.line }}">{{ t.label }}</div></sc-for>
+      <div style="margin-left:auto;display:flex;align-items:center;padding:0 12px;font-size:9px;color:#6b6760;border-left:1px solid #232220">INFO / ?</div>
+    </div>
+    <div style="flex:1;min-height:0;display:flex">
+      <div style="width:236px;flex:none;display:flex;flex-direction:column;border-right:1px solid #232220;background:#0c0b0a">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>LOCKER</span></div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <sc-for list="{{ lockerFiles }}" as="f" hint-placeholder-count="12">
+            <div style="display:flex;align-items:center;gap:8px;height:26px;flex:none;padding:0 8px;background:{{ f.bg }}"><div style="width:52px;font-size:8px;color:{{ f.serialFg }}">{{ f.serial }}</div><div style="flex:1;font-size:10px;color:{{ f.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.name }}</div><div style="font-size:8px;color:#55524b">{{ f.meta }}</div></div>
+          </sc-for>
+        </div>
+        <div style="height:198px;flex:none;border-top:1px solid #232220;display:flex;flex-direction:column;background:#060606">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>SCOPE</span></div>
+          <div style="flex:1;position:relative;padding:6px"><div style="position:absolute;left:6px;right:6px;top:50%;height:1px;background:#232220"></div><svg viewBox="0 0 220 140" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ scopePts }}" fill="none" stroke="#ded9ce" stroke-width="1" vector-effect="non-scaling-stroke"></polyline></svg></div>
+        </div>
+      </div>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+        <div style="height:24px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.18em;color:#8a8579">
+          <span style="color:#3a3833">+</span><span style="color:#ded9ce;font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;letter-spacing:.24em;font-size:11px">MIXER</span><span>8 VOICES + SAMPLER + RETURNS A–D + MASTER</span>
+          <span style="margin-left:auto;color:#55524b">FADER 0–256 · INTEGER-FIRST DSP</span><span style="border:1px solid #8b1e14;color:#c2301f;padding:1px 5px;font-size:8px">LIVE</span>
+        </div>
+        <div style="flex:1;min-height:0;display:flex">
+          <sc-for list="{{ mixChans }}" as="c" hint-placeholder-count="9">
+            <div style="flex:{{ c.flex }};min-width:0;display:flex;flex-direction:column;border-right:1px solid #232220;background:{{ c.bg }}">
+              <div style="height:22px;flex:none;display:flex;align-items:center;gap:5px;padding:0 6px;border-bottom:1px solid #232220;background:#151412">
+                <div style="width:5px;height:5px;background:{{ c.dot }}"></div>
+                <div style="font-size:9px;letter-spacing:.1em;color:{{ c.fg }};white-space:nowrap;overflow:hidden">{{ c.name }}</div>
+              </div>
+              <div style="flex:none;display:flex;flex-direction:column;gap:1px;padding:5px;border-bottom:1px solid #1c1b19">
+                <div style="font-size:7px;letter-spacing:.1em;color:#55524b;margin-bottom:2px">INSERTS</div>
+                <sc-for list="{{ c.inserts }}" as="i" hint-placeholder-count="4">
+                  <div style="height:15px;display:flex;align-items:center;padding:0 4px;background:{{ i.bg }};border:1px solid {{ i.bd }};font-size:7px;letter-spacing:.06em;color:{{ i.fg }};white-space:nowrap;overflow:hidden">{{ i.name }}</div>
+                </sc-for>
+              </div>
+              <div style="flex:none;display:flex;gap:2px;padding:5px;border-bottom:1px solid #1c1b19;justify-content:space-between">
+                <sc-for list="{{ c.sends }}" as="s" hint-placeholder-count="4">
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:1px">
+                    <div style="width:20px;height:20px;border-radius:50%;background:#171614;border:1px solid {{ s.ring }};position:relative"><div style="position:absolute;left:50%;top:2px;width:1px;height:7px;background:{{ s.cut }};transform-origin:50% 8px;transform:rotate({{ s.deg }}deg)"></div></div>
+                    <div style="font-size:6px;color:{{ s.fg }}">{{ s.label }}</div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="flex:none;display:flex;flex-direction:column;gap:2px;padding:5px;border-bottom:1px solid #1c1b19">
+                <div style="font-size:6px;letter-spacing:.1em;color:#55524b">PAN {{ c.panLabel }}</div>
+                <div style="height:8px;background:#0c0b0a;border:1px solid #232220;position:relative"><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:#232220"></div><div style="position:absolute;left:{{ c.panPos }}%;top:1px;bottom:1px;width:3px;background:#8a5a2b"></div></div>
+              </div>
+              <div style="flex:1;min-height:0;display:flex;justify-content:center;gap:6px;padding:8px 0">
+                <div style="width:16px;background:#080807;border:1px solid #232220;position:relative;display:flex;align-items:flex-end">
+                  <div style="width:100%;height:{{ c.fill }}%;background:{{ c.faderFill }}"></div>
+                  <div style="position:absolute;left:-3px;right:-3px;bottom:{{ c.fill }}%;height:3px;background:#ded9ce"></div>
+                </div>
+                <div style="width:8px;display:flex;flex-direction:column;gap:1px">
+                  <div style="flex:1;background:#080807;border:1px solid #232220;display:flex;align-items:flex-end"><div style="width:100%;height:{{ c.peak }}%;background:{{ c.meterFill }}"></div></div>
+                </div>
+              </div>
+              <div style="flex:none;display:flex;flex-direction:column;gap:3px;padding:0 5px 5px">
+                <div style="font-size:10px;text-align:center;color:{{ c.fg }};letter-spacing:.04em">{{ c.val }}</div>
+                <div style="font-size:7px;text-align:center;color:#55524b">{{ c.db }}</div>
+                <div style="display:flex;gap:2px">
+                  <div style="flex:1;height:16px;display:flex;align-items:center;justify-content:center;font-size:8px;background:{{ c.mBg }};border:1px solid {{ c.mBd }};color:{{ c.mFg }}">M</div>
+                  <div style="flex:1;height:16px;display:flex;align-items:center;justify-content:center;font-size:8px;background:{{ c.sBg }};border:1px solid {{ c.sBd }};color:{{ c.sFg }}">S</div>
+                </div>
+                <div style="height:14px;display:flex;align-items:center;justify-content:center;font-size:7px;letter-spacing:.08em;background:#0e0d0c;border:1px solid #232220;color:#6b6760">{{ c.route }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="height:26px;flex:none;display:flex;align-items:center;gap:14px;padding:0 10px;border-top:1px solid #232220;background:#0e0d0c;font-size:8px;letter-spacing:.12em;color:#55524b">
+          <span>RETURNS: A REVERB · B FEEDBACK DELAY · C PITCH-GLITCH · D WAVEFOLD</span><span>GROUPS: G1 VOICES 01–04 · G2 SAMPLER</span><span style="margin-left:auto;color:#8a5a2b">R4/R5 · INSERT PICKER ON CLICK · LEARN ON RIGHT-CLICK</span>
+        </div>
+      </div>
+    </div>
+    <div style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#121110;border-top:1px solid #2a2927">
+      <div style="display:flex;gap:4px">
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4;font-size:11px;letter-spacing:.18em">RUN<div style="width:5px;height:5px;background:#c2301f"></div></div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">CUT</div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">REC</div>
+      </div>
+      <div style="width:1px;height:38px;background:#2a2927"></div>
+      <div style="display:flex;gap:16px">
+        <sc-for list="{{ transportKnobs }}" as="k" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:8px"><div style="width:34px;height:34px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:12px;background:#ded9ce;transform-origin:50% 14px;transform:rotate({{ k.deg }}deg)"></div></div><div style="display:flex;flex-direction:column;gap:1px"><div style="font-size:8px;letter-spacing:.14em;color:#8a8579">{{ k.label }}</div><div style="font-size:15px;color:#ded9ce">{{ k.val }}</div></div></div>
+        </sc-for>
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px"><div style="font-size:8px;color:#55524b;letter-spacing:.12em">STEM EXPORT</div><div style="padding:6px 12px;background:#161513;border:1px solid #3a3833;font-size:10px;letter-spacing:.16em;color:#ded9ce">EXPORT…</div></div>
+    </div>
+    <div style="height:20px;flex:none;display:flex;align-items:center;gap:16px;padding:0 10px;background:#0e0d0c;border-top:1px solid #232220;font-size:9px;color:#6b6760;letter-spacing:.12em"><span>BAR 003</span><span>STEP 07/16</span><span style="color:#8a8579">CPU 49%</span><span style="color:#3a3833">CLIP</span><span style="margin-left:auto;color:#55524b">PRESS ? FOR A MAP OF THIS CONSOLE</span></div>
+  </div>
+</section>
+
+<!-- ══════════ 07 EXPORT ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">07</span><span style="color:#ded9ce">EXPORT — STEM RENDER</span><span>TAB 8/8 · R6 PLANNED · MODAL SHEET OVER THE CONSOLE</span></div>
+  <div data-screen-label="07 EXPORT" style="width:1440px;height:900px;background:#0a0a0a;border:1px solid #2a2927;position:relative;color:#ded9ce;font-size:11px;overflow:hidden">
+    <div style="position:absolute;inset:0;display:flex;flex-direction:column;opacity:.22">
+      <div style="height:26px;flex:none;background:#121110;border-bottom:1px solid #232220"></div>
+      <div style="height:30px;flex:none;background:#0e0d0c;border-bottom:1px solid #232220"></div>
+      <div style="flex:1;display:flex"><div style="width:236px;border-right:1px solid #232220;background:#0c0b0a"></div><div style="flex:1;display:flex"><sc-for list="{{ mixChans }}" as="c" hint-placeholder-count="9"><div style="flex:{{ c.flex }};border-right:1px solid #232220;display:flex;align-items:flex-end;justify-content:center;padding-bottom:60px"><div style="width:16px;height:{{ c.fill }}%;background:#8b1e14"></div></div></sc-for></div></div>
+      <div style="height:60px;flex:none;background:#121110;border-top:1px solid #2a2927"></div>
+      <div style="height:20px;flex:none;background:#0e0d0c"></div>
+    </div>
+    <div style="position:absolute;inset:0;background:#050505;opacity:.72"></div>
+    <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:720px;background:#0c0b0a;border:1px solid #3a3833;display:flex;flex-direction:column">
+      <div style="height:28px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:#151412;border-bottom:1px solid #232220;font-size:10px;letter-spacing:.2em;color:#ded9ce"><span style="color:#3a3833">+</span><span style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700">STEM EXPORT</span><span style="margin-left:auto;color:#55524b;font-size:8px;letter-spacing:.14em">N.72-0426 · REV 03</span></div>
+      <div style="display:flex">
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid #232220">
+          <div style="height:20px;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579">TRACKS TO RENDER</div>
+          <div style="display:flex;flex-direction:column">
+            <sc-for list="{{ stems }}" as="s" hint-placeholder-count="12">
+              <div style="height:24px;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid #141312">
+                <div style="width:11px;height:11px;border:1px solid {{ s.boxBd }};background:{{ s.boxBg }};display:flex;align-items:center;justify-content:center"><div style="width:5px;height:5px;background:{{ s.tick }}"></div></div>
+                <div style="font-size:9px;letter-spacing:.08em;color:{{ s.fg }}">{{ s.name }}</div>
+                <div style="margin-left:auto;font-size:8px;color:#55524b">{{ s.size }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="width:280px;flex:none;display:flex;flex-direction:column">
+          <div style="height:20px;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579">RENDER SETTINGS</div>
+          <div style="display:flex;flex-direction:column;gap:10px;padding:10px">
+            <div style="display:flex;flex-direction:column;gap:4px"><div style="font-size:8px;letter-spacing:.12em;color:#55524b">RANGE</div><div style="display:flex;gap:2px"><div style="flex:1;height:22px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#1b1a17;border:1px solid #3a3833;color:#ded9ce">LOOP</div><div style="flex:1;height:22px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#131211;border:1px solid #232220;color:#6b6760">SONG</div><div style="flex:1;height:22px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#131211;border:1px solid #232220;color:#6b6760">SEL</div></div></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><div style="font-size:8px;letter-spacing:.12em;color:#55524b">FORMAT</div><div style="display:flex;gap:2px"><div style="flex:1;height:22px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#1b1a17;border:1px solid #3a3833;color:#ded9ce">WAV 24</div><div style="flex:1;height:22px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#101010;border:1px solid #1c1b19;color:#3a3833">FLAC</div><div style="flex:1;height:22px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#101010;border:1px solid #1c1b19;color:#3a3833">MP3</div></div></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><div style="font-size:8px;letter-spacing:.12em;color:#55524b">TAIL</div><div style="height:22px;display:flex;align-items:center;padding:0 8px;background:#060606;border:1px solid #232220;font-size:10px;color:#ded9ce">4.0 s <span style="margin-left:auto;color:#55524b;font-size:8px">FX TAILS INCLUDED</span></div></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><div style="font-size:8px;letter-spacing:.12em;color:#55524b">DESTINATION</div><div style="height:22px;display:flex;align-items:center;padding:0 8px;background:#060606;border:1px solid #232220;font-size:9px;color:#c9c4b8">~/MORGUE/stems/0418/</div></div>
+            <div style="display:flex;flex-direction:column;gap:3px;font-size:8px;color:#55524b;letter-spacing:.08em"><span>12 FILES · EST 214 MB</span><span>OFFLINE RENDER · FASTER THAN REALTIME</span></div>
+          </div>
+          <div style="margin-top:auto;display:flex;gap:2px;padding:10px;border-top:1px solid #232220">
+            <div style="flex:1;height:30px;display:flex;align-items:center;justify-content:center;font-size:10px;letter-spacing:.16em;background:#131211;border:1px solid #3a3833;color:#8a8579">CANCEL</div>
+            <div style="flex:1;height:30px;display:flex;align-items:center;justify-content:center;font-size:10px;letter-spacing:.16em;background:#2a0d09;border:1px solid #8b1e14;color:#f0e6dc">RENDER</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════ 08 HW/SYNC ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">08</span><span style="color:#ded9ce">HW/SYNC — MIDI &amp; CONTROL</span><span>TAB 7/8 · LIVE (NOTE+CC) · R8 MATRIX/LEARN/OUT PLANNED</span></div>
+  <div data-screen-label="08 HW SYNC" style="width:1440px;height:900px;background:#0a0a0a;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px;overflow:hidden">
+    <div style="height:26px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;background:#121110;border-bottom:1px solid #232220">
+      <div style="display:flex;gap:6px"><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div><div style="width:9px;height:9px;border:1px solid #3a3833;border-radius:50%"></div></div>
+      <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:11px;letter-spacing:.34em">MORGUE</div>
+      <div style="margin-left:auto;font-size:9px;color:#55524b;letter-spacing:.14em">N.72-0424</div>
+    </div>
+    <div style="height:30px;flex:none;display:flex;background:#0e0d0c;border-bottom:1px solid #232220">
+      <sc-for list="{{ tabsHw }}" as="t" hint-placeholder-count="8"><div style="display:flex;align-items:center;padding:0 15px;font-size:10px;letter-spacing:.18em;color:{{ t.fg }};background:{{ t.bg }};border-right:1px solid #232220;border-bottom:2px solid {{ t.line }}">{{ t.label }}</div></sc-for>
+      <div style="margin-left:auto;display:flex;align-items:center;padding:0 12px;font-size:9px;color:#6b6760;border-left:1px solid #232220">INFO / ?</div>
+    </div>
+    <div style="flex:1;min-height:0;display:flex">
+      <div style="width:236px;flex:none;display:flex;flex-direction:column;border-right:1px solid #232220;background:#0c0b0a">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>LOCKER</span></div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <sc-for list="{{ lockerFiles }}" as="f" hint-placeholder-count="12">
+            <div style="display:flex;align-items:center;gap:8px;height:26px;flex:none;padding:0 8px;background:{{ f.bg }}"><div style="width:52px;font-size:8px;color:{{ f.serialFg }}">{{ f.serial }}</div><div style="flex:1;font-size:10px;color:{{ f.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.name }}</div><div style="font-size:8px;color:#55524b">{{ f.meta }}</div></div>
+          </sc-for>
+        </div>
+        <div style="height:198px;flex:none;border-top:1px solid #232220;display:flex;flex-direction:column;background:#060606">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.16em;color:#8a8579"><span style="color:#3a3833">+</span><span>SCOPE</span></div>
+          <div style="flex:1;position:relative;padding:6px"><div style="position:absolute;left:6px;right:6px;top:50%;height:1px;background:#232220"></div><svg viewBox="0 0 220 140" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="{{ scopePts }}" fill="none" stroke="#ded9ce" stroke-width="1" vector-effect="non-scaling-stroke"></polyline></svg></div>
+        </div>
+      </div>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+        <div style="height:24px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:#151412;border-bottom:1px solid #232220;font-size:9px;letter-spacing:.18em;color:#8a8579">
+          <span style="color:#3a3833">+</span><span style="color:#ded9ce;font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;letter-spacing:.24em;font-size:11px">HW / SYNC</span><span>MIDI IN · CC MATRIX · CLOCK</span>
+          <span style="margin-left:auto;color:#55524b">CORE MIDI</span><span style="border:1px solid #8b1e14;color:#c2301f;padding:1px 5px;font-size:8px">LIVE</span>
+        </div>
+        <div style="height:104px;flex:none;display:flex;border-bottom:1px solid #232220">
+          <div style="flex:1;display:flex;flex-direction:column;gap:8px;padding:10px;border-right:1px solid #232220">
+            <div style="font-size:8px;letter-spacing:.16em;color:#8a8579">INPUT DEVICE</div>
+            <div style="display:flex;gap:6px">
+              <div style="flex:1;height:26px;display:flex;align-items:center;gap:8px;padding:0 8px;background:#060606;border:1px solid #232220;font-size:10px;color:#ded9ce"><span>ARTURIA BEATSTEP PRO · PORT 1</span><span style="margin-left:auto;color:#55524b;font-size:9px">▾</span></div>
+              <div style="width:90px;height:26px;display:flex;align-items:center;justify-content:center;gap:6px;background:#2a0d09;border:1px solid #8b1e14;font-size:9px;letter-spacing:.14em;color:#e8ddd4"><div style="width:5px;height:5px;background:#c2301f"></div>ENABLE</div>
+            </div>
+            <div style="display:flex;gap:18px;font-size:9px;color:#8a8579;letter-spacing:.08em"><span><span style="color:#55524b">CH </span>ALL</span><span><span style="color:#55524b">LAST NOTE </span>D#2 v104</span><span><span style="color:#55524b">LAST CC </span>074 → 187</span><span style="color:#7c8a5a">STREAM OK</span></div>
+          </div>
+          <div style="width:340px;flex:none;display:flex;flex-direction:column;gap:8px;padding:10px">
+            <div style="font-size:8px;letter-spacing:.16em;color:#8a8579">CLOCK / OUT<span style="margin-left:8px;border:1px solid #6b4a2a;color:#8a5a2b;padding:0 4px">R8 PLANNED</span></div>
+            <div style="display:flex;gap:4px">
+              <div style="flex:1;height:24px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#131211;border:1px solid #232220;color:#6b6760">CLK IN</div>
+              <div style="flex:1;height:24px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#131211;border:1px solid #232220;color:#6b6760">CLK OUT</div>
+              <div style="flex:1;height:24px;display:flex;align-items:center;justify-content:center;font-size:9px;background:#131211;border:1px solid #232220;color:#6b6760">MIDI OUT</div>
+            </div>
+            <div style="display:flex;gap:14px;font-size:8px;color:#55524b;letter-spacing:.08em"><span>FOOTSWITCH → ARM</span><span>24 PPQN</span></div>
+          </div>
+        </div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column">
+          <div style="height:20px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #232220;font-size:8px;letter-spacing:.16em;color:#8a8579"><span>CC MATRIX · ROWS = CC · COLUMNS = TARGET</span><span style="margin-left:auto;color:#55524b">RIGHT-CLICK ANY KNOB → LEARN · SAVED IN SESSION</span></div>
+          <div style="flex:1;min-height:0;display:flex;flex-direction:column">
+            <div style="height:24px;flex:none;display:flex;border-bottom:1px solid #232220;background:#0c0b0a">
+              <div style="width:150px;flex:none;border-right:1px solid #232220;display:flex;align-items:center;padding:0 8px;font-size:8px;color:#55524b;letter-spacing:.12em">SOURCE</div>
+              <sc-for list="{{ ccCols }}" as="h" hint-placeholder-count="14"><div style="flex:1;border-right:1px solid #1c1b19;display:flex;align-items:center;justify-content:center;font-size:7px;letter-spacing:.06em;color:#8a8579">{{ h.label }}</div></sc-for>
+              <div style="width:90px;flex:none;border-left:1px solid #232220;display:flex;align-items:center;padding:0 8px;font-size:8px;color:#55524b">VALUE</div>
+            </div>
+            <sc-for list="{{ ccRows }}" as="r" hint-placeholder-count="10">
+              <div style="flex:1;min-height:0;display:flex;border-bottom:1px solid #141312">
+                <div style="width:150px;flex:none;border-right:1px solid #232220;display:flex;align-items:center;gap:8px;padding:0 8px;background:#0c0b0a">
+                  <div style="font-size:9px;color:{{ r.fg }}">{{ r.name }}</div>
+                  <div style="margin-left:auto;font-size:7px;color:#55524b">{{ r.meta }}</div>
+                </div>
+                <sc-for list="{{ r.cells }}" as="c" hint-placeholder-count="14">
+                  <div style="flex:1;border-right:1px solid #141312;display:flex;align-items:center;justify-content:center"><div style="width:9px;height:9px;background:{{ c.bg }};border:1px solid {{ c.bd }}"></div></div>
+                </sc-for>
+                <div style="width:90px;flex:none;border-left:1px solid #232220;display:flex;align-items:center;gap:6px;padding:0 8px">
+                  <div style="flex:1;height:5px;background:#0c0b0a;border:1px solid #232220"><div style="width:{{ r.pct }}%;height:100%;background:{{ r.barFill }}"></div></div>
+                  <div style="font-size:8px;color:#8a8579">{{ r.val }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#121110;border-top:1px solid #2a2927">
+      <div style="display:flex;gap:4px">
+        <div style="width:64px;height:34px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#2a0d09;border:1px solid #8b1e14;color:#e8ddd4;font-size:11px;letter-spacing:.18em">RUN<div style="width:5px;height:5px;background:#c2301f"></div></div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">CUT</div>
+        <div style="width:64px;height:34px;display:flex;align-items:center;justify-content:center;background:#141312;border:1px solid #3a3833;color:#8a8579;font-size:11px;letter-spacing:.18em">REC</div>
+      </div>
+      <div style="width:1px;height:38px;background:#2a2927"></div>
+      <div style="display:flex;gap:16px">
+        <sc-for list="{{ transportKnobs }}" as="k" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:8px"><div style="width:34px;height:34px;border-radius:50%;background:#171614;border:1px solid #3a3833;position:relative"><div style="position:absolute;left:50%;top:3px;width:1px;height:12px;background:#ded9ce;transform-origin:50% 14px;transform:rotate({{ k.deg }}deg)"></div></div><div style="display:flex;flex-direction:column;gap:1px"><div style="font-size:8px;letter-spacing:.14em;color:#8a8579">{{ k.label }}</div><div style="font-size:15px;color:#ded9ce">{{ k.val }}</div></div></div>
+        </sc-for>
+      </div>
+      <div style="margin-left:auto;font-size:8px;color:#55524b;letter-spacing:.12em">NOTES TRIGGER THE FOCUSED VOICE · TRANSPOSE BY NOTE</div>
+    </div>
+    <div style="height:20px;flex:none;display:flex;align-items:center;gap:16px;padding:0 10px;background:#0e0d0c;border-top:1px solid #232220;font-size:9px;color:#6b6760;letter-spacing:.12em"><span>BAR 003</span><span>STEP 07/16</span><span style="color:#8a8579">CPU 38%</span><span style="color:#3a3833">CLIP</span><span style="margin-left:auto;color:#55524b">PRESS ? FOR A MAP OF THIS CONSOLE</span></div>
+  </div>
+</section>
+
+<!-- ══════════ 09 FIELD MANUAL ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">09</span><span style="color:#ded9ce">FIELD MANUAL</span><span>OVERLAY · LIVE · ? KEY OR INFO BUTTON · ESC TO DISMISS</span></div>
+  <div data-screen-label="09 FIELD MANUAL" style="width:1440px;height:900px;background:#080807;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px;overflow:hidden">
+    <div style="height:64px;flex:none;display:flex;align-items:flex-end;gap:16px;padding:0 20px 10px;border-bottom:1px solid #2a2927">
+      <div style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:30px;letter-spacing:.2em;color:#ded9ce;line-height:1">FIELD MANUAL</div>
+      <div style="font-size:9px;letter-spacing:.16em;color:#55524b;padding-bottom:4px">MAP OF THIS CONSOLE · N.72-0418 · REV 11</div>
+      <div style="margin-left:auto;font-size:9px;letter-spacing:.16em;color:#8a8579;padding-bottom:4px">ESC / ? TO DISMISS</div>
+    </div>
+    <div style="flex:1;min-height:0;display:flex">
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid #232220">
+        <div style="height:20px;flex:none;display:flex;align-items:center;padding:0 20px;font-size:8px;letter-spacing:.18em;color:#8a8579;border-bottom:1px solid #232220">ZONES</div>
+        <div style="flex:1;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#1c1b19">
+          <sc-for list="{{ manual }}" as="z" hint-placeholder-count="12">
+            <div style="background:#0c0b0a;padding:10px 14px;display:flex;flex-direction:column;gap:5px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <span style="font-size:9px;color:#8b1e14">{{ z.n }}</span>
+                <span style="font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700;font-size:13px;letter-spacing:.2em;color:#ded9ce">{{ z.name }}</span>
+                <span style="margin-left:auto;font-size:7px;letter-spacing:.14em;border:1px solid {{ z.badgeBd }};color:{{ z.badgeFg }};padding:0 4px">{{ z.status }}</span>
+              </div>
+              <div style="font-size:10px;line-height:1.5;color:#8a8579;text-wrap:pretty">{{ z.desc }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div style="width:400px;flex:none;display:flex;flex-direction:column">
+        <div style="height:20px;flex:none;display:flex;align-items:center;padding:0 16px;font-size:8px;letter-spacing:.18em;color:#8a8579;border-bottom:1px solid #232220">GOLDEN RULES</div>
+        <div style="flex:none;display:flex;flex-direction:column">
+          <sc-for list="{{ rules }}" as="r" hint-placeholder-count="6">
+            <div style="display:flex;gap:10px;padding:9px 16px;border-bottom:1px solid #141312">
+              <div style="width:14px;font-size:9px;color:#8b1e14">{{ r.n }}</div>
+              <div style="flex:1;font-size:10px;line-height:1.5;color:#c9c4b8;text-wrap:pretty">{{ r.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="height:20px;flex:none;display:flex;align-items:center;padding:0 16px;font-size:8px;letter-spacing:.18em;color:#8a8579;border-top:1px solid #232220;border-bottom:1px solid #232220">KEY REFERENCE</div>
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column">
+          <sc-for list="{{ keys }}" as="k" hint-placeholder-count="12">
+            <div style="flex:1;display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid #141312">
+              <div style="min-width:64px;padding:2px 6px;background:#131211;border:1px solid #3a3833;font-size:9px;letter-spacing:.1em;color:#ded9ce;text-align:center">{{ k.key }}</div>
+              <div style="font-size:10px;color:#8a8579">{{ k.desc }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+    <div style="height:26px;flex:none;display:flex;align-items:center;gap:16px;padding:0 20px;border-top:1px solid #2a2927;background:#0c0b0a;font-size:8px;letter-spacing:.14em;color:#55524b">
+      <span>MORGUE · INSTRUMENT FOR DARK NOISE, EXPERIMENTALISM, AMBIENCE</span><span style="margin-left:auto">2 820 HEADLESS REGRESSION CHECKS PASSING</span>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════ 10 COMPONENT SHEET ══════════ -->
+<section style="display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.18em;color:#6b6760"><span style="color:#8b1e14">10</span><span style="color:#ded9ce">COMPONENT SHEET</span><span>TOKENS · STATES · GEOMETRY · JUCE MAPPING</span></div>
+  <div data-screen-label="10 COMPONENTS" style="width:1440px;background:#0a0a0a;border:1px solid #2a2927;display:flex;flex-direction:column;color:#ded9ce;font-size:11px">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:10px;padding:0 12px;background:#151412;border-bottom:1px solid #232220;font-size:10px;letter-spacing:.2em;color:#8a8579"><span style="color:#3a3833">+</span><span style="color:#ded9ce;font-family:'IBM Plex Sans Condensed',sans-serif;font-weight:700">PARTS BIN</span><span style="margin-left:auto;font-size:8px;color:#55524b">EVERY STATE THE BUILD MUST DRAW</span></div>
+
+    <div style="display:flex;border-bottom:1px solid #232220">
+      <div style="width:150px;flex:none;border-right:1px solid #232220;padding:12px;font-size:9px;letter-spacing:.14em;color:#8a8579">PALETTE</div>
+      <div style="flex:1;display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:#1c1b19">
+        <sc-for list="{{ swatches }}" as="s" hint-placeholder-count="12">
+          <div style="background:#0c0b0a;padding:8px;display:flex;flex-direction:column;gap:6px">
+            <div style="height:34px;background:{{ s.hex }};border:1px solid #232220"></div>
+            <div style="font-size:8px;letter-spacing:.1em;color:#ded9ce">{{ s.name }}</div>
+            <div style="font-size:8px;color:#8a8579">{{ s.hex }}</div>
+            <div style="font-size:7px;color:#55524b;line-height:1.4">{{ s.use }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="display:flex;border-bottom:1px solid #232220">
+      <div style="width:150px;flex:none;border-right:1px solid #232220;padding:12px;display:flex;flex-direction:column;gap:6px"><div style="font-size:9px;letter-spacing:.14em;color:#8a8579">KNOB</div><div style="font-size:8px;color:#55524b;line-height:1.5">44 / 40 / 34 / 26 px dia. Engraved face, 1px cut, −135°…+135°, numeric readout below. Drag horizontal; ⌘-drag fine; double-click reset.</div></div>
+      <div style="flex:1;display:flex;align-items:center;gap:0;padding:14px 10px">
+        <sc-for list="{{ knobStates }}" as="k" hint-placeholder-count="6">
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px">
+            <div style="width:44px;height:44px;border-radius:50%;background:{{ k.face }};border:1px solid {{ k.ring }};position:relative">
+              <div style="position:absolute;left:50%;top:4px;width:1px;height:15px;background:{{ k.cut }};transform-origin:50% 18px;transform:rotate({{ k.deg }}deg)"></div>
+              <div style="position:absolute;inset:9px;border-radius:50%;border:1px solid #201f1c"></div>
+            </div>
+            <div style="font-size:8px;letter-spacing:.1em;color:{{ k.fg }}">{{ k.label }}</div>
+            <div style="font-size:9px;color:{{ k.valFg }}">{{ k.val }}</div>
+            <div style="font-size:7px;color:#55524b;text-align:center;line-height:1.4;max-width:110px">{{ k.note }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="display:flex;border-bottom:1px solid #232220">
+      <div style="width:150px;flex:none;border-right:1px solid #232220;padding:12px;display:flex;flex-direction:column;gap:6px"><div style="font-size:9px;letter-spacing:.14em;color:#8a8579">SWITCH PLATE</div><div style="font-size:8px;color:#55524b;line-height:1.5">Flat rect, 1px border, no radius. Armed = blood border + lit dot. 26 px tall standard, 34 px transport.</div></div>
+      <div style="flex:1;display:flex;flex-wrap:wrap;gap:8px;padding:14px">
+        <sc-for list="{{ btnStates }}" as="b" hint-placeholder-count="8">
+          <div style="display:flex;flex-direction:column;gap:4px;width:150px">
+            <div style="height:30px;display:flex;align-items:center;justify-content:center;gap:7px;background:{{ b.bg }};border:1px solid {{ b.bd }};color:{{ b.fg }};font-size:10px;letter-spacing:.16em"><div style="width:5px;height:5px;background:{{ b.dot }}"></div>{{ b.label }}</div>
+            <div style="font-size:7px;color:#55524b;letter-spacing:.06em">{{ b.state }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="display:flex;border-bottom:1px solid #232220">
+      <div style="width:150px;flex:none;border-right:1px solid #232220;padding:12px;display:flex;flex-direction:column;gap:6px"><div style="font-size:9px;letter-spacing:.14em;color:#8a8579">CELL / FADER / METER</div><div style="font-size:8px;color:#55524b;line-height:1.5">Cell cycles OFF → HIT → ACCENT on click; right-click clears. Fader = trough + blood fill + 3px bone cap. Meter = 8px column, amber above −6 dB, blood at rails.</div></div>
+      <div style="flex:1;display:flex;gap:26px;padding:14px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:8px;letter-spacing:.12em;color:#8a8579">STEP CELL</div>
+          <div style="display:flex;gap:6px">
+            <sc-for list="{{ cellStates }}" as="c" hint-placeholder-count="4">
+              <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+                <div style="width:38px;height:38px;background:{{ c.bg }};border:1px solid {{ c.bd }};display:flex;align-items:center;justify-content:center"><div style="width:6px;height:6px;background:{{ c.dot }}"></div></div>
+                <div style="font-size:7px;color:#8a8579;letter-spacing:.08em">{{ c.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="width:1px;background:#232220"></div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:8px;letter-spacing:.12em;color:#8a8579">FADER</div>
+          <div style="display:flex;gap:14px;align-items:flex-end">
+            <sc-for list="{{ faderStates }}" as="f" hint-placeholder-count="3">
+              <div style="display:flex;flex-direction:column;align-items:center;gap:5px">
+                <div style="width:16px;height:120px;background:#080807;border:1px solid #232220;position:relative;display:flex;align-items:flex-end">
+                  <div style="width:100%;height:{{ f.fill }}%;background:{{ f.color }}"></div>
+                  <div style="position:absolute;left:-3px;right:-3px;bottom:{{ f.fill }}%;height:3px;background:#ded9ce"></div>
+                </div>
+                <div style="font-size:8px;color:#ded9ce">{{ f.val }}</div>
+                <div style="font-size:7px;color:#55524b">{{ f.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="width:1px;background:#232220"></div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:8px;letter-spacing:.12em;color:#8a8579">METER</div>
+          <div style="display:flex;gap:14px;align-items:flex-end">
+            <sc-for list="{{ meterStates }}" as="m" hint-placeholder-count="3">
+              <div style="display:flex;flex-direction:column;align-items:center;gap:5px">
+                <div style="width:10px;height:120px;background:#080807;border:1px solid #232220;display:flex;flex-direction:column;justify-content:flex-end">
+                  <div style="width:100%;height:{{ m.hot }}%;background:{{ m.hotColor }}"></div>
+                  <div style="width:100%;height:{{ m.body }}%;background:#8b1e14"></div>
+                </div>
+                <div style="font-size:7px;color:#55524b;text-align:center;line-height:1.3">{{ m.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="width:1px;background:#232220"></div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:8px;letter-spacing:.12em;color:#8a8579">TYPE SCALE</div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <sc-for list="{{ typeScale }}" as="t" hint-placeholder-count="6">
+              <div style="display:flex;align-items:baseline;gap:10px;border-bottom:1px solid #141312;padding-bottom:3px">
+                <div style="width:120px;font-size:7px;color:#55524b;letter-spacing:.1em">{{ t.role }}</div>
+                <div style="font-size:{{ t.px }}px;letter-spacing:{{ t.ls }};font-family:{{ t.fam }};font-weight:{{ t.w }};color:#ded9ce">{{ t.sample }}</div>
+                <div style="margin-left:auto;font-size:7px;color:#55524b">{{ t.spec }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex">
+      <div style="width:150px;flex:none;border-right:1px solid #232220;padding:12px;display:flex;flex-direction:column;gap:6px"><div style="font-size:9px;letter-spacing:.14em;color:#8a8579">JUCE MAPPING</div><div style="font-size:8px;color:#55524b;line-height:1.5">Component tree the build should mirror. All custom-drawn in paint(); no default LookAndFeel.</div></div>
+      <div style="flex:1;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#1c1b19">
+        <sc-for list="{{ juceMap }}" as="j" hint-placeholder-count="10">
+          <div style="background:#0c0b0a;padding:9px 12px;display:flex;gap:10px">
+            <div style="width:190px;flex:none;font-size:9px;color:#ded9ce;letter-spacing:.04em">{{ j.cls }}</div>
+            <div style="flex:1;font-size:9px;color:#8a8579;line-height:1.5">{{ j.desc }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+</section>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1552,&quot;height&quot;:1012}}">
+class Component extends DCLogic {
+  tabs(active) {
+    return ['RACK','ARRANGE','GRAIN LICKS','GRAIN MASS','SURVIVOR','MIXER','HW/SYNC','EXPORT'].map(l => ({
+      label: l,
+      fg: l === active ? '#ded9ce' : '#6b6760',
+      bg: l === active ? '#191816' : '#0e0d0c',
+      line: l === active ? '#8b1e14' : 'transparent'
+    }));
+  }
+  knob(label, v, opts) {
+    const o = opts || {};
+    const unused = label === 'UNUSED';
+    return {
+      label, i: o.i, note: o.note || '',
+      val: o.text || String(v).padStart(3, '0'),
+      deg: Math.round(-135 + 270 * (v / 255)),
+      ring: unused ? '#252420' : (o.hot ? '#8b1e14' : '#3a3833'),
+      cut: unused ? '#3a3833' : (o.hot ? '#c2301f' : '#ded9ce'),
+      fg: unused ? '#4a4842' : '#8a8579',
+      valFg: unused ? '#3a3833' : '#ded9ce',
+      face: '#171614'
+    };
+  }
+  wave(n, w, h, amp, seed) {
+    const pts = [];
+    let s = seed;
+    const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    for (let i = 0; i <= n; i++) {
+      const x = (i / n) * w;
+      const t = i / n;
+      const env = 0.35 + 0.65 * Math.abs(Math.sin(t * 3.1 + seed));
+      const y = h / 2 + (rnd() - 0.5) * amp * env * 0.8 + Math.sin(t * 42 + seed) * amp * 0.18 * env;
+      pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    return pts.join(' ');
+  }
+  renderVals() {
+    const off = { bg: '#0c0b0a', bd: '#232220', dot: 'transparent', numFg: '#2f2e2b', headBg: 'transparent' };
+    const hit = { bg: '#332f2a', bd: '#4a4640', dot: '#ded9ce', numFg: '#55524b', headBg: 'transparent' };
+    const acc = { bg: '#8b1e14', bd: '#c2301f', dot: '#f0e6dc', numFg: '#e8c9c4', headBg: 'transparent' };
+    const pat = [2,0,1,0,1,0,2,0,1,1,0,1,2,0,1,0];
+    const steps = pat.map((s, i) => {
+      const base = s === 2 ? acc : s === 1 ? hit : off;
+      return Object.assign({}, base, {
+        n: String(i + 1).padStart(2, '0'),
+        headBg: i === 6 ? '#1b1a17' : 'transparent'
+      });
+    });
+
+    const lockVals = [40,44,52,61,70,78,74,66,58,49,44,52,63,72,80,86];
+    const lockLane = lockVals.map(h => ({ h, fill: '#8a5a2b' }));
+
+    const sourceNames = ['THUMP','BURST','METAL','DUST','FOLD','SHEAR','GRIT','HISS','BONE','TAR','SIREN','CHOKE','RASP','VEIL','SPUR','CLOT','ASH'];
+    const sources = sourceNames.map((name, i) => {
+      const on = i === 2;
+      return {
+        name, n: String(i + 1).padStart(2, '0'),
+        bg: on ? '#2a0d09' : '#101010',
+        bd: on ? '#8b1e14' : '#1c1b19',
+        fg: on ? '#e8ddd4' : '#8a8579',
+        numFg: on ? '#c2301f' : '#3a3833'
+      };
+    });
+
+    const voices = [1,2,3,4,5,6,7,8].map(n => {
+      const sel = n === 2;
+      const active = [1,2,3,5,8].indexOf(n) >= 0;
+      return {
+        n: String(n).padStart(2, '0'),
+        bg: sel ? '#2a0d09' : '#141312',
+        bd: sel ? '#8b1e14' : '#2a2927',
+        fg: sel ? '#f0e6dc' : (active ? '#c9c4b8' : '#55524b'),
+        dot: sel ? '#c2301f' : (active ? '#4a4842' : '#232220')
+      };
+    });
+
+    const pRoles = [['PITCH',188],['FILTER',96],['RESON',144],['GRAIN',62],['UNUSED',0],['DECAY',210],['LEVEL',176],['UNUSED',0]];
+    const pKnobs = pRoles.map((r, i) => this.knob(r[0], r[1], { i, hot: i === 1 }));
+    const postKnobs = [['DRIVE',204],['TONE',118],['CRUSH',88],['TIME',142],['FBACK',166],['MIX',96]].map(r => this.knob(r[0], r[1]));
+    const transportKnobs = [
+      { label: 'BPM', val: '112', deg: Math.round(-135 + 270 * 0.44) },
+      { label: 'BEATS', val: '04', deg: Math.round(-135 + 270 * 0.25) },
+      { label: 'BARS', val: '02', deg: Math.round(-135 + 270 * 0.18) },
+      { label: 'GAIN', val: '188', deg: Math.round(-135 + 270 * 0.73) }
+    ];
+    const survKnobs = [
+      this.knob('MIX', 168, { note: 'DRY ↔ LOOP' }),
+      this.knob('FB', 214, { note: 'RETENTION', hot: true }),
+      this.knob('OD', 96, { note: 'OVERDUB' }),
+      this.knob('HALF', 128, { text: 'NORM', note: '½ / 1× / 2×' }),
+      this.knob('REV', 0, { text: 'OFF', note: 'REVERSE' }),
+      this.knob('SLICE', 190, { text: '1/8', note: 'STUTTER' })
+    ];
+
+    const lockerNames = [
+      ['N.72-0418','session.conf','PATCH'],
+      ['N.72-0417','0417-2214.wav','04:12'],
+      ['N.72-0416','0416-0338.wav','01:47'],
+      ['N.72-0415','shroud.morgue','PATCH'],
+      ['N.72-0414','0414-1902.wav','12:03'],
+      ['N.72-0413','tape-erase-A.wav','00:38'],
+      ['N.72-0412','tape-erase-B.wav','00:41'],
+      ['N.72-0411','autopsy-loop.wav','02:00'],
+      ['N.72-0410','0410-0117.wav','06:55'],
+      ['N.72-0409','organ-bed.wav','03:21'],
+      ['N.72-0408','clot.morgue','PATCH'],
+      ['N.72-0407','0407-2350.wav','08:14'],
+      ['N.72-0406','hiss-floor.wav','01:12'],
+      ['N.72-0405','specimen-04.wav','00:22']
+    ];
+    const lockerFiles = lockerNames.map((f, i) => ({
+      serial: f[0], name: f[1], meta: f[2],
+      bg: i === 0 ? '#191816' : 'transparent',
+      fg: i === 0 ? '#f0e6dc' : (f[2] === 'PATCH' ? '#8a5a2b' : '#c9c4b8'),
+      serialFg: i === 0 ? '#c2301f' : '#3a3833'
+    }));
+
+    const bars = [];
+    for (let i = 1; i <= 32; i++) bars.push({ n: i % 4 === 1 ? String(i) : '', line: i % 4 === 0 ? '#2a2927' : '#1c1b19', fg: i % 4 === 1 ? '#8a8579' : '#3a3833' });
+
+    const clip = (left, w, name, kind) => ({
+      left, w, name,
+      bg: kind === 'rec' ? '#1d1210' : kind === 'pat' ? '#171614' : '#141312',
+      bd: kind === 'rec' ? '#8b1e14' : kind === 'pat' ? '#6b4a2a' : '#3a3833',
+      fg: kind === 'rec' ? '#e8ddd4' : '#c9c4b8',
+      wave: 14
+    });
+    const lanes = [
+      { name: 'V01 THUMP', kind: 'VOICE', clips: [clip(0, 25, 'THUMP A', 'aud'), clip(37.5, 25, 'THUMP A', 'aud')] },
+      { name: 'V02 METAL', kind: 'VOICE', clips: [clip(12.5, 21.8, 'METAL 02', 'aud'), clip(50, 31, 'METAL 02.2', 'rec')] },
+      { name: 'V03 DUST', kind: 'VOICE', clips: [clip(0, 50, 'DUST BED', 'aud')] },
+      { name: 'V04 BONE', kind: 'VOICE', clips: [clip(62.5, 25, 'BONE HIT', 'aud')] },
+      { name: 'V05 SIREN', kind: 'VOICE', clips: [] },
+      { name: 'V06 TAR', kind: 'VOICE', clips: [clip(25, 37.5, 'TAR CRAWL', 'aud')] },
+      { name: 'V07 HISS', kind: 'VOICE', clips: [clip(0, 100, 'HISS FLOOR', 'aud')] },
+      { name: 'V08 CHOKE', kind: 'VOICE', clips: [] },
+      { name: 'LICKS PAT A', kind: 'STEP', clips: [clip(12.5, 50, 'PATTERN A ×8', 'pat')] },
+      { name: 'MASS W1', kind: 'SMPL', clips: [clip(56.2, 18.8, 'autopsy-loop', 'aud')] }
+    ].map(l => Object.assign(l, {
+      h: 42,
+      fg: l.clips.length ? '#c9c4b8' : '#55524b',
+      bg: '#090908',
+      armDot: l.name === 'V02 METAL' ? '#c2301f' : '#232220'
+    }));
+
+    const licksNames = [
+      ['SLOT 01','0416-0338.wav','44.1k · 1.47 s · ONE-SHOT',1],
+      ['SLOT 02','bone-snap.wav','44.1k · 0.31 s · ONE-SHOT',1],
+      ['SLOT 03','hiss-floor.wav','44.1k · 1.12 s · LOOP',2],
+      ['SLOT 04','tape-erase-A.wav','44.1k · 0.38 s · ONE-SHOT',2],
+      ['SLOT 05','clot-hit.wav','44.1k · 0.22 s · ONE-SHOT',3],
+      ['SLOT 06','organ-bed.wav','44.1k · 3.21 s · LOOP',0],
+      ['SLOT 07','— EMPTY —','DOUBLE-CLICK OR DRAG TO LOAD',0],
+      ['SLOT 08','— EMPTY —','DOUBLE-CLICK OR DRAG TO LOAD',0]
+    ];
+    const licksPats = [
+      [2,0,0,0,1,0,0,0,2,0,0,0,1,0,1,0],
+      [0,0,1,0,0,0,2,0,0,0,1,0,0,1,0,0],
+      [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0],
+      [0,0,0,1,0,0,0,0,0,2,0,0,0,0,0,1],
+      [0,1,0,0,0,1,0,1,0,0,0,1,0,0,1,0],
+      [2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+    ];
+    const licks = licksNames.map((s, i) => {
+      const empty = s[1].indexOf('EMPTY') >= 0;
+      const muted = i === 5;
+      return {
+        n: String(i + 1).padStart(2, '0'),
+        name: s[1], meta: s[2],
+        fg: empty ? '#3a3833' : '#c9c4b8',
+        mBg: muted ? '#2a0d09' : '#131211', mBd: muted ? '#8b1e14' : '#2a2927', mFg: muted ? '#e8ddd4' : '#55524b',
+        sBg: '#131211', sBd: '#2a2927', sFg: '#55524b',
+        pitchDeg: Math.round(-135 + 270 * (0.35 + i * 0.07)),
+        velDeg: Math.round(-135 + 270 * (0.7 - i * 0.05)),
+        lvlDeg: Math.round(-135 + 270 * (0.62 + i * 0.02)),
+        choke: s[3] ? 'G' + s[3] : '—',
+        chokeBg: s[3] ? '#1a1512' : '#101010',
+        chokeBd: s[3] ? '#6b4a2a' : '#1c1b19',
+        chokeFg: s[3] ? '#8a5a2b' : '#3a3833',
+        meter: empty ? 0 : [72,40,86,34,28,0,0,0][i],
+        cells: licksPats[i].map(v => (v === 2 ? acc : v === 1 ? hit : off))
+      };
+    });
+
+    const insert = (name, kind) => ({
+      name,
+      bg: kind === 'on' ? '#1a1512' : kind === 'hot' ? '#2a0d09' : '#101010',
+      bd: kind === 'on' ? '#6b4a2a' : kind === 'hot' ? '#8b1e14' : '#1c1b19',
+      fg: kind === 'on' ? '#c9a06a' : kind === 'hot' ? '#e8ddd4' : '#3a3833'
+    });
+    const chanDef = [
+      ['V01 THUMP', 214, 78, ['DRIVE','BITCRUSH','—','—'], 'L12'],
+      ['V02 METAL', 188, 64, ['WAVEFOLD','LP FILTER','DELAY','—'], 'C'],
+      ['V03 DUST', 132, 42, ['HP FILTER','—','—','—'], 'R08'],
+      ['V04 BONE', 240, 92, ['DRIVE','FEEDBACK','—','—'], 'L24'],
+      ['V05 SIREN', 96, 12, ['PITCH-SH','—','—','—'], 'C'],
+      ['V06 TAR', 0, 0, ['REVERB','—','—','—'], 'R16'],
+      ['V07 HISS', 156, 54, ['—','—','—','—'], 'C'],
+      ['V08 CHOKE', 176, 68, ['GLITCH','CRUSH','—','—'], 'L04'],
+      ['LICKS', 200, 74, ['DRIVE','—','—','—'], 'C'],
+      ['RET A REV', 148, 38, ['CONV REV','—','—','—'], 'C'],
+      ['RET B DLY', 164, 46, ['FB DELAY','—','—','—'], 'C'],
+      ['MASTER', 232, 88, ['TONE','LIMITER','—','—'], 'C']
+    ];
+    const mixChans = chanDef.map((c, i) => {
+      const master = c[0] === 'MASTER';
+      const muted = c[1] === 0;
+      const ret = c[0].indexOf('RET') === 0;
+      return {
+        name: c[0], flex: master ? 1.5 : 1,
+        bg: master ? '#100f0e' : ret ? '#0c0b0a' : '#0a0a09',
+        fg: muted ? '#55524b' : master ? '#f0e6dc' : '#c9c4b8',
+        dot: muted ? '#232220' : master ? '#c2301f' : (i === 1 ? '#c2301f' : '#4a4842'),
+        inserts: c[3].map(n => insert(n, n === '—' ? 'off' : (master ? 'hot' : 'on'))),
+        sends: ['A','B','C','D'].map((l, j) => {
+          const amt = [0.2, 0.55, 0, 0.35][(i + j) % 4];
+          return {
+            label: l,
+            deg: Math.round(-135 + 270 * amt),
+            ring: amt > 0.4 ? '#6b4a2a' : '#2a2927',
+            cut: amt > 0 ? (amt > 0.4 ? '#c9a06a' : '#8a8579') : '#3a3833',
+            fg: amt > 0.4 ? '#8a5a2b' : '#55524b'
+          };
+        }),
+        panLabel: c[4],
+        panPos: c[4] === 'C' ? 50 : (c[4][0] === 'L' ? 50 - parseInt(c[4].slice(1), 10) : 50 + parseInt(c[4].slice(1), 10)),
+        fill: Math.round((c[1] / 256) * 100),
+        peak: c[2],
+        faderFill: muted ? '#2a2927' : '#8b1e14',
+        meterFill: c[2] > 85 ? '#b8862b' : '#8b1e14',
+        val: String(c[1]).padStart(3, '0'),
+        db: muted ? '−∞' : (c[1] >= 232 ? '+0.0' : '−' + ((256 - c[1]) / 12).toFixed(1)),
+        mBg: muted ? '#2a0d09' : '#131211', mBd: muted ? '#8b1e14' : '#2a2927', mFg: muted ? '#e8ddd4' : '#55524b',
+        sBg: i === 1 ? '#1a1512' : '#131211', sBd: i === 1 ? '#6b4a2a' : '#2a2927', sFg: i === 1 ? '#c9a06a' : '#55524b',
+        route: master ? 'OUT 1-2' : ret ? 'MASTER' : (i < 4 ? 'G1' : 'MASTER')
+      };
+    });
+
+    const wellDef = [
+      ['autopsy-loop.wav', '02:00.0 · 44.1k · STEREO', true, 41],
+      ['tape-erase-A.wav', '00:00.38 · 44.1k · MONO', false, 0],
+      ['organ-bed.wav', '03:21.4 · 48k · STEREO', true, 78],
+      ['— EMPTY —', 'DOUBLE-CLICK TO LOAD', false, 0]
+    ];
+    const wells = wellDef.map((w, i) => {
+      const empty = w[0].indexOf('EMPTY') >= 0;
+      return {
+        n: String(i + 1).padStart(2, '0'),
+        name: w[0], meta: w[1],
+        fg: empty ? '#3a3833' : '#c9c4b8',
+        dot: w[2] ? '#c2301f' : '#232220',
+        pts: empty ? '0,60 600,60' : this.wave(300, 600, 120, 100, 3 + i * 7),
+        wave: empty ? '#1c1b19' : (w[2] ? '#c9c4b8' : '#6b6760'),
+        play: w[3], head: w[2] ? '#c2301f' : 'transparent',
+        hint: empty ? 'WAV / AIFF / MP3 / OGG / FLAC' : 'PEAK ' + (0.6 + i * 0.1).toFixed(2),
+        playBg: w[2] ? '#2a0d09' : '#131211', playBd: w[2] ? '#8b1e14' : '#3a3833', playFg: w[2] ? '#e8ddd4' : '#8a8579',
+        revBg: i === 2 ? '#2a0d09' : '#131211', revBd: i === 2 ? '#8b1e14' : '#2a2927', revFg: i === 2 ? '#e8ddd4' : '#55524b',
+        loopBg: w[2] ? '#1a1512' : '#131211', loopBd: w[2] ? '#6b4a2a' : '#2a2927', loopFg: w[2] ? '#c9a06a' : '#55524b',
+        pitchDeg: Math.round(-135 + 270 * (0.5 + (i - 1) * 0.12)),
+        rate: empty ? '' : (i === 2 ? 'PITCH +5 st' : 'PITCH ' + (i === 0 ? '−2' : '0') + ' st')
+      };
+    });
+
+    const ccCols = ['p0','p1','p2','p3','p4','p5','p6','p7','DRIVE','TONE','CRUSH','SPACE','LEVEL','LOOP MIX'].map(l => ({ label: l }));
+    const ccDef = [
+      ['CC 074','ENC 1',3,187],
+      ['CC 071','ENC 2',1,96],
+      ['CC 016','FADER A',8,204],
+      ['CC 017','FADER B',9,118],
+      ['CC 018','FADER C',12,240],
+      ['CC 019','FADER D',13,168],
+      ['CC 064','SUSTAIN',-1,0],
+      ['NOTE D#2','PAD 04',-1,104],
+      ['NOTE E2','PAD 05',-1,88],
+      ['— UNMAPPED','LEARN…',-1,0]
+    ];
+    const ccRows = ccDef.map((r, i) => ({
+      name: r[0], meta: r[1],
+      fg: r[2] < 0 ? (i === 9 ? '#3a3833' : '#8a8579') : '#c9c4b8',
+      cells: ccCols.map((c, j) => ({
+        bg: j === r[2] ? '#8b1e14' : 'transparent',
+        bd: j === r[2] ? '#c2301f' : '#1c1b19'
+      })),
+      pct: Math.round((r[3] / 255) * 100),
+      val: r[3] ? String(r[3]).padStart(3, '0') : '—',
+      barFill: r[3] > 200 ? '#b8862b' : '#8b1e14'
+    }));
+
+    const manualDef = [
+      ['01','LOCKER','Specimen archive of ~/MORGUE — recorded WAVs and project patches. Serial-tagged. Drag to a sampler slot or timeline lane.','LIVE'],
+      ['02','RACK','The voice station. 8 bytebeat layers: source, expression text, p0–p7, post chain, 16-step sequencer. RETURN compiles without a glitch.','LIVE'],
+      ['03','ARRANGE','Song timeline. Bars across, lanes down. Clips, per-lane recording, automation. Playhead is the engine clock.','CANVAS'],
+      ['04','GRAIN MASS','Four sample wells. Load, play, pitch, reverse, loop. Mixes on top of the engine in real time.','LIVE'],
+      ['05','GRAIN LICKS','Step sampler. One sample per slot, 16 steps, choke groups. This is how you make a beat.','PLANNED'],
+      ['06','SURVIVOR','Master phrase looper. ARM captures one bar at the next boundary — every layer and its tails.','LIVE'],
+      ['07','MIXER','Levels, mutes, meters. Inserts and sends A–D route into shared return buses.','PARTIAL'],
+      ['08','HW/SYNC','MIDI in: notes trigger the focused voice, CC drives its parameters. Learn any knob by right-click.','LIVE'],
+      ['09','TRANSPORT','RUN is master on. CUT is instant silence. REC writes a real WAV to ~/MORGUE. BPM / BEATS / BARS / GAIN are live.','LIVE'],
+      ['10','SCOPE','Oscilloscope of the master bus, pre-gain and pre-mute, at 30 Hz. If the line is flat, nothing is sounding.','LIVE'],
+      ['11','STATUS','Bar, step, CPU against budget, and the CLIP lamp when the master hits the rails.','LIVE'],
+      ['12','EXPORT','Stem render: one WAV per voice, slot and return, plus master and full song.','PLANNED']
+    ];
+    const manual = manualDef.map(z => {
+      const s = z[3];
+      const c = s === 'LIVE' ? ['#8b1e14','#c2301f'] : s === 'PARTIAL' || s === 'CANVAS' ? ['#6b4a2a','#8a5a2b'] : ['#2a2927','#55524b'];
+      return { n: z[0], name: z[1], desc: z[2], status: s, badgeBd: c[0], badgeFg: c[1] };
+    });
+
+    const rules = [
+      'If it makes no sound: press RUN, or release CUT.',
+      'If a knob reads UNUSED, the current expression ignores it. Change the expression, not the knob.',
+      'RETURN compiles. Nothing is committed until you press it, and nothing glitches when you do.',
+      'CUT silences the master but never wipes the SURVIVOR loop.',
+      'REC captures the master bus post-everything. What you hear is what lands on disk.',
+      'The session autosaves. Nothing you build here is lost, including the mistakes.'
+    ].map((t, i) => ({ n: String(i + 1).padStart(2, '0'), text: t }));
+
+    const keys = [
+      ['?','Open / close this map'],
+      ['RETURN','Compile the expression'],
+      ['1 – 8','Focus voice 01–08'],
+      ['SPACE','RUN / mute master'],
+      ['ESC','CUT — panic silence'],
+      ['R','Reverse focused sample'],
+      ['O','Loop focused sample'],
+      ['A / Z','Sample pitch up / down'],
+      ['M','Arm motion capture on the last touched knob'],
+      ['⌘Z','Undo last edit'],
+      ['⌘R','Toggle REC'],
+      ['DRAG','Knobs respond to horizontal drag; ⌘-drag is fine mode']
+    ].map(k => ({ key: k[0], desc: k[1] }));
+
+    const swatches = [
+      ['GROUND','#0a0a0a','Window ground, deepest field'],
+      ['PANEL','#0c0b0a','Panel body / lane field'],
+      ['RAISED','#151412','Header bands, transport'],
+      ['SOCKET','#060606','Recessed wells, editors, scope'],
+      ['HAIRLINE','#232220','All 1px rules and borders'],
+      ['EDGE','#3a3833','Raised control borders'],
+      ['INK','#ded9ce','Primary text / bone'],
+      ['INK DIM','#8a8579','Labels'],
+      ['INK FAINT','#55524b','Metadata, disabled'],
+      ['BLOOD','#8b1e14','Armed / live / fills — ONLY accent'],
+      ['BLOOD HOT','#c2301f','Lamps, playhead, clip'],
+      ['OXIDE','#8a5a2b','Sends, automation, PLANNED tags']
+    ].map(s => ({ name: s[0], hex: s[1], use: s[2] }));
+
+    const knobStates = [
+      Object.assign(this.knob('FILTER', 96, {}), { note: 'DEFAULT · role from bytecode' }),
+      Object.assign(this.knob('FILTER', 96, { hot: true }), { note: 'HOVER / DRAGGING · blood ring' }),
+      Object.assign(this.knob('UNUSED', 0, {}), { note: 'UNUSED · expression ignores p4' }),
+      Object.assign(this.knob('DRIVE', 255, {}), { note: 'MAX · 255' }),
+      Object.assign(this.knob('PITCH', 128, {}), { note: 'CENTRE · 128' }),
+      Object.assign(this.knob('CC 074', 187, { hot: true }), { note: 'MIDI-BOUND · learn saved' })
+    ];
+
+    const btnStates = [
+      ['RUN','#2a0d09','#8b1e14','#e8ddd4','#c2301f','ARMED / LIVE'],
+      ['RUN','#141312','#3a3833','#8a8579','#2a2927','IDLE'],
+      ['CUT','#8b1e14','#c2301f','#f0e6dc','#f0e6dc','ENGAGED — PANIC'],
+      ['REC','#2a0d09','#8b1e14','#e8ddd4','#c2301f','RECORDING'],
+      ['BODY','#2a0d09','#8b1e14','#e8ddd4','#c2301f','TOGGLE ON'],
+      ['SPACE','#131211','#3a3833','#6b6760','#2a2927','TOGGLE OFF'],
+      ['MUTATE','#1b1a17','#3a3833','#ded9ce','#3a3833','ACTION / HOVER'],
+      ['EXPORT','#101010','#1c1b19','#3a3833','#141312','DISABLED']
+    ].map(b => ({ label: b[0], bg: b[1], bd: b[2], fg: b[3], dot: b[4], state: b[5] }));
+
+    const cellStates = [
+      Object.assign({}, off, { label: 'OFF' }),
+      Object.assign({}, hit, { label: 'HIT' }),
+      Object.assign({}, acc, { label: 'ACCENT' }),
+      { bg: '#1b1a17', bd: '#6b4a2a', dot: '#c9a06a', label: 'PLAYHEAD' }
+    ];
+
+    const faderStates = [
+      { fill: 84, color: '#8b1e14', val: '214', label: 'NORMAL' },
+      { fill: 100, color: '#8b1e14', val: '256', label: 'UNITY MAX' },
+      { fill: 0, color: '#2a2927', val: '000', label: 'MUTED' }
+    ];
+    const meterStates = [
+      { hot: 0, hotColor: '#b8862b', body: 46, label: 'NOMINAL' },
+      { hot: 14, hotColor: '#b8862b', body: 72, label: 'HOT −6dB' },
+      { hot: 22, hotColor: '#c2301f', body: 78, label: 'CLIPPING' }
+    ];
+
+    const typeScale = [
+      ['STENCIL / MASTHEAD', 30, '.20em', "'IBM Plex Sans Condensed',sans-serif", 700, 'MORGUE', '30/700/.20em'],
+      ['PANEL TITLE', 11, '.24em', "'IBM Plex Sans Condensed',sans-serif", 700, 'GRAIN MASS', '11/700/.24em'],
+      ['LABEL', 9, '.16em', "'IBM Plex Mono',monospace", 500, 'EXPRESSION PARAMETERS', '9/500/.16em CAPS'],
+      ['MICRO LABEL', 8, '.10em', "'IBM Plex Mono',monospace", 400, 'CHOKE · G2 · LOCK LANE', '8/400/.10em'],
+      ['DATA READOUT', 15, '.04em', "'IBM Plex Mono',monospace", 400, '112 · 214 · −3.1dB', '15/400/.04em'],
+      ['CODE / EXPRESSION', 12, '0', "'IBM Plex Mono',monospace", 400, 't*((t>>9|t>>13)&15)&127', '12/400 line-height 1.5']
+    ].map(t => ({ role: t[0], px: t[1], ls: t[2], fam: t[3], w: t[4], sample: t[5], spec: t[6] }));
+
+    const juceMap = [
+      ['MorgueMainComponent','Root. Owns zone layout in resized(); 1440×900 default, min 1180×760.'],
+      ['LockerListBox','ListBoxModel over ~/MORGUE; custom paintListBoxItem, serial + name + meta columns.'],
+      ['ScopeComponent','Timer at 30 Hz; draws a Path from the engine ring buffer, pre-gain / pre-mute.'],
+      ['StageTabs','Custom tab strip (not TabbedComponent) — 30px, 2px blood underline on the active tab.'],
+      ['EngravedKnob : Slider','Rotary, custom paint: face, 1px cut, −135°…+135°; label + value drawn beneath.'],
+      ['PlateButton : Button','Flat toggle plate with optional 5px lamp; blood border when armed.'],
+      ['StepGrid','16 cells, tri-state per cell; mouseDown cycles, right-click clears; playhead column tint.'],
+      ['ChannelStrip','Inserts list, 4 send knobs, pan bar, fader trough + meter, M/S plates, route tag.'],
+      ['TimelineComponent','Bar ruler + lane viewport; clips as child Components with trim edges; blood playhead.'],
+      ['AutomationLane','Draws a Path from seq_lock/motion_mask; click-drag edits, ARM records knob moves.'],
+      ['FieldManualOverlay','Modal full-window component, ESC / ? dismisses; grid of zone cards.'],
+      ['MorgueLookAndFeel','No default JUCE drawing. No gradients, no rounded corners, no drop shadows.']
+    ].map(j => ({ cls: j[0], desc: j[1] }));
+
+    const stemDef = [
+      ['MASTER · 0418-full.wav','48.2 MB',true],
+      ['V01 THUMP','12.1 MB',true],
+      ['V02 METAL','12.1 MB',true],
+      ['V03 DUST','12.1 MB',true],
+      ['V04 BONE','12.1 MB',true],
+      ['V05 SIREN','12.1 MB',false],
+      ['V06 TAR (MUTED)','—',false],
+      ['V07 HISS','12.1 MB',true],
+      ['V08 CHOKE','12.1 MB',true],
+      ['LICKS PATTERN A','12.1 MB',true],
+      ['RETURN A · REVERB','12.1 MB',true],
+      ['RETURN B · FEEDBACK DELAY','12.1 MB',true]
+    ];
+    const stems = stemDef.map(s => ({
+      name: s[0], size: s[2] ? s[1] : '—',
+      boxBd: s[2] ? '#8b1e14' : '#3a3833',
+      boxBg: s[2] ? '#2a0d09' : '#0c0b0a',
+      tick: s[2] ? '#c2301f' : 'transparent',
+      fg: s[2] ? '#c9c4b8' : '#55524b'
+    }));
+
+    const index = [
+      ['01','RACK','LIVE'],['02','ARRANGE','R2/R3'],['03','GRAIN LICKS','R1'],['04','GRAIN MASS','LIVE'],
+      ['05','SURVIVOR','LIVE'],['06','MIXER','R4/R5'],['07','EXPORT','R6'],['08','HW/SYNC','R8'],
+      ['09','FIELD MANUAL','LIVE'],['10','COMPONENTS','SPEC']
+    ].map(i => ({ n: i[0], name: i[1], status: i[2] }));
+
+    const sliceGrid = [1,2,3,4,5,6,7].map(i => ({ left: i * 12.5 }));
+
+    return {
+      index, steps, lockLane, sources, voices, pKnobs, postKnobs, transportKnobs, survKnobs,
+      lockerFiles, bars, lanes, licks, mixChans, wells, ccCols, ccRows, manual, rules, keys,
+      swatches, knobStates, btnStates, cellStates, faderStates, meterStates, typeScale, juceMap, stems, sliceGrid,
+      scopePts: this.wave(220, 220, 140, 96, 11),
+      loopPts: this.wave(500, 1000, 160, 120, 23),
+      autoPts: (() => {
+        const p = [];
+        for (let i = 0; i <= 40; i++) {
+          const t = i / 40;
+          const y = 30 - Math.sin(t * 6.2) * 18 - (t > 0.5 ? 6 : 0);
+          p.push((t * 1000).toFixed(0) + ',' + y.toFixed(1));
+        }
+        return p.join(' ');
+      })(),
+      tabsRack: this.tabs('RACK'), tabsArr: this.tabs('ARRANGE'), tabsLicks: this.tabs('GRAIN LICKS'),
+      tabsMass: this.tabs('GRAIN MASS'), tabsSurv: this.tabs('SURVIVOR'), tabsMix: this.tabs('MIXER'),
+      tabsHw: this.tabs('HW/SYNC'), tabsExp: this.tabs('EXPORT')
+    };
+  }
+}
+</script>
+</body>
+</html>

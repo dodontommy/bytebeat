@@ -48,28 +48,6 @@
 #include <stdlib.h>
 #include <time.h>
 
-/* ---- control metadata -------------------------------------------------- */
-const CtlInfo bb_lctl_info[LCTL_COUNT] = {
-    { "LEVEL",   0, 256, 8, 32 },
-    { "DRIVE",   0, 255, 4, 32 },
-    { "TONE",    1, 255, 4, 32 },
-    { "CRUSH",   0, 255, 2, 16 },
-    { "SP-TIME", 0, 255, 4, 32 },
-    { "SP-FB",   0, 255, 4, 32 },
-    { "SP-MIX",  0, 255, 4, 32 },
-    { "STEPS",   1,  16, 1,  4 },
-    { "DECAY",   0, 255, 4, 32 },
-    { "SP-SYNC", 0,  10, 1,  2 },
-    { "FREEZE",  0,   1, 1,  1 },
-};
-
-const CtlInfo bb_gctl_info[GCTL_COUNT] = {
-    { "BPM",    30, 240, 1, 10 },
-    { "BEATS",   1,  16, 1,  4 },
-    { "BARS",    1,  16, 1,  4 },
-    { "ZOOM",    1, 256, 2, 16 },
-};
-
 /* ---- modes ------------------------------------------------------------- */
 enum { M_NORMAL = 0, M_INSERT, M_SEQ, M_PERF };
 static int mode_ui;

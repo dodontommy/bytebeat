@@ -1,13 +1,15 @@
-/* main.c -- startup, shutdown, the program free list, and the session file.
+/* main.c -- startup, shutdown, CLI parsing, and the terminal UI driver.
  *
- * The interesting part of this file is bb_publish() / bb_reclaim(): the
- * mechanism by which a newly typed expression reaches the audio thread
- * without a lock and without the audio thread ever touching the allocator.
- * Everything else here is plumbing.
+ * The audio engine now lives in engine.c: the render loop, the session FILE
+ * machinery, the program free list, and the `bb` master state are all owned
+ * there, so both the terminal instrument and the GUI share one instrument.
+ * This file is the terminal front-end: argument parsing, the headless eval
+ * mode, the regression suite driver, and turning the engine over to ncurses.
  */
 
 #include "bytebeat.h"
 #include "audio.h"
+#include "engine.h"
 #include "sink.h"
 #include "ui.h"
 #include "rack.h"
@@ -25,379 +27,6 @@
 #include <sys/types.h>
 #include <stdarg.h>
 
-struct bb_state bb;
-
-char bb_expr[BB_NLAYER][BB_EXPR_MAX];
-Rack bb_rack[BB_NLAYER];
-int  bb_custom[BB_NLAYER];
-
-volatile sig_atomic_t bb_quit_signal;
-
-/* ======================================================================== */
-/*  Program publication and reclamation                                     */
-/* ======================================================================== */
-
-/* Retired programs waiting to be freed. Touched ONLY by the UI thread, so it
- * needs no synchronisation of its own. */
-static Program *retire_head;
-
-/* THE SWAP.
- *
- * The audio thread holds a pointer to a Program and dereferences it a few
- * thousand times per period. We want to replace it while that is happening.
- *
- * A mutex would work and is completely unacceptable: if the UI thread is
- * holding the lock when the audio thread wants it, the audio thread blocks,
- * misses its deadline, and you hear a gap. Worse, it could block on a thread
- * that has been preempted and is not running at all (priority inversion).
- *
- * So instead:
- *   - the new program is built somewhere the audio thread has never seen
- *   - one atomic exchange makes it visible
- *   - the old pointer is remembered, not freed
- *
- * The release semantics of the exchange guarantee that every byte written
- * into the new Program is visible to any thread that subsequently acquires
- * the pointer. The audio thread therefore either sees the whole old program
- * or the whole new one -- never a half-written mixture -- and it never waits
- * for anything.
- *
- * The cost of not locking is that we cannot free the old program here. The
- * audio thread might be three instructions into evaluating it. That is what
- * the retire list is for.
- */
-int bb_publish(int layer, const char *src, ExprError *err)
-{
-    if (layer < 0 || layer >= BB_NLAYER) return 0;
-
-    Program *np = malloc(sizeof *np);
-    if (!np) {
-        err->ok  = 0;
-        err->col = 0;
-        snprintf(err->msg, sizeof err->msg, "out of memory");
-        return 0;
-    }
-
-    if (!expr_compile(src, np, err)) {
-        free(np);
-        return 0;            /* audio thread never learns this happened */
-    }
-
-    Program *old = atomic_exchange(&bb.layer[layer].prog, np);
-
-    if (old) {
-        /* Record which period was in flight when we swapped. See bb_reclaim.
-         * This load must come AFTER the exchange -- reading the epoch first
-         * would let us underestimate how far the audio thread has got. */
-        old->retire_epoch = atomic_load(&bb.epoch);
-        old->next = retire_head;
-        retire_head = old;
-    }
-    return 1;
-}
-
-/* WHEN IS AN OLD PROGRAM DEAD?
- *
- * The audio thread's period loop is, in order:
- *
- *     epoch++            (sequentially consistent)
- *     prog = load(prog)  (sequentially consistent)
- *     ...render with prog...
- *
- * Say we published, then read epoch == E.
- *
- * The period that incremented epoch to E may have loaded `prog` before our
- * store, so it might still be using the old program.
- *
- * The period that increments epoch to E+1 comes after our epoch read in the
- * single total order that sequential consistency provides, and its load of
- * `prog` comes after that increment. So it is guaranteed to see the new
- * pointer.
- *
- * Periods run one after another on one thread, so when we observe epoch
- * >= E+2 the period numbered E+1 has already started, which means the period
- * numbered E has already finished. Nobody can be looking at the old program.
- * Free it.
- *
- * In wall-clock terms that is about two periods, i.e. ~20ms. Programs are
- * ~6KB; typing at ten keystrokes a second retires 60KB/s and reclaims all of
- * it two frames later.
- */
-void bb_reclaim(void)
-{
-    unsigned long long now = atomic_load(&bb.epoch);
-    Program **pp = &retire_head;
-    while (*pp) {
-        Program *p = *pp;
-        if (now >= p->retire_epoch + 2) {
-            *pp = p->next;
-            free(p);
-        } else {
-            pp = &p->next;
-        }
-    }
-}
-
-static void free_all_programs(void)
-{
-    /* Called after the audio thread has been joined, so everything is safe. */
-    Program *p = retire_head;
-    while (p) { Program *n = p->next; free(p); p = n; }
-    retire_head = NULL;
-
-    for (int i = 0; i < BB_NLAYER; i++)
-        free(atomic_exchange(&bb.layer[i].prog, NULL));
-}
-
-/* ======================================================================== */
-/*  Session file                                                            */
-/* ======================================================================== */
-
-static char cfg_dir[512];
-static char cfg_path[600];
-
-static void cfg_paths(void)
-{
-    const char *xdg = getenv("XDG_CONFIG_HOME");
-    const char *home = getenv("HOME");
-    if (xdg && *xdg) snprintf(cfg_dir, sizeof cfg_dir, "%s/bytebeat", xdg);
-    else if (home)   snprintf(cfg_dir, sizeof cfg_dir, "%s/.config/bytebeat", home);
-    else             snprintf(cfg_dir, sizeof cfg_dir, ".bytebeat");
-    snprintf(cfg_path, sizeof cfg_path, "%s/session.conf", cfg_dir);
-}
-
-const char *bb_config_path(void) { return cfg_path; }
-
-static void mkdirs(const char *path)
-{
-    char tmp[600];
-    snprintf(tmp, sizeof tmp, "%s", path);
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') { *p = '\0'; mkdir(tmp, 0755); *p = '/'; }
-    }
-    mkdir(tmp, 0755);
-}
-
-int bb_config_save(void)
-{
-    mkdirs(cfg_dir);
-    FILE *f = fopen(cfg_path, "w");
-    if (!f) return -1;
-
-    /* Version tag: the control layout changed when slots became layers, and
-     * silently reading an old file would drop values into the wrong knobs.
-     * Version 3 adds the rack -- the structured description of each voice.
-     * A version 2 file has expressions but no racks, so every layer in one is
-     * loaded as `custom`: the text is all we have, and inventing a rack to go
-     * with it would put wrong labels on the panel. Version 4 adds expressive
-     * sequence lanes, clocked/frozen SPACE, and master-looper settings. */
-    fprintf(f, "# bytebeat session -- plain text, edit it if you like\n");
-    fprintf(f, "version 4\n");
-    fprintf(f, "rate %d\n", atomic_load(&bb.req_rate));
-    fprintf(f, "gain %d\n", atomic_load(&bb.gain));
-    fprintf(f, "focus %d\n", atomic_load(&bb.focus));
-    fprintf(f, "looper %d %d %d %d %d %d %d\n",
-            atomic_load(&bb.loop_bars), atomic_load(&bb.loop_mix),
-            atomic_load(&bb.loop_feedback), atomic_load(&bb.loop_overdub),
-            atomic_load(&bb.loop_rate), atomic_load(&bb.loop_reverse),
-            atomic_load(&bb.loop_slice));
-
-    fprintf(f, "gctl");
-    for (int i = 0; i < GCTL_COUNT; i++) fprintf(f, " %d", atomic_load(&bb.gctl[i]));
-    fprintf(f, "\n");
-
-    for (int L = 0; L < BB_NLAYER; L++) {
-        Layer *ly = &bb.layer[L];
-        fprintf(f, "layer %d on %d mode %d seq %d\n", L,
-                atomic_load(&ly->on), atomic_load(&ly->mode),
-                atomic_load(&ly->seq_on));
-
-        fprintf(f, "param %d", L);
-        for (int i = 0; i < BB_NPARAM; i++) fprintf(f, " %d", atomic_load(&ly->param[i]));
-        fprintf(f, "\n");
-
-        fprintf(f, "lctl %d", L);
-        for (int i = 0; i < LCTL_COUNT; i++) fprintf(f, " %d", atomic_load(&ly->ctl[i]));
-        fprintf(f, "\n");
-
-        fprintf(f, "gate %d", L);
-        for (int i = 0; i < BB_STEPS; i++) fprintf(f, " %d", atomic_load(&ly->seq_gate[i]));
-        fprintf(f, "\n");
-
-        fprintf(f, "pitch %d", L);
-        for (int i = 0; i < BB_STEPS; i++) fprintf(f, " %d", atomic_load(&ly->seq_pitch[i]));
-        fprintf(f, "\n");
-
-        fprintf(f, "ratchet %d", L);
-        for (int i = 0; i < BB_STEPS; i++) fprintf(f, " %d", atomic_load(&ly->seq_ratchet[i]));
-        fprintf(f, "\n");
-
-        fprintf(f, "prob %d", L);
-        for (int i = 0; i < BB_STEPS; i++) fprintf(f, " %d", atomic_load(&ly->seq_prob[i]));
-        fprintf(f, "\n");
-
-        fprintf(f, "motion %d %u\n", L, atomic_load(&ly->motion_mask));
-        for (int k = 0; k < BB_LOCK_COUNT; k++) {
-            fprintf(f, "lock %d %d", L, k);
-            for (int i = 0; i < BB_STEPS; i++)
-                fprintf(f, " %d", atomic_load(&ly->seq_lock[k][i]));
-            fprintf(f, "\n");
-        }
-
-        /* After `expr`, because loading an expression marks the layer custom
-         * and this line is what takes it back off again. */
-        fprintf(f, "expr %d %s\n", L, bb_expr[L]);
-        fprintf(f, "rack %d %d %d %d %d\n", L, bb_rack[L].src,
-                bb_rack[L].body, bb_rack[L].space, bb_custom[L]);
-    }
-
-    fclose(f);
-    return 0;
-}
-
-/* Read a whitespace-separated run of ints into a set of atomics. */
-static void read_ints(const char *p, atomic_int *dst, int n, int lo, int hi)
-{
-    for (int i = 0; i < n; i++) {
-        char *end;
-        long v = strtol(p, &end, 10);
-        if (end == p) return;
-        atomic_store(&dst[i], bb_clampi((int)v, lo, hi));
-        p = end;
-    }
-}
-
-/* Returns 1 if a session file was read. */
-int bb_config_load(void)
-{
-    FILE *f = fopen(cfg_path, "r");
-    if (!f) return 0;
-
-    char line[BB_EXPR_MAX + 96];
-    int  version = 1;
-
-    while (fgets(line, sizeof line, f)) {
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-        if (line[0] == '#' || line[0] == '\0') continue;
-
-        int v, L;
-
-        if (sscanf(line, "version %d", &v) == 1)      { version = v; continue; }
-        if (version < 2) continue;                    /* pre-layers: ignore */
-
-        if (sscanf(line, "rate %d", &v) == 1) {
-            atomic_store(&bb.req_rate, bb_clampi(v, BB_RATE_MIN, BB_RATE_MAX));
-        } else if (sscanf(line, "gain %d", &v) == 1) {
-            atomic_store(&bb.gain, bb_clampi(v, 0, 256));
-        } else if (sscanf(line, "focus %d", &v) == 1) {
-            atomic_store(&bb.focus, bb_clampi(v, 0, BB_NLAYER - 1));
-        } else if (!strncmp(line, "looper ", 7)) {
-            int bars, mix, fb, od, rt, rev, slice;
-            if (sscanf(line, "looper %d %d %d %d %d %d %d",
-                       &bars, &mix, &fb, &od, &rt, &rev, &slice) == 7) {
-                atomic_store(&bb.loop_bars, bb_clampi(bars, 1, 4));
-                atomic_store(&bb.loop_mix, bb_clampi(mix, 0, 256));
-                atomic_store(&bb.loop_feedback, bb_clampi(fb, 0, 256));
-                atomic_store(&bb.loop_overdub, !!od);
-                atomic_store(&bb.loop_rate, bb_clampi(rt, LOOP_RATE_HALF, LOOP_RATE_DOUBLE));
-                atomic_store(&bb.loop_reverse, !!rev);
-                if (slice != 1 && slice != 2 && slice != 4 && slice != 8 && slice != 16)
-                    slice = 1;
-                atomic_store(&bb.loop_slice, slice);
-            }
-        } else if (!strncmp(line, "gctl ", 5)) {
-            read_ints(line + 5, bb.gctl, GCTL_COUNT, -100000, 100000);
-            for (int i = 0; i < GCTL_COUNT; i++)
-                atomic_store(&bb.gctl[i], bb_clampi(atomic_load(&bb.gctl[i]),
-                             bb_gctl_info[i].lo, bb_gctl_info[i].hi));
-        } else if (!strncmp(line, "layer ", 6)) {
-            int on, md, sq;
-            if (sscanf(line, "layer %d on %d mode %d seq %d", &L, &on, &md, &sq) == 4
-                && L >= 0 && L < BB_NLAYER) {
-                atomic_store(&bb.layer[L].on, !!on);
-                atomic_store(&bb.layer[L].mode, bb_clampi(md, 0, BB_NMODE - 1));
-                atomic_store(&bb.layer[L].seq_on, !!sq);
-            }
-        } else if (!strncmp(line, "param ", 6)) {
-            const char *p = line + 6;
-            L = (int)strtol(p, (char **)&p, 10);
-            if (L >= 0 && L < BB_NLAYER)
-                read_ints(p, bb.layer[L].param, BB_NPARAM, 0, 255);
-        } else if (!strncmp(line, "lctl ", 5)) {
-            const char *p = line + 5;
-            L = (int)strtol(p, (char **)&p, 10);
-            if (L >= 0 && L < BB_NLAYER) {
-                read_ints(p, bb.layer[L].ctl, LCTL_COUNT, -100000, 100000);
-                for (int i = 0; i < LCTL_COUNT; i++)
-                    atomic_store(&bb.layer[L].ctl[i],
-                        bb_clampi(atomic_load(&bb.layer[L].ctl[i]),
-                                  bb_lctl_info[i].lo, bb_lctl_info[i].hi));
-            }
-        } else if (!strncmp(line, "gate ", 5)) {
-            const char *p = line + 5;
-            L = (int)strtol(p, (char **)&p, 10);
-            if (L >= 0 && L < BB_NLAYER)
-                read_ints(p, bb.layer[L].seq_gate, BB_STEPS, 0, 2);
-        } else if (!strncmp(line, "pitch ", 6)) {
-            const char *p = line + 6;
-            L = (int)strtol(p, (char **)&p, 10);
-            if (L >= 0 && L < BB_NLAYER)
-                read_ints(p, bb.layer[L].seq_pitch, BB_STEPS, -12, 12);
-        } else if (!strncmp(line, "ratchet ", 8)) {
-            const char *p = line + 8;
-            L = (int)strtol(p, (char **)&p, 10);
-            if (L >= 0 && L < BB_NLAYER)
-                read_ints(p, bb.layer[L].seq_ratchet, BB_STEPS, 1, 4);
-        } else if (!strncmp(line, "prob ", 5)) {
-            const char *p = line + 5;
-            L = (int)strtol(p, (char **)&p, 10);
-            if (L >= 0 && L < BB_NLAYER)
-                read_ints(p, bb.layer[L].seq_prob, BB_STEPS, 0, 100);
-        } else if (!strncmp(line, "motion ", 7)) {
-            unsigned mask;
-            if (sscanf(line, "motion %d %u", &L, &mask) == 2 &&
-                L >= 0 && L < BB_NLAYER)
-                atomic_store(&bb.layer[L].motion_mask,
-                             mask & ((1u << BB_LOCK_COUNT) - 1u));
-        } else if (!strncmp(line, "lock ", 5)) {
-            const char *p = line + 5;
-            int target;
-            L = (int)strtol(p, (char **)&p, 10);
-            target = (int)strtol(p, (char **)&p, 10);
-            if (L >= 0 && L < BB_NLAYER && target >= 0 && target < BB_LOCK_COUNT)
-                read_ints(p, bb.layer[L].seq_lock[target], BB_STEPS, -1, 256);
-        } else if (!strncmp(line, "expr ", 5)) {
-            const char *p = line + 5;
-            L = (int)strtol(p, (char **)&p, 10);
-            while (*p == ' ') p++;
-            if (L >= 0 && L < BB_NLAYER) {
-                size_t sl = strlen(p);
-                if (sl >= BB_EXPR_MAX) sl = BB_EXPR_MAX - 1;
-                memcpy(bb_expr[L], p, sl);
-                bb_expr[L][sl] = '\0';
-                /* Assume the worst until a `rack` line says otherwise. A
-                 * version 2 file never has one, so its layers stay custom --
-                 * which is the truth about them. */
-                bb_custom[L] = bb_expr[L][0] != '\0';
-            }
-        } else if (!strncmp(line, "rack ", 5)) {
-            int src, body, space, cust;
-            if (sscanf(line, "rack %d %d %d %d %d",
-                       &L, &src, &body, &space, &cust) == 5 &&
-                L >= 0 && L < BB_NLAYER) {
-                bb_rack[L].src   = (unsigned char)bb_clampi(src, 0, rack_nsrc() - 1);
-                bb_rack[L].body  = (unsigned char)!!body;
-                bb_rack[L].space = (unsigned char)!!space;
-                bb_rack[L].mode  = (unsigned char)atomic_load(&bb.layer[L].mode);
-                bb_custom[L]     = !!cust;
-            }
-        }
-    }
-    fclose(f);
-    return version >= 2;
-}
-
 /* ======================================================================== */
 /*  Startup                                                                 */
 /* ======================================================================== */
@@ -406,66 +35,7 @@ static void on_signal(int sig) { (void)sig; bb_quit_signal = 1; }
 
 static void set_defaults(void)
 {
-    memset(bb_expr, 0, sizeof bb_expr);
-    atomic_store(&bb.rate,     44100);
-    atomic_store(&bb.req_rate, 44100);
-    atomic_store(&bb.gain,     180);
-    atomic_store(&bb.focus,    0);
-
-    atomic_store(&bb.loop_status,   LOOP_OFF);
-    atomic_store(&bb.loop_cmd,      LOOP_CMD_NONE);
-    atomic_store(&bb.loop_bars,     1);
-    atomic_store(&bb.loop_mix,      256);
-    atomic_store(&bb.loop_feedback, 192);
-    atomic_store(&bb.loop_overdub,  0);
-    atomic_store(&bb.loop_rate,     LOOP_RATE_NORMAL);
-    atomic_store(&bb.loop_reverse,  0);
-    atomic_store(&bb.loop_slice,    1);
-    atomic_store(&bb.loop_pos,      0);
-    atomic_store(&bb.loop_frames,   0);
-
-    atomic_store(&bb.mute,      0);
-    atomic_store(&bb.panic,     0);
-    atomic_store(&bb.bypass,    0);
-    atomic_store(&bb.reset_t,   0);
-    atomic_store(&bb.reset_loop, 0);
-    atomic_store(&bb.seq_pos,  -1);
-
-    atomic_store(&bb.gctl[GCTL_BPM],   90);
-    atomic_store(&bb.gctl[GCTL_BEATS],  4);
-    atomic_store(&bb.gctl[GCTL_BARS],   2);
-    atomic_store(&bb.gctl[GCTL_ZOOM],  32);
-
-    for (int L = 0; L < BB_NLAYER; L++) {
-        Layer *ly = &bb.layer[L];
-        rack_default(&bb_rack[L]);
-        bb_custom[L] = 0;
-        atomic_store(&ly->on,   L == 0);
-        atomic_store(&ly->mode, BB_WORD);
-        atomic_store(&ly->seq_on, 0);
-        for (int p = 0; p < BB_NPARAM; p++)
-            atomic_store(&ly->param[p], 0);
-        atomic_store(&ly->ctl[LCTL_LEVEL],    L == 0 ? 200 : 140);
-        atomic_store(&ly->ctl[LCTL_DRIVE],    0);
-        atomic_store(&ly->ctl[LCTL_TONE],     255);
-        atomic_store(&ly->ctl[LCTL_CRUSH],    0);
-        atomic_store(&ly->ctl[LCTL_SPC_TIME], 100);
-        atomic_store(&ly->ctl[LCTL_SPC_FB],   0);
-        atomic_store(&ly->ctl[LCTL_SPC_MIX],  0);
-        atomic_store(&ly->ctl[LCTL_STEPS],    16);
-        atomic_store(&ly->ctl[LCTL_DECAY],    90);
-        atomic_store(&ly->ctl[LCTL_SPC_SYNC], 0);
-        atomic_store(&ly->ctl[LCTL_SPC_FREEZE], 0);
-        atomic_store(&ly->motion_mask, 0);
-        for (int i = 0; i < BB_STEPS; i++) {
-            atomic_store(&ly->seq_gate[i], GATE_OFF);
-            atomic_store(&ly->seq_pitch[i], 0);
-            atomic_store(&ly->seq_ratchet[i], 1);
-            atomic_store(&ly->seq_prob[i], 100);
-            for (int k = 0; k < BB_LOCK_COUNT; k++)
-                atomic_store(&ly->seq_lock[k][i], -1);
-        }
-    }
+    bb_engine_set_defaults();
 }
 
 static void usage(const char *argv0)
@@ -610,7 +180,9 @@ static void test_rack_and_generator(void)
     static const char *const expected_source[] = {
         "ramp", "pair", "fold", "gate", "ring", "noise", "snare",
         "crackle", "stack", "pulse", "bell", "thump", "burst",
-        "metal", "dust", "rumble", "feedback"
+        "metal", "dust", "rumble", "feedback",
+        /* the cold wing -- appended only, so saved src indices stay stable */
+        "cold", "vapor", "hymn", "siren", "glass"
     };
 
     test_expect(rack_nsrc() == (int)(sizeof expected_source / sizeof expected_source[0]),
@@ -652,7 +224,34 @@ static void test_rack_and_generator(void)
     }
     test_expect(audible == rack_nsrc(), "all %d rack sources are audible",
                 rack_nsrc());
-    test_expect(triggered_sources == 6, "rack exposes all six triggered engines");
+    test_expect(triggered_sources == 7, "rack exposes all seven triggered engines");
+
+    /* the patch morgue: every curated voice names a real source and makes
+     * sound with its shipped settings */
+    for (int i = 0; i < rack_npatch(); i++) {
+        const RackPatch *pt = rack_patch(i);
+        int src = -1;
+        for (int s = 0; s < rack_nsrc(); s++)
+            if (!strcmp(rack_src_name(s), pt->src)) { src = s; break; }
+        test_expect(src >= 0, "patch %s names a real source", pt->name);
+        if (src < 0) continue;
+
+        Voice v;
+        memset(&v, 0, sizeof v);
+        v.rack.src  = (unsigned char)src;
+        v.rack.body = pt->body;
+        v.rack.space = pt->space;
+        v.rack.mode = (unsigned char)rack_src_mode(src);
+        v.mode = rack_src_mode(src);
+        RackBuild b;
+        rack_build(&v.rack, &b);
+        snprintf(v.expr, sizeof v.expr, "%s", b.expr);
+        rack_seed_params(&b, v.p);
+        for (int o = 0; o < pt->nset && o < RACK_PATCH_SET; o++)
+            v.p[pt->set[o].idx % BB_NPARAM] = pt->set[o].val;
+        test_expect(gen_measure(&v) > 0, "patch %s auditions above silence",
+                    pt->name);
+    }
 
     for (int n = 1; n <= BB_STEPS; n++) {
         for (int pulses = 0; pulses <= n; pulses++) {
@@ -708,8 +307,8 @@ static void test_session_roundtrip(void)
     test_expect(root != NULL, "temporary session directory can be created");
     if (!root) return;
 
-    snprintf(cfg_dir, sizeof cfg_dir, "%s/bytebeat", root);
-    snprintf(cfg_path, sizeof cfg_path, "%s/session.conf", cfg_dir);
+    bb_config_set_root(root);
+    const char *cfg_path = bb_config_path();
 
     set_defaults();
     memset(bb_expr, 0, sizeof bb_expr);
@@ -742,6 +341,23 @@ static void test_session_roundtrip(void)
     bb_rack[2].space = 1;
     bb_custom[2] = 0;
 
+    SamplerSlot *smp = &bb.sampler[3];
+    atomic_store(&smp->on, 1);
+    atomic_store(&smp->ctl[SMP_CTL_LEVEL], 251);
+    atomic_store(&smp->ctl[SMP_CTL_CHOKE], 2);
+    atomic_store(&smp->mute, 0);
+    atomic_store(&smp->solo, 1);
+    atomic_store(&smp->gate[0], SMP_GATE_ACCENT);
+    atomic_store(&smp->gate[11], SMP_GATE_ON);
+    atomic_store(&smp->pitch[5], -7);
+    atomic_store(&smp->vel[11], 43);
+
+    atomic_store(&bb.layer[2].send, 77);
+    atomic_store(&bb.verb_size, 201);
+    atomic_store(&bb.verb_tone, 55);
+    atomic_store(&bb.verb_level, 99);
+    atomic_store(&bb.smp_send, 31);
+
     test_expect(bb_config_save() == 0, "version 4 session can be saved");
 
     FILE *f = fopen(cfg_path, "r");
@@ -749,10 +365,10 @@ static void test_session_roundtrip(void)
     if (f) {
         char line[128];
         while (fgets(line, sizeof line, f))
-            if (!strcmp(line, "version 4\n")) saw_v4 = 1;
+            if (!strcmp(line, "version 7\n")) saw_v4 = 1;
         fclose(f);
     }
-    test_expect(saw_v4, "saved session carries the version 4 marker");
+    test_expect(saw_v4, "saved session carries the version 7 marker");
 
     set_defaults();
     memset(bb_expr, 0, sizeof bb_expr);
@@ -761,6 +377,12 @@ static void test_session_roundtrip(void)
     test_expect(atomic_load(&bb.req_rate) == 48000 &&
                 atomic_load(&bb.gain) == 201 && atomic_load(&bb.focus) == 2,
                 "master state survives a session round-trip");
+    test_expect(atomic_load(&bb.layer[2].send) == 77 &&
+                atomic_load(&bb.verb_size) == 201 &&
+                atomic_load(&bb.verb_tone) == 55 &&
+                atomic_load(&bb.verb_level) == 99 &&
+                atomic_load(&bb.smp_send) == 31,
+                "chamber sends and return survive a session round-trip");
     test_expect(atomic_load(&bb.loop_bars) == 4 &&
                 atomic_load(&bb.loop_mix) == 137 &&
                 atomic_load(&bb.loop_feedback) == 91 &&
@@ -784,6 +406,17 @@ static void test_session_roundtrip(void)
                 bb_rack[2].src == rack_nsrc() - 1 && bb_rack[2].body &&
                 bb_rack[2].space && !bb_custom[2],
                 "expression and rack identity survive a session round-trip");
+
+    smp = &bb.sampler[3];
+    test_expect(atomic_load(&smp->on) == 1 &&
+                atomic_load(&smp->ctl[SMP_CTL_LEVEL]) == 251 &&
+                atomic_load(&smp->ctl[SMP_CTL_CHOKE]) == 2 &&
+                atomic_load(&smp->mute) == 0 && atomic_load(&smp->solo) == 1 &&
+                atomic_load(&smp->gate[0]) == SMP_GATE_ACCENT &&
+                atomic_load(&smp->gate[11]) == SMP_GATE_ON &&
+                atomic_load(&smp->pitch[5]) == -7 &&
+                atomic_load(&smp->vel[11]) == 43,
+                "step-sampler pattern and slot controls survive a round-trip");
 
     /* A short v3 control line must leave every appended v4 field at its
      * default. This is the compatibility path real existing sessions use. */
@@ -814,9 +447,452 @@ static void test_session_roundtrip(void)
                 atomic_load(&ly->seq_lock[LOCK_P0][0]) == -1,
                 "v3 sessions receive safe expressive-lane defaults");
 
-    unlink(cfg_path);
-    rmdir(cfg_dir);
+    unlink(bb_config_path());
+    {
+        char sub[600];
+        snprintf(sub, sizeof sub, "%s/bytebeat", root);
+        rmdir(sub);
+    }
     rmdir(root);
+}
+
+static int smp_full(int v, int vel)
+{
+    long amp = (long)(vel << 8);
+    return (int)(((long long)v * amp) >> 16);
+}
+
+static void test_step_sampler(void)
+{
+    /* Deterministic drum test: BPM 60 at 44100 puts a 16th-step at 11025
+     * frames. Each scenario re-defaults the engine so the internal clock
+     * (k/tick) starts at zero. Sample buffers are freshly malloc'd for each
+     * scenario because the engine takes ownership of them. */
+    const int rate = 44100;
+    const int N = 256;
+    static int16_t out[12050];
+
+    /* ---- basic one-shot: a single hit on step 0 plays exactly the loaded
+     * sample, then stops, in sync with the master clock. ---------------- */
+    bb_engine_set_defaults();
+    bb_engine_init(rate);
+    atomic_store(&bb.gctl[GCTL_BPM], 60);
+    bb_engine_reset_loop();   /* fresh clock each scenario */
+    atomic_store(&bb.gain, 256);
+
+    int16_t *bufA = malloc(N * sizeof(int16_t));
+    test_expect(bufA != NULL, "sampler test buffer allocates");
+    if (bufA == NULL) return;
+    for (int i = 0; i < N; i++) bufA[i] = (int16_t)(i * 100);
+
+    test_expect(bb_engine_sampler_set(0, bufA, N, rate) == 1,
+                "slot 0 accepts a published sample buffer");
+    SamplerSlot *s0 = &bb.sampler[0];
+    atomic_store(&s0->on, 1);
+    atomic_store(&s0->ctl[SMP_CTL_LEVEL], 256);
+    for (int i = 0; i < BB_STEPS; i++) atomic_store(&s0->vel[i], 255);
+
+    bb_engine_render(out, 12000, 1);              /* prelude: level saturates */
+    atomic_store(&s0->gate[2], SMP_GATE_ON);      /* arm the NEXT step (step 2) */
+    bb_engine_render(out, 1000, 1);               /* still inside step 1      */
+    test_expect(out[999] == 0, "no sample fires before its step boundary");
+
+    bb_engine_render(out, 10050, 1);              /* crosses into step 2      */
+    int fire = 22050 - 13000;                     /* local frame of the fire  */
+    test_expect(out[fire - 1] == 0, "sample waits for the step boundary");
+    int j = 96;                                    /* past the attack ramp    */
+    test_expect(out[fire + j] == (int16_t)smp_full(bufA[j], 255),
+                "one-shot sample plays at full velocity on its step");
+    test_expect(out[fire + N] == 0,
+                "one-shot sample stops at its end instead of looping");
+    test_expect(atomic_load(&bb.seq_pos) >= 0,
+                "playhead publishes while the step sampler is running");
+    bb_engine_sampler_clear(0);
+    bb_engine_sampler_reclaim();
+
+    /* ---- drum choke: two slots in the same group, only the last-fired
+     * survives (higher slot index fires second in the walk). -------------- */
+    bb_engine_set_defaults();
+    bb_engine_init(rate);
+    atomic_store(&bb.gctl[GCTL_BPM], 60);
+    bb_engine_reset_loop();   /* fresh clock each scenario */
+    atomic_store(&bb.gain, 256);
+
+    int16_t *bchk0 = malloc(N * sizeof(int16_t));
+    int16_t *bchk1 = malloc(N * sizeof(int16_t));
+    test_expect(bchk0 != NULL && bchk1 != NULL, "choke test buffers allocate");
+    if (bchk0 == NULL || bchk1 == NULL) return;
+    for (int i = 0; i < N; i++) { bchk0[i] = (int16_t)(1000 + i); bchk1[i] = (int16_t)(2000 + i); }
+    test_expect(bb_engine_sampler_set(0, bchk0, N, rate) == 1 &&
+                bb_engine_sampler_set(1, bchk1, N, rate) == 1,
+                "two choked slots accept sample buffers");
+    s0 = &bb.sampler[0];
+    SamplerSlot *s1 = &bb.sampler[1];
+    for (int s = 0; s < 2; s++) {
+        SamplerSlot *sl = s ? s1 : s0;
+        atomic_store(&sl->on, 1);
+        atomic_store(&sl->ctl[SMP_CTL_LEVEL], 256);
+        atomic_store(&sl->ctl[SMP_CTL_CHOKE], 1);
+        for (int i = 0; i < BB_STEPS; i++) atomic_store(&sl->vel[i], 255);
+    }
+    bb_engine_render(out, 12000, 1);
+    atomic_store(&s0->gate[2], SMP_GATE_ON);
+    atomic_store(&s1->gate[2], SMP_GATE_ON);
+    bb_engine_render(out, 1000, 1);
+    bb_engine_render(out, 10050, 1);
+    int chkFire = 22050 - 13000;
+    test_expect(out[chkFire + j] == (int16_t)smp_full(2000 + j, 255),
+                "choke keeps only the last-fired slot in the group");
+    test_expect(out[chkFire + j] != (int16_t)smp_full(1000 + j, 255),
+                "choked slot contributes no audio");
+    bb_engine_sampler_clear(0);
+    bb_engine_sampler_clear(1);
+    bb_engine_sampler_reclaim();
+
+    /* ---- per-step pitch: +12 semitones doubles the playback rate, so the
+     * j-th output frame reads the 2j-th sample. --------------------------- */
+    bb_engine_set_defaults();
+    bb_engine_init(rate);
+    atomic_store(&bb.gctl[GCTL_BPM], 60);
+    bb_engine_reset_loop();   /* fresh clock each scenario */
+    atomic_store(&bb.gain, 256);
+
+    int16_t *bpitch = malloc(N * sizeof(int16_t));
+    test_expect(bpitch != NULL, "pitch test buffer allocates");
+    if (bpitch == NULL) return;
+    for (int i = 0; i < N; i++) bpitch[i] = (int16_t)(i * 100);
+    test_expect(bb_engine_sampler_set(0, bpitch, N, rate) == 1,
+                "pitch test buffer publishes");
+    s0 = &bb.sampler[0];
+    atomic_store(&s0->on, 1);
+    atomic_store(&s0->ctl[SMP_CTL_LEVEL], 256);
+    atomic_store(&s0->pitch[2], 12);
+    for (int i = 0; i < BB_STEPS; i++) atomic_store(&s0->vel[i], 255);
+    bb_engine_render(out, 12000, 1);
+    atomic_store(&s0->gate[2], SMP_GATE_ON);
+    bb_engine_render(out, 1000, 1);
+    bb_engine_render(out, 10050, 1);
+    int pf = 22050 - 13000;
+    test_expect(out[pf + 96] == (int16_t)smp_full(19200, 255) &&
+                out[pf + 96] != (int16_t)smp_full(9600, 255),
+                "per-step pitch sets the playback rate of a hit");
+    bb_engine_sampler_clear(0);
+    bb_engine_sampler_reclaim();
+}
+
+static void test_arrangement(void)
+{
+    /* R2 song timeline. Bar geometry chosen for cheap renders: 8kHz at
+     * 240 BPM with 4 beats puts a beat at 2000 frames and a bar at 8000,
+     * so bar B spans frames [B*8000, (B+1)*8000) of the scenario. Each
+     * scenario re-defaults the engine so the internal clock starts at
+     * zero, exactly like the step-sampler tests. */
+    const int rate = 8000;
+    const int N = 256;
+    static int16_t aout[16050];
+    static int16_t ref[16050];
+    static int16_t dst[16050];
+    static int16_t data[256];
+    ArrClip clip[2];
+    ArrClip got[ARR_MAX_CLIPS];
+
+    for (int i = 0; i < N; i++) data[i] = (int16_t)(i * 100);
+
+    /* ---- clip buffer lifecycle: create copies, accessors are NULL-safe */
+    test_expect(bb_engine_clip_create(NULL, 8, rate) == NULL &&
+                bb_engine_clip_create(data, 0, rate) == NULL &&
+                bb_engine_clip_create(data, 8, 0) == NULL,
+                "clip create rejects bad arguments");
+    ArrClipBuf *ab = bb_engine_clip_create(data, N, rate);
+    test_expect(ab != NULL, "clip create publishes a buffer");
+    if (!ab) return;
+    test_expect(bb_engine_clip_frames(ab) == (unsigned)N &&
+                bb_engine_clip_data(ab) != NULL &&
+                bb_engine_clip_data(ab) != data &&
+                memcmp(bb_engine_clip_data(ab), data, sizeof data) == 0,
+                "clip audio is an independent copy of the caller's frames");
+    test_expect(bb_engine_clip_frames(NULL) == 0 &&
+                bb_engine_clip_data(NULL) == NULL,
+                "clip accessors tolerate NULL");
+
+    /* ---- a one-shot clip fires exactly at its start bar, then ends --- */
+    bb_engine_set_defaults();
+    bb_engine_init(rate);
+    atomic_store(&bb.gctl[GCTL_BPM], 240);
+    bb_engine_reset_loop();
+    atomic_store(&bb.gain, 256);
+    atomic_store(&bb.layer[0].on, 0);
+
+    memset(clip, 0, sizeof clip);
+    clip[0].lane = 3;
+    clip[0].start_bar = 2;
+    clip[0].len_bars = 1;
+    clip[0].loop = 0;
+    clip[0].gain = 256;
+    clip[0].audio = ab;
+    snprintf(clip[0].name, ARR_NAME_MAX, "hit");
+    test_expect(bb_engine_song_publish(clip, 1) == 0, "a one-clip song publishes");
+    test_expect(bb_engine_song_publish(NULL, 1) == -1 &&
+                bb_engine_song_publish(clip, ARR_MAX_CLIPS + 1) == -1 &&
+                bb_engine_song_publish(clip, -1) == -1,
+                "song publish rejects bad arguments");
+
+    bb_engine_render(aout, 8000, 1);               /* bar 0 */
+    bb_engine_render(aout, 8000, 1);               /* bar 1 */
+    test_expect(aout[4000] == 0 && aout[7999] == 0,
+                "a clip is silent before its start bar");
+    bb_engine_render(aout, 1000, 1);               /* bar 2 begins here */
+    test_expect(aout[1] == data[1] && aout[100] == data[100] &&
+                aout[255] == data[255],
+                "a clip fires exactly at its start bar at unity gain");
+    test_expect(aout[256] == 0 && aout[999] == 0,
+                "a one-shot clip goes silent after its audio ends");
+
+    /* ---- loop wraps the audio inside the window; gain scales --------- */
+    clip[0].start_bar = 4;
+    clip[0].loop = 1;
+    clip[0].gain = 128;
+    test_expect(bb_engine_song_publish(clip, 1) == 0, "the song republishes live");
+    bb_engine_render(aout, 7000, 1);               /* finish bar 2       */
+    bb_engine_render(aout, 8000, 1);               /* bar 3, still early */
+    test_expect(aout[0] == 0 && aout[7999] == 0,
+                "a moved clip window leaves the old bars silent");
+    bb_engine_render(aout, 600, 1);                /* bar 4 begins here  */
+    int loop_ok = 1;
+    for (int j = 0; j < 600; j++)
+        if (aout[j] != (int16_t)((data[j % N] * 128) >> 8)) { loop_ok = 0; break; }
+    test_expect(loop_ok, "a looped clip wraps its audio at half gain");
+
+    /* ---- seek restarts a window -------------------------------------- */
+    bb_engine_song_seek(4);
+    bb_engine_render(aout, 300, 1);                /* top of bar 4 again */
+    test_expect(atomic_load(&bb.bar) == 4,
+                "seek lands the published bar counter on its target");
+    int seek_ok = 1;
+    for (int j = 0; j < 300; j++)
+        if (aout[j] != (int16_t)((data[j % N] * 128) >> 8)) { seek_ok = 0; break; }
+    test_expect(seek_ok, "seek restarts a clip window from its first frame");
+
+    /* ---- a NULL-audio clip is a silent ghost; song_get returns meta -- */
+    clip[0].audio = NULL;
+    test_expect(bb_engine_song_publish(clip, 1) == 0, "a ghost clip publishes");
+    bb_engine_render(aout, 200, 1);
+    test_expect(aout[0] == 0 && aout[199] == 0, "a NULL-audio clip is silent");
+    int ng = bb_engine_song_get(got, ARR_MAX_CLIPS);
+    test_expect(ng == 1 && got[0].lane == 3 && got[0].start_bar == 4 &&
+                got[0].len_bars == 1 && got[0].loop == 1 &&
+                got[0].gain == 128 && got[0].audio == NULL &&
+                !strcmp(got[0].name, "hit"),
+                "song_get returns the published clip meta");
+    bb_engine_clip_release(ab);
+
+    /* ---- per-lane capture -------------------------------------------- */
+    bb_engine_set_defaults();
+    bb_engine_init(rate);
+    atomic_store(&bb.gctl[GCTL_BPM], 240);
+    bb_engine_reset_loop();
+    atomic_store(&bb.gain, 256);
+    atomic_store(&bb.layer[0].on, 0);
+    test_expect(bb_engine_song_publish(NULL, 0) == 0, "an empty song publishes");
+
+    /* A deterministic voice on lane 3: with every other source silent the
+     * master output IS that lane's post-fader contribution, so the capture
+     * buffer must match the rendered output bit for bit. */
+    ExprError er;
+    test_expect(bb_publish(3, "t*p0", &er), "capture reference voice compiles: %s", er.msg);
+    atomic_store(&bb.layer[3].on, 1);
+    atomic_store(&bb.layer[3].mode, BB_WORD);
+    atomic_store(&bb.layer[3].ctl[LCTL_LEVEL], 256);
+    atomic_store(&bb.layer[3].param[0], 37);
+
+    bb_engine_render(ref, 12000, 1);               /* levels + gain settle */
+
+    test_expect(bb_engine_arr_arm(9, 1, dst, 16000) == -1,
+                "lane 9 (FILE/MASS) capture is refused");
+    test_expect(bb_engine_arr_arm(3, 0, dst, 16000) == -1 &&
+                bb_engine_arr_arm(3, 1, NULL, 16000) == -1 &&
+                bb_engine_arr_arm(3, 1, dst, 0) == -1,
+                "arm validates its arguments");
+    test_expect(bb_engine_arr_arm(3, 2, dst, 16050) == 0 &&
+                atomic_load(&bb.arr_rec_status) == ARR_REC_ARMED,
+                "a voice lane arms and publishes ARMED");
+    test_expect(bb_engine_arr_arm(3, 1, dst, 100) == -1,
+                "a second arm is refused while a capture is in flight");
+    bb_engine_arr_cancel();
+    test_expect(atomic_load(&bb.arr_rec_status) == ARR_REC_IDLE,
+                "cancel returns an armed capture to IDLE");
+    test_expect(bb_engine_arr_arm(3, 2, dst, 16050) == 0,
+                "a canceled capture can re-arm");
+
+    bb_engine_render(aout, 4000, 1);               /* rest of bar 1      */
+    test_expect(atomic_load(&bb.arr_rec_status) == ARR_REC_ARMED &&
+                atomic_load(&bb.arr_rec_frames) == 0,
+                "an armed capture waits for the bar boundary");
+    bb_engine_render(ref, 16000, 1);               /* bars 2-3, captured */
+    test_expect(atomic_load(&bb.arr_rec_status) == ARR_REC_RECORDING &&
+                atomic_load(&bb.arr_rec_frames) == 16000,
+                "capture starts at the bar boundary and reports progress");
+    bb_engine_render(aout, 100, 1);                /* bar 4: closes it   */
+    test_expect(atomic_load(&bb.arr_rec_status) == ARR_REC_DONE &&
+                atomic_load(&bb.arr_rec_frames) == 16000,
+                "capture publishes DONE with the whole-bar frame count");
+    int cap_mismatch = 0, cap_energy = 0;
+    for (int j = 0; j < 16000; j++) {
+        if (dst[j] != ref[j]) cap_mismatch++;
+        if (ref[j] != 0) cap_energy++;
+    }
+    test_expect(cap_mismatch == 0 && cap_energy > 1000,
+                "captured frames equal the armed lane's contribution");
+
+    test_expect(bb_engine_arr_arm(3, 4, dst, 500) == 0,
+                "a fresh capture arms after DONE");
+    bb_engine_render(aout, 8000, 1);               /* crosses into bar 5 */
+    bb_engine_render(aout, 500, 1);
+    test_expect(atomic_load(&bb.arr_rec_status) == ARR_REC_DONE &&
+                atomic_load(&bb.arr_rec_frames) == 500,
+                "capture stops when the destination runs out");
+    atomic_store(&bb.layer[3].on, 0);
+
+    /* ---- a publish mid-playback never hands a clip another clip's
+     * window counter: deleting clip 0 while clip 1 sounds must leave the
+     * survivor exactly where it was, not restarted and not teleported to
+     * the deleted clip's offset. The ghost occupies index 0 with an older,
+     * longer window, so inheriting its counter would silence the survivor
+     * (offset far past its audio) -- the seamless-continue assertions
+     * below fail on counters that are not re-keyed from the timeline. */
+    {
+        static int16_t big[12000];
+        for (int i = 0; i < 12000; i++) big[i] = (int16_t)(1000 + i % 3000);
+        ArrClipBuf *bb2 = bb_engine_clip_create(big, 12000, rate);
+        test_expect(bb2 != NULL, "the survivor clip buffer publishes");
+
+        bb_engine_set_defaults();
+        bb_engine_init(rate);
+        atomic_store(&bb.gctl[GCTL_BPM], 240);
+        bb_engine_reset_loop();
+        atomic_store(&bb.gain, 256);
+        atomic_store(&bb.layer[0].on, 0);
+
+        memset(clip, 0, sizeof clip);
+        clip[0].lane = 0;                       /* silent ghost, bars 0-3 */
+        clip[0].start_bar = 0;
+        clip[0].len_bars = 4;
+        clip[0].gain = 256;
+        clip[0].audio = NULL;
+        clip[1].lane = 1;                       /* the survivor, bars 1-2 */
+        clip[1].start_bar = 1;
+        clip[1].len_bars = 2;
+        clip[1].gain = 256;
+        clip[1].audio = bb2;
+        test_expect(bb_engine_song_publish(clip, 2) == 0,
+                    "the two-clip song publishes");
+
+        bb_engine_render(aout, 8000, 1);        /* bar 0: ghost only     */
+        bb_engine_render(aout, 8000, 1);        /* bar 1: survivor 0..7999 */
+        bb_engine_render(aout, 500, 1);         /* into bar 2: 8000..8499 */
+        test_expect(aout[499] == big[8499],
+                    "the survivor sounds at its own offset before the edit");
+
+        test_expect(bb_engine_song_publish(&clip[1], 1) == 0,
+                    "deleting the ghost republishes");
+        bb_engine_render(aout, 100, 1);
+        test_expect(aout[0] == big[8500] && aout[99] == big[8599],
+                    "a mid-playback edit keeps the surviving clip seamless");
+
+        bb_engine_song_publish(NULL, 0);
+        bb_engine_clip_release(bb2);
+    }
+
+    /* ---- session v7: song meta round-trips, older sessions still load */
+    char tmp[] = "/tmp/bytebeat-arrtest.XXXXXX";
+    char *root = mkdtemp(tmp);
+    test_expect(root != NULL, "temporary arrangement session directory can be created");
+    if (!root) return;
+    bb_config_set_root(root);
+
+    bb_engine_set_defaults();
+    ArrClipBuf *ab2 = bb_engine_clip_create(data, 64, rate);
+    memset(clip, 0, sizeof clip);
+    clip[0].lane = 8;
+    clip[0].start_bar = 12;
+    clip[0].len_bars = 4;
+    clip[0].loop = 1;
+    clip[0].gain = 192;
+    clip[0].audio = ab2;
+    snprintf(clip[0].name, ARR_NAME_MAX, "cold hall II");
+    snprintf(clip[0].path, ARR_PATH_MAX, "/tmp/morgue kits/cold hall.wav");
+    clip[1].lane = 0;
+    clip[1].start_bar = 0;
+    clip[1].len_bars = 1;
+    clip[1].loop = 0;
+    clip[1].gain = 256;
+    clip[1].audio = NULL;
+    clip[1].name[0] = '\0';
+    snprintf(clip[1].path, ARR_PATH_MAX, "/tmp/x.wav");
+    test_expect(bb_engine_song_publish(clip, 2) == 0, "the session-test song publishes");
+    test_expect(bb_config_save() == 0, "a version 7 session with a song can be saved");
+
+    FILE *f = fopen(bb_config_path(), "r");
+    int aclip_lines = 0;
+    if (f) {
+        char line[1200];
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "aclip ", 6)) aclip_lines++;
+        fclose(f);
+    }
+    test_expect(aclip_lines == 2, "the session carries one aclip line per clip");
+
+    bb_engine_song_publish(NULL, 0);
+    bb_engine_clip_release(ab2);
+    bb_engine_set_defaults();
+    test_expect(bb_config_load() == 1, "the version 7 session loads");
+    ng = bb_engine_song_get(got, ARR_MAX_CLIPS);
+    test_expect(ng == 2, "both clips return from the loaded session");
+    test_expect(ng == 2 && got[0].lane == 8 && got[0].start_bar == 12 &&
+                got[0].len_bars == 4 && got[0].loop == 1 &&
+                got[0].gain == 192 && got[0].audio == NULL &&
+                !strcmp(got[0].name, "cold hall II") &&
+                !strcmp(got[0].path, "/tmp/morgue kits/cold hall.wav"),
+                "clip meta with spaces in name and path survives the round-trip");
+    test_expect(ng == 2 && got[1].lane == 0 && got[1].start_bar == 0 &&
+                got[1].len_bars == 1 && got[1].loop == 0 &&
+                got[1].gain == 256 && got[1].audio == NULL &&
+                got[1].name[0] == '\0' && !strcmp(got[1].path, "/tmp/x.wav"),
+                "an empty clip name survives the round-trip");
+
+    /* A v6 session (no aclip lines) must still load, and must leave the
+     * song empty -- the file is the whole truth about the timeline. */
+    f = fopen(bb_config_path(), "w");
+    if (f) {
+        fputs("version 6\n"
+              "rate 22050\n"
+              "verb 11 22 33 44\n", f);
+        fclose(f);
+    }
+    test_expect(f != NULL, "v6 session fixture can be written");
+    bb_engine_set_defaults();
+    test_expect(bb_config_load() == 1, "a version 6 session remains loadable");
+    test_expect(atomic_load(&bb.req_rate) == 22050 &&
+                atomic_load(&bb.verb_size) == 11 &&
+                atomic_load(&bb.smp_send) == 44,
+                "v6 fields load unchanged next to the v7 song machinery");
+    test_expect(bb_engine_song_get(got, ARR_MAX_CLIPS) == 0,
+                "a pre-v7 session loads with an empty song");
+
+    unlink(bb_config_path());
+    {
+        char sub[600];
+        snprintf(sub, sizeof sub, "%s/bytebeat", root);
+        rmdir(sub);
+    }
+    rmdir(root);
+
+    /* leave nothing armed or published for whoever runs after us */
+    bb_engine_arr_cancel();
+    bb_engine_song_publish(NULL, 0);
+    bb_engine_render(aout, 64, 1);
+    bb_engine_render(aout, 64, 1);
+    bb_engine_reclaim();
 }
 
 static int self_test_mode(void)
@@ -830,7 +906,9 @@ static int self_test_mode(void)
     char err[160];
     test_expect(audio_self_test(err, sizeof err),
                 "audio clock/phrase invariants: %s", err);
+    test_step_sampler();
     test_session_roundtrip();
+    test_arrangement();
 
     if (test_failures) {
         fprintf(stderr, "%d of %d checks failed\n", test_failures, test_checks);
@@ -856,7 +934,6 @@ int main(int argc, char **argv)
     int self_test  = 0;
 
     set_defaults();
-    cfg_paths();
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -964,10 +1041,21 @@ int main(int argc, char **argv)
 
     if (start_exp) {
         /* An expression from the command line is by definition hand-written,
-         * so no rack describes it. */
+         * so no rack describes it. Publish it NOW -- the publish-everything
+         * loop above ran before this text existed -- and pull focus to layer
+         * 0 so the editor (which publishes bb_expr[focus] on entry) lands on
+         * it instead of re-committing a stale layer from the saved session. */
         snprintf(bb_expr[0], BB_EXPR_MAX, "%s", start_exp);
         bb_custom[0] = 1;
         atomic_store(&bb.layer[0].on, 1);
+        atomic_store(&bb.focus, 0);
+        ExprError ee;
+        if (!bb_publish(0, bb_expr[0], &ee)) {
+            char emsg[320];
+            snprintf(emsg, sizeof emsg, "-e: %s", ee.msg);
+            ui_set_warning(emsg);
+            bb_publish(0, "0", &ee);   /* keep the never-NULL guarantee */
+        }
     } else if (!had_config) {
         /* First run: put a complete noise groove on the table rather than an
          * empty prompt -- triggered low body, backbeat, ratcheted metal,
@@ -981,10 +1069,13 @@ int main(int argc, char **argv)
 
     audio_stop();
     sink_close();
-    bb_config_save();
-    free_all_programs();
+    int saved = bb_config_save();
+    bb_engine_shutdown();
     audio_close();
 
-    printf("session saved to %s\n", cfg_path);
+    if (saved == 0)
+        printf("session saved to %s\n", bb_config_path());
+    else
+        fprintf(stderr, "could not save session to %s\n", bb_config_path());
     return 0;
 }

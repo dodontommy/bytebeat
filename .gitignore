@@ -1,6 +1,14 @@
 # build artifacts
 *.o
 /bytebeat
+/build/
+/build-release/
+*.dSYM/
 
 # recordings
 *.wav
+
+# scratch
+.DS_Store
+/morgue_render.png
+/morgue_*.png

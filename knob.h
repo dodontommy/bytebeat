@@ -27,6 +27,10 @@
 #ifndef KNOB_H
 #define KNOB_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 
 /* What a value is being used FOR. Hand-written expressions get a kind derived
@@ -93,5 +97,9 @@ void knob_fmt_value(int kind, int value, char *buf, size_t n);
 /* "2.9s" / "1.2k" / "6 bits" -- the physical quantity, or "" if the kind has
  * no honest unit. Never longer than 7 visible characters. */
 void knob_fmt_unit(int kind, int value, char *buf, size_t n);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KNOB_H */
