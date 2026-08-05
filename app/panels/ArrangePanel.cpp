@@ -207,11 +207,10 @@ ArrangePanel::~ArrangePanel()
 
 float ArrangePanel::playheadBarF()
 {
-    const int seq = atomic_load (&bb.seq_pos);
-    if (seq < 0)
-        return -1.0f;                      // step clock idle: nothing to show
-    const unsigned bar = atomic_load (&bb.bar);
-    return (float) bar + (float) seq / (float) BB_STEPS;
+    /* Reading bb.bar and bb.seq_pos as two independent loads tears at every
+     * bar boundary and makes the playhead appear to jump back a bar on each
+     * loop pass. See morgue::transportPositionBars(). */
+    return transportPositionBars();
 }
 
 unsigned ArrangePanel::barLenFrames()

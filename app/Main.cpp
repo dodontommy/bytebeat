@@ -14,6 +14,7 @@
 #include "engine.h"
 #include "AudioEngine.h"
 #include "Session.h"
+#include "Ledger.h"
 #include "Theme.h"
 #include "Primitives.h"
 #include "panels/Chrome.h"
@@ -25,6 +26,8 @@
 #include "panels/MixerPanel.h"
 #include "panels/HwSyncPanel.h"
 #include "panels/ExportSheet.h"
+#include "panels/ExhumePanel.h"
+#include "panels/PlatePanel.h"
 #include "panels/FieldManual.h"
 
 using namespace morgue;
@@ -57,7 +60,7 @@ class MainComponent final : public juce::Component,
                             private juce::Timer
 {
 public:
-    MainComponent() : licks (audio), mass (audio), status (audio)
+    MainComponent() : licks (audio), mass (audio), exhume (audio), status (audio)
     {
         juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
         setSize (1440, 900 - 26);   // window is 1440x900 incl. title bar
@@ -68,6 +71,9 @@ public:
         // root itself was planted by the sessionRoot member, above -- see
         // plantSessionRoot() for why it cannot happen here.
         hadSession = bb_config_load() == 1;
+        /* Parse ACCESSION.ledger on a worker. Must follow the session root
+         * being planted, because the register asks Session.h for its path. */
+        morgue::Ledger::bootstrap();
         bb_engine_init (44100);
 
         addAndMakeVisible (titleBar);
@@ -81,6 +87,8 @@ public:
         addChildComponent (survivor);
         addChildComponent (mixer);
         addChildComponent (hwsync);
+        addChildComponent (exhume);
+        addChildComponent (plate);
         addChildComponent (exportSheet);
         addAndMakeVisible (transport);
         addAndMakeVisible (status);
@@ -101,6 +109,13 @@ public:
         // rehydrate saw an empty song -- this call is the real one.
         arrange.getLockerSelection = [this] { return locker.selectedFile(); };
         arrange.onLockerRefresh    = [this] { locker.refresh(); };
+
+        /* Acquired and rendered artefacts land in the session root, so the
+         * LOCKER has to re-scan or they sit on disk and in the register
+         * without ever appearing in the console. */
+        exhume.onAcquired        = [this] { locker.refresh(); };
+        plate.getLockerSelection = [this] { return locker.selectedFile(); };
+        plate.onLockerRefresh    = [this] { locker.refresh(); };
         arrange.rehydrateFromSession();
 
         // publish the session's programs (or the defaults); first run only
@@ -134,7 +149,7 @@ public:
         };
 
         // MIXER-context EXPORT... plate opens the export sheet (spec section 13)
-        transport.onExport = [this] { selectTab (7); };
+        transport.onExport = [this] { selectTab (StageTabs::numTabs - 1); };
 
         audio.start();
 
@@ -234,16 +249,27 @@ public:
     void selectTab (int t)
     {
         t = juce::jlimit (0, StageTabs::numTabs - 1, t);
-        if (t != 7) prevTab = t;
+        /* EXPORT is the last tab and is not a workspace -- it is a sheet drawn
+         * over whichever panel was showing. That used to be spelled as three
+         * hardcoded 7s, which is precisely the kind of thing that breaks
+         * silently the first time a workspace is inserted. Name it once. */
+        constexpr int kExportTab  = StageTabs::numTabs - 1;   // 9
+        constexpr int kNumStages  = StageTabs::numTabs - 1;   // every tab but EXPORT
 
-        juce::Component* stagePanels[7] = { &rack, &arrange, &licks, &mass,
-                                            &survivor, &mixer, &hwsync };
-        for (int i = 0; i < 7; ++i)
-            stagePanels[i]->setVisible (i == (t == 7 ? prevTab : t));
+        if (t != kExportTab) prevTab = t;
+
+        juce::Component* stagePanels[kNumStages] = {
+            &rack, &arrange, &licks, &mass,
+            &survivor, &mixer, &hwsync, &exhume, &plate
+        };
+        static_assert (sizeof stagePanels / sizeof stagePanels[0] == kNumStages,
+                       "one stage panel per tab, EXPORT excepted");
+        for (int i = 0; i < kNumStages; ++i)
+            stagePanels[i]->setVisible (i == (t == kExportTab ? prevTab : t));
 
         // EXPORT: the sheet overlays the dimmed console (spec section 11)
-        exportSheet.setVisible (t == 7);
-        if (t == 7) exportSheet.toFront (false);
+        exportSheet.setVisible (t == kExportTab);
+        if (t == kExportTab) exportSheet.toFront (false);
 
         tabs.setCurrent (t);
         transport.setContextTab (t);
@@ -251,11 +277,13 @@ public:
         /* title-bar serial increments with the active panel (spec section 3;
          * ARRANGE carries the RACK serial exactly as HTML frame 02 does, and
          * the EXPORT sheet leaves the underlying panel's serial in place) */
-        static const char* const tabSerials[7] = {
+        static const char* const tabSerials[kNumStages] = {
             SerialNo::RACK, SerialNo::RACK, SerialNo::LICKS, SerialNo::MASS,
-            SerialNo::SURVIVOR, SerialNo::MIXER, SerialNo::HWSYNC
+            SerialNo::SURVIVOR, SerialNo::MIXER, SerialNo::HWSYNC,
+            "N.72-0427",                                      // EXHUME
+            "N.72-0431"                                       // PLATE
         };
-        titleBar.setSerial (tabSerials[t == 7 ? prevTab : t]);
+        titleBar.setSerial (tabSerials[t == kExportTab ? prevTab : t]);
 
         locker.setContextHint (t == 1 ? juce::String::fromUTF8 ("DRAG \xe2\x86\x92 LANE")
                              : t == 2 ? juce::String::fromUTF8 ("DRAG \xe2\x86\x92 SLOT")
@@ -266,9 +294,10 @@ public:
     /* --screenshot=NAME: select a named view before the snapshot. */
     void selectView (const juce::String& name)
     {
-        static const char* names[8] = { "rack", "arrange", "licks", "mass",
-                                        "survivor", "mixer", "hwsync", "export" };
-        for (int i = 0; i < 8; ++i)
+        static const char* names[StageTabs::numTabs] = {
+            "rack", "arrange", "licks", "mass", "survivor",
+            "mixer", "hwsync", "exhume", "plate", "export" };
+        for (int i = 0; i < StageTabs::numTabs; ++i)
             if (name == names[i]) { selectTab (i); return; }
         if (name == "manual")
             showHelp (true);
@@ -397,7 +426,8 @@ public:
         for (juce::Component* p : { (juce::Component*) &rack, (juce::Component*) &arrange,
                                     (juce::Component*) &licks, (juce::Component*) &mass,
                                     (juce::Component*) &survivor, (juce::Component*) &mixer,
-                                    (juce::Component*) &hwsync })
+                                    (juce::Component*) &hwsync, (juce::Component*) &exhume,
+                                    (juce::Component*) &plate })
             p->setBounds (stageArea);
 
         // the EXPORT sheet's scrim dims the ENTIRE console (spec section 11)
@@ -417,6 +447,8 @@ private:
         transport.sync();
         licks.sync();
         arrange.sync();
+        exhume.sync();
+        plate.sync();
 
         // the autosave runs at 4 Hz, not 30: see saveSession()
         if (++autosaveTick >= 8)
@@ -575,6 +607,8 @@ private:
     MixerPanel        mixer;
     HwSyncPanel       hwsync;
     ExportSheet       exportSheet;
+    ExhumePanel       exhume;
+    PlatePanel        plate;
     TransportBar      transport;
     StatusBar         status;
     FieldManualOverlay manual;

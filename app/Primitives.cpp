@@ -5,6 +5,8 @@
 
 #include "Primitives.h"
 
+#include "bytebeat.h"
+
 #include <cmath>
 #include <utility>          // std::move
 
@@ -865,6 +867,25 @@ void paintLabelRow (juce::Graphics& g, Rectangle<int> row,
         g.setFont (Type::mono (8.0f, 0.10f));
         g.drawText (right, row.reduced (10, 0), Justification::centredRight);
     }
+}
+
+
+/* See the comment in Primitives.h -- this closes a torn read between two
+ * separately-published atomics, and it is the reason the ARRANGE playhead
+ * appeared to jump back a bar on every loop pass. */
+float transportPositionBars()
+{
+    unsigned bar0 = (unsigned) atomic_load (&bb.bar);
+    int      seq  =            atomic_load (&bb.seq_pos);
+    unsigned bar1 = (unsigned) atomic_load (&bb.bar);
+
+    if (bar0 != bar1)                 // a bar turned over between the loads
+        seq = atomic_load (&bb.seq_pos);
+
+    if (seq < 0)
+        return -1.0f;                 // step clock idle: nothing to show
+
+    return (float) bar1 + (float) seq / (float) BB_STEPS;
 }
 
 } // namespace morgue

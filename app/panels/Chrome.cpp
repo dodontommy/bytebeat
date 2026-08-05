@@ -7,15 +7,19 @@
 #include "Chrome.h"
 #include "AudioEngine.h"
 #include "Session.h"
+#include "Ledger.h"
 #include "bytebeat.h"
 #include "engine.h"
 
 /* std::abs on an int lives in <cstdlib>; <cmath> only promises the floating
  * overloads. libc++ happens to declare both from either header, MSVC does
  * not. std::make_unique is <memory>. */
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace morgue
 {
@@ -205,7 +209,7 @@ void TitleBar::mouseDoubleClick (const juce::MouseEvent& e)
 static const char* const stageTabNames[StageTabs::numTabs] =
 {
     "RACK", "ARRANGE", "GRAIN LICKS", "GRAIN MASS",
-    "SURVIVOR", "MIXER", "HW/SYNC", "EXPORT"
+    "SURVIVOR", "MIXER", "HW/SYNC", "EXHUME", "PLATE", "EXPORT"
 };
 
 static int infoCellWidth()
@@ -329,13 +333,436 @@ void StageTabs::mouseExit (const juce::MouseEvent&)
 /*  Locker                                                                   */
 /* ======================================================================== */
 
+/* ---- the group vocabulary ----------------------------------------------
+ * The first eight are morgue::Kind, in the order a piece of material moves
+ * through the instrument: grown, captured, recorded, acquired, scanned,
+ * plated, exported, filed as a recipe. The last three are for material the
+ * register has never heard of, which on any real machine is most of it on
+ * day one -- files placed here by hand, and everything grown before
+ * ACCESSION existed. They are classified by shape, not invented into the
+ * register; nothing here writes a ledger record. */
+enum LockerGroup
+{
+    LG_SPC = 0, LG_CLIP, LG_REC, LG_ACQ, LG_SCN, LG_PLT, LG_EXP, LG_RCP,
+    LG_AUDIO, LG_SESSION, LG_OTHER, LG_COUNT
+};
+
+static_assert (LG_COUNT <= 16, "Locker::collapsed[] is sized 16");
+
+namespace
+{
+    struct LockerGroupDef { const char* tag; const char* desc; };
+
+    const LockerGroupDef lockerGroups[LG_COUNT] =
+    {
+        { "SPC",  "GROWN SPECIMENS"      },
+        { "CLIP", "ARRANGEMENT CAPTURES" },
+        { "REC",  "MASTER RECORDINGS"    },
+        { "ACQ",  "ACQUIRED AUDIO"       },
+        { "SCN",  "CAPTURED IMAGES"      },
+        { "PLT",  "RENDERED PLATES"      },
+        { "EXP",  "EXPORTS"              },
+        { "RCP",  "RECIPES"              },
+        { "AUD",  "UNFILED AUDIO"        },
+        { "SES",  "SESSION FILES"        },
+        { "OTH",  "OTHER MATERIAL"       },
+    };
+
+    int groupForKind (Kind k) noexcept
+    {
+        switch (k)
+        {
+            case Kind::Spc:  return LG_SPC;
+            case Kind::Clip: return LG_CLIP;
+            case Kind::Rec:  return LG_REC;
+            case Kind::Acq:  return LG_ACQ;
+            case Kind::Scn:  return LG_SCN;
+            case Kind::Plt:  return LG_PLT;
+            case Kind::Exp:  return LG_EXP;
+            case Kind::Rcp:  return LG_RCP;
+            default:         return LG_OTHER;
+        }
+    }
+
+    bool isAudioName (const juce::String& n)
+    {
+        return n.endsWithIgnoreCase (".wav")  || n.endsWithIgnoreCase (".aif")
+            || n.endsWithIgnoreCase (".aiff") || n.endsWithIgnoreCase (".mp3")
+            || n.endsWithIgnoreCase (".ogg")  || n.endsWithIgnoreCase (".flac");
+    }
+
+    bool isSessionName (const juce::String& n)
+    {
+        return n.endsWithIgnoreCase (".conf") || n.endsWithIgnoreCase (".morgue")
+            || n.endsWithIgnoreCase (".ledger");
+    }
+
+    /* AudioEngine::WavRecorder names its output "%Y-%m-%d_%H-%M-%S.wav" (see
+     * AudioEngine.cpp:251), which carries no prefix at all -- so a recording
+     * is recognised by the only thing it has, its stamp. Checked structurally
+     * rather than by regex because this runs once per file per walk. */
+    bool looksLikeRecStamp (const juce::String& n)
+    {
+        if (n.length() < 19 || ! n.endsWithIgnoreCase (".wav")) return false;
+        auto d = [&n] (int i) { return juce::CharacterFunctions::isDigit (n[i]); };
+        return d (0) && d (1) && d (2) && d (3) && n[4] == '-'
+            && d (5) && d (6) && n[7] == '-' && d (8) && d (9) && n[10] == '_';
+    }
+
+    /* The register is the authority. The filename prefix is only consulted
+     * when there is no record -- which is exactly the case the prefixes were
+     * invented for, and exactly the case in which they collide (see the note
+     * at the top of Ledger.h about SPC-%04X). Being in the right GROUP is a
+     * weaker claim than having an identity, so a guess is safe here in a way
+     * that printing a guessed serial would not be. */
+    int classifyName (const juce::String& n, const Record* rec)
+    {
+        if (rec != nullptr && rec->kind != Kind::Unknown)
+            return groupForKind (rec->kind);
+
+        if (n.startsWithIgnoreCase ("SPC-"))  return LG_SPC;
+        if (n.startsWithIgnoreCase ("CLIP-")) return LG_CLIP;
+        if (n.startsWithIgnoreCase ("REC-"))  return LG_REC;
+        if (n.startsWithIgnoreCase ("ACQ-"))  return LG_ACQ;
+        if (n.startsWithIgnoreCase ("SCN-"))  return LG_SCN;
+        if (n.startsWithIgnoreCase ("PLT-"))  return LG_PLT;
+        if (n.startsWithIgnoreCase ("EXP-"))  return LG_EXP;
+        if (n.startsWithIgnoreCase ("RCP-"))  return LG_RCP;
+
+        if (isSessionName (n))     return LG_SESSION;
+        if (looksLikeRecStamp (n)) return LG_REC;
+        if (isAudioName (n))       return LG_AUDIO;
+        return LG_OTHER;
+    }
+
+    juce::String baseNameOf (const juce::String& storedPath)
+    {
+        const int i = juce::jmax (storedPath.lastIndexOfChar ('/'),
+                                  storedPath.lastIndexOfChar ('\\'));
+        return i >= 0 ? storedPath.substring (i + 1) : storedPath;
+    }
+
+    /* Clearance is the one thing in this panel allowed near the accent, and
+     * only at its worst. CLEARED is deliberately NOT green: GREEN_FAINT has
+     * exactly one use in the spec and "everything is fine" is not a state
+     * this console announces. */
+    juce::Colour clearanceColour (Clearance c)
+    {
+        switch (c)
+        {
+            case Clearance::PersonalOnly: return C::BLOOD_HOT;
+            case Clearance::Review:       return C::AMBER;
+            case Clearance::Cleared:      return C::INK_DIM;
+            default:                      return C::INK_FAINT;
+        }
+    }
+
+    /* The one registration glyph this design owns, drawn as two hairlines. */
+    void paintRegistrationCross (juce::Graphics& g, int x, int y, int arm = 3)
+    {
+        g.fillRect (x - arm, y, arm * 2 + 1, 1);
+        g.fillRect (x, y - arm, 1, arm * 2 + 1);
+    }
+
+    constexpr int kScanMaxDepth = 6;      // ACQ/<identifier>/<file> needs 2
+    constexpr int kScanMaxDirs  = 512;
+    constexpr int kScanMaxFiles = 20000;
+    constexpr int kScanIdleMs   = 2000;
+
+    constexpr int kLockerRowH   = 28;
+    constexpr int kLockerFilterH = 26;
+}
+
+/* ======================================================================== */
+/*  Locker::Scanner -- the walk, and the rules for when it happens again     */
+/* ======================================================================== */
+/*
+ * THE CACHE, AND WHEN IT IS WRONG.
+ *
+ * A locker with thousands of files across ACQ/<identifier>/ subdirectories is
+ * tens of thousands of stat calls. That cannot happen on the message thread
+ * (it runs the 30 Hz engine sync and every paint routine) and it must not
+ * happen at 30 Hz on any thread. So the listing is a cache, and the whole
+ * design question is when to invalidate it.
+ *
+ * Two triggers, and both are cheap:
+ *
+ *   EXPLICIT.  refresh() is a poke, not a scan. Everything that knowingly
+ *   writes into the locker -- a finished GROW, REC stopping, an ARRANGE
+ *   capture -- already called it, and those call sites are unchanged. Pokes
+ *   coalesce: ten in a row cost one extra pass, not ten.
+ *
+ *   OBSERVED.  Everything else writes into this directory behind our back:
+ *   EXHUME's download workers, the visual wing's ffmpeg output, the player
+ *   with a file manager. So every kScanIdleMs the thread takes a SIGNATURE --
+ *   the modification time of the root and of each directory the last walk
+ *   found, plus the ledger's size, mtime and record count. That is one stat
+ *   per DIRECTORY (a handful), not per file (thousands), and adding or
+ *   removing an entry is exactly what bumps a directory's mtime on NTFS, APFS
+ *   and ext4 alike. The ledger is in the signature because a row shows the
+ *   register's serial and origin: a record landing while nothing on disk
+ *   moved still has to re-letter the list.
+ *
+ * The signature cannot see a file appearing inside a directory that did not
+ * exist at the last walk -- but creating that directory bumps its parent,
+ * which is in the set, so the next pass finds both. The one case it misses is
+ * a file whose CONTENTS changed with no entry added or removed, which changes
+ * nothing this panel paints except the size, and the explicit poke covers the
+ * writers we own.
+ *
+ * The thread sleeps in wait(), so notify() from refresh() wakes it at once;
+ * idle cost is a handful of stats every two seconds on a background-priority
+ * thread. Nothing here touches a JUCE Component: results go back through
+ * MessageManager::callAsync and a Component::SafePointer, the shape
+ * growSpecimen() established below.
+ */
+class Locker::Scanner final : public juce::Thread
+{
+public:
+    Scanner (Locker& o, juce::File ledgerFileIn)
+        : juce::Thread ("MORGUE LOCKER SCAN"),
+          safe (&o),
+          ledgerFile (std::move (ledgerFileIn))
+    {}
+
+    void poke() { dirty.store (true); notify(); }
+
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            const bool forced = dirty.exchange (false);
+            const juce::uint64 sig = signature();
+
+            if (forced || sig != lastSignature)
+            {
+                scan();
+                /* Re-take it AFTER the walk: the walk is what discovers the
+                 * directory set the signature is computed over, and on the
+                 * first pass that set was empty. Without this the second pass
+                 * would always see a "change" and walk again. */
+                lastSignature = signature();
+            }
+
+            wait (kScanIdleMs);
+        }
+    }
+
+private:
+    juce::uint64 signature()
+    {
+        juce::uint64 h = 0xcbf29ce484222325ULL;
+        auto mix = [&h] (juce::int64 v)
+        {
+            for (int b = 0; b < 8; ++b)
+            {
+                h ^= (juce::uint64) (((juce::uint64) v >> (b * 8)) & 0xff);
+                h *= 0x100000001b3ULL;
+            }
+        };
+
+        const juce::File root = morgue::morgueDir();
+        mix (root.isDirectory() ? root.getLastModificationTime().toMilliseconds() : -1);
+        mix ((juce::int64) watched.size());
+
+        for (const auto& d : watched)
+            mix (d.getLastModificationTime().toMilliseconds());
+
+        const bool haveLedger = ledgerFile.existsAsFile();
+        mix (haveLedger ? ledgerFile.getLastModificationTime().toMilliseconds() : -1);
+        mix (haveLedger ? ledgerFile.getSize() : -1);
+        mix ((juce::int64) Ledger::shared().size());
+        return h;
+    }
+
+    void scan()
+    {
+        const juce::File root = morgue::morgueDir();
+
+        /* One snapshot of the register, then O(1) probes per file. Asking
+         * Ledger::findByFile() per file would be O(files x records) with the
+         * data lock taken and released thousands of times; all() copies the
+         * vector once under one lock and we index it here. */
+        const std::vector<Record> recs = Ledger::shared().all();
+        juce::HashMap<juce::String, int> byRel, byBase;
+        for (int i = 0; i < (int) recs.size(); ++i)
+        {
+            const juce::String& p = recs[(size_t) i].file;
+            if (p.isEmpty()) continue;
+            byRel.set (p, i);
+            /* Last writer wins, matching Ledger::findByFile()'s newest-first
+             * basename fallback: a name that really was reused resolves to
+             * the most recent accession, which is the one the LOCKER shows. */
+            byBase.set (baseNameOf (p).toLowerCase(), i);
+        }
+
+        std::vector<juce::File> dirs;
+        std::vector<Entry> found;
+        bool hitCap = false;
+
+        if (root.isDirectory())
+        {
+            struct Node { juce::File dir; int depth; };
+            std::vector<Node> queue;
+            queue.push_back ({ root, 0 });
+            dirs.push_back (root);
+
+            for (size_t qi = 0; qi < queue.size() && ! hitCap; ++qi)
+            {
+                if (threadShouldExit()) return;
+                const Node node = queue[qi];      // by value: the vector grows below
+
+                /* FollowSymlinks::no is not paranoia. The session root is a
+                 * directory the player owns and can drop anything into,
+                 * including a link back to one of its own ancestors, and a
+                 * loop there would spin this thread until the machine was
+                 * restarted. The depth and count caps are the same argument
+                 * made twice. */
+                for (const auto& f : node.dir.findChildFiles (
+                         juce::File::findFilesAndDirectories, false, "*",
+                         juce::File::FollowSymlinks::no))
+                {
+                    if (threadShouldExit()) return;
+                    if (f.isHidden()) continue;
+
+                    if (f.isDirectory())
+                    {
+                        if (node.depth + 1 <= kScanMaxDepth
+                            && (int) queue.size() < kScanMaxDirs)
+                        {
+                            queue.push_back ({ f, node.depth + 1 });
+                            dirs.push_back (f);
+                        }
+                        continue;
+                    }
+
+                    if ((int) found.size() >= kScanMaxFiles) { hitCap = true; break; }
+
+                    Entry e;
+                    e.file     = f;
+                    e.name     = f.getFileName();
+                    e.size     = f.getSize();
+                    e.modified = f.getLastModificationTime().toMilliseconds();
+                    e.patch    = isSessionName (e.name);
+
+                    const juce::String rel =
+                        f.getRelativePathFrom (root).replaceCharacter ('\\', '/');
+                    e.subdir = rel.upToLastOccurrenceOf ("/", false, false);
+                    if (e.subdir == rel) e.subdir.clear();       // lives in the root
+
+                    const Record* rec = nullptr;
+                    if (byRel.contains (rel))
+                        rec = &recs[(size_t) byRel[rel]];
+                    else if (byBase.contains (e.name.toLowerCase()))
+                        rec = &recs[(size_t) byBase[e.name.toLowerCase()]];
+
+                    if (rec != nullptr)
+                    {
+                        e.serial    = rec->serial;
+                        e.origin    = rec->origin;
+                        e.clearance = (int) rec->clearance;
+                    }
+
+                    e.group  = classifyName (e.name, rec);
+                    e.search = (e.name + " " + e.origin + " " + e.serial + " "
+                                + e.subdir).toLowerCase();
+                    found.push_back (std::move (e));
+                }
+            }
+        }
+
+        /* Group first, then newest-first inside the group -- the evidence-log
+         * order the flat list had, kept, but no longer the ONLY structure. */
+        std::stable_sort (found.begin(), found.end(),
+                          [] (const Entry& a, const Entry& b)
+        {
+            if (a.group != b.group)       return a.group < b.group;
+            if (a.modified != b.modified) return a.modified > b.modified;
+            return a.name.compareIgnoreCase (b.name) < 0;
+        });
+
+        watched = std::move (dirs);
+
+        /* Retry any ledger line an append could not deliver -- a failed write
+         * leaves the record in memory and its line on a queue, so a session
+         * degrades to "your provenance is not durable YET" rather than losing
+         * it. flushPending() is documented WORKER-THREAD-ONLY, this is a
+         * worker, and the LOCKER is the one panel that reports the backlog,
+         * so it is also the right one to clear it. Free when the queue is
+         * empty: one lock and an empty-vector test. */
+        if (Ledger::shared().pendingCount() > 0)
+            Ledger::shared().flushPending();
+
+        auto payload = std::make_shared<std::vector<Entry>> (std::move (found));
+        const int  pending = Ledger::shared().pendingCount();
+        const bool cap = hitCap;
+        auto sp = safe;
+
+        juce::MessageManager::callAsync ([sp, payload, pending, cap]
+        {
+            if (sp == nullptr) return;
+            sp->adoptScan (std::move (*payload), pending, cap);
+        });
+    }
+
+    juce::Component::SafePointer<Locker> safe;   // made on the message thread
+    juce::File ledgerFile;                       // resolved on the message thread
+    std::vector<juce::File> watched;             // scanner-thread only
+    juce::uint64 lastSignature = 0;
+    std::atomic<bool> dirty { true };            // the first pass always walks
+};
+
+/* ======================================================================== */
+
 Locker::Locker()
 {
     setTooltip (U8 ("LOCKER \xe2\x80\x94 specimen archive of ") + morgue::morgueDirDisplay()
-                + U8 (". Click a row to select it."));
-    list.setRowHeight (26);
+                + U8 (", read all the way down. Grouped by kind; click a header "
+                      "to fold it. Type to filter on name, origin or serial. "
+                      "Click a row to select it and read its provenance; drag it "
+                      "onto a GRAIN LICKS slot, or out of the window into another "
+                      "application."));
+    list.setRowHeight (kLockerRowH);
     list.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
+    list.setMultipleSelectionEnabled (false);
     addAndMakeVisible (list);
+
+    /* The text filter. ESCAPE and RETURN are both bound deliberately: an
+     * unhandled key in a TextEditor propagates to MainComponent::keyPressed,
+     * where ESCAPE is CUT (master panic) and SPACE is RUN. Typing the name of
+     * a specimen must not silence the instrument. */
+    filterBox.setMultiLine (false);
+    filterBox.setReturnKeyStartsNewLine (false);
+    filterBox.setFont (Type::mono (9.0f, 0.06f));
+    filterBox.setJustification (Justification::centredLeft);
+    filterBox.setColour (juce::TextEditor::textColourId, C::INK);
+    filterBox.setColour (juce::TextEditor::backgroundColourId, C::SOCKET);
+    filterBox.setColour (juce::TextEditor::outlineColourId, C::HAIRLINE);
+    filterBox.setColour (juce::TextEditor::focusedOutlineColourId, C::EDGE);
+    filterBox.setColour (juce::TextEditor::highlightColourId, C::BLOOD_DEEP);
+    filterBox.setColour (juce::TextEditor::highlightedTextColourId, C::INK_BRIGHT);
+    filterBox.setColour (juce::CaretComponent::caretColourId, C::BLOOD_HOT);
+    filterBox.setTextToShowWhenEmpty ("FILTER", C::INK_GHOST);
+    filterBox.setTooltip (U8 ("FILTER \xe2\x80\x94 matches the file name, the register's "
+                              "origin and the serial. Several words all have to match. "
+                              "ESC clears it."));
+    filterBox.onTextChange = [this]
+    {
+        filterText = filterBox.getText().trim().toLowerCase();
+        rebuildRows();
+        resized();
+        repaint();
+    };
+    filterBox.onEscapeKey = [this] { filterBox.setText ({}, true); };
+    filterBox.onReturnKey = [this] { list.grabKeyboardFocus(); };
+    addAndMakeVisible (filterBox);
+
+    kindBtn = std::make_unique<PlateButton> ("ALL", false, false);
+    kindBtn->setTooltip (U8 ("KIND \xe2\x80\x94 show one class of material only: "
+                             "grown specimens, arrangement captures, master "
+                             "recordings, acquisitions, scans, plates."));
+    kindBtn->onToggle = [this] (bool) { showKindMenu(); };
+    addAndMakeVisible (*kindBtn);
 
     growBtn = std::make_unique<PlateButton> ("GROW", false, false);
     growBtn->setTooltip (U8 ("GROW \xe2\x80\x94 render the FOCUSED VOICE as a "
@@ -347,7 +774,24 @@ Locker::Locker()
     growBtn->onToggle = [this] (bool) { growSpecimen(); };
     addAndMakeVisible (*growBtn);
 
-    refresh();
+    /* Resolve the ledger's path HERE, on the message thread, and hand the
+     * File to the worker. Ledger::file() memoises into a mutable member, and
+     * this call is guaranteed to be the first one: the LOCKER is a
+     * MainComponent member, so it is constructed before the constructor body
+     * that calls Ledger::bootstrap() and starts the register's own worker. */
+    scanner = std::make_unique<Scanner> (*this, Ledger::shared().file());
+    scanner->startThread (juce::Thread::Priority::background);
+}
+
+Locker::~Locker()
+{
+    /* Join before anything else is destroyed. After stopThread() returns
+     * there is no scanner thread, so nothing can be copying our SafePointer
+     * while ~Component clears it, and any callAsync already queued finds a
+     * null SafePointer and does nothing. */
+    if (scanner != nullptr)
+        scanner->stopThread (3000);
+    scanner.reset();
 }
 
 /* Render off the message thread -- the synthesis is a second or two of CPU
@@ -385,37 +829,366 @@ void Locker::growSpecimen()
     });
 }
 
-/* newest first, like the evidence log in the mockup */
-struct LockerFileCmp
-{
-    static int compareElements (const juce::File& a, const juce::File& b)
-    {
-        const juce::int64 ta = a.getLastModificationTime().toMilliseconds();
-        const juce::int64 tb = b.getLastModificationTime().toMilliseconds();
-        return ta < tb ? 1 : ta > tb ? -1 : a.getFileName().compare (b.getFileName());
-    }
-};
+/* ---- invalidation ------------------------------------------------------ */
 
 void Locker::refresh()
 {
-    files.clear();
-    const juce::File dir = morgue::morgueDir();
-    if (dir.isDirectory())
-        for (const auto& f : dir.findChildFiles (juce::File::findFiles, false))
-            if (! f.isHidden())
-                files.add (f);
-    LockerFileCmp cmp;
-    files.sort (cmp);
-    list.updateContent();
+    /* Not a scan: an invalidation. The walk happens on the LOCKER's own
+     * worker and lands in adoptScan(). Callers (a finished GROW, REC
+     * stopping, an ARRANGE capture) may fire this as often as they like --
+     * overlapping pokes coalesce into one extra pass. */
+    if (scanner != nullptr)
+        scanner->poke();
+}
+
+void Locker::adoptScan (std::vector<Entry> found, int pending, bool truncatedWalk)
+{
+    entries       = std::move (found);
+    scanned       = true;
+    truncated     = truncatedWalk;
+    pendingWrites = pending;
+
+    /* A selection is a path, not a row number, so it survives a rescan that
+     * renumbers everything -- which is the whole reason the old row-index
+     * "serial" was untenable in the first place. */
+    if (selectedPath != juce::File() && entryForFile (selectedPath) == nullptr)
+        selectedPath = juce::File();
+
+    rebuildRows();
+    selectFileRow (selectedPath);
+    updateDetail();
+    resized();
     repaint();
+}
+
+/* ---- filter, grouping, selection ---------------------------------------- */
+
+bool Locker::filterActive() const
+{
+    return filterText.isNotEmpty() || kindFilter >= 0;
+}
+
+void Locker::rebuildRows()
+{
+    rows.clear();
+    visibleCount = 0;
+
+    juce::StringArray terms;
+    terms.addTokens (filterText, " ", "");
+    terms.removeEmptyStrings();
+
+    for (int gi = 0; gi < LG_COUNT; ++gi)
+    {
+        if (kindFilter >= 0 && kindFilter != gi) continue;
+
+        /* entries is already sorted group-major, newest-first, so one pass
+         * per group preserves that order without a second sort. */
+        std::vector<int> hits;
+        for (int i = 0; i < (int) entries.size(); ++i)
+        {
+            const Entry& e = entries[(size_t) i];
+            if (e.group != gi) continue;
+
+            bool ok = true;
+            for (const auto& t : terms)
+                if (! e.search.contains (t)) { ok = false; break; }
+            if (ok) hits.push_back (i);
+        }
+        if (hits.empty()) continue;
+
+        Row header;
+        header.group = gi;
+        header.entry = -1;
+        header.count = (int) hits.size();
+        rows.push_back (header);
+
+        if (! collapsed[gi])
+            for (int i : hits)
+            {
+                Row r;
+                r.group = gi;
+                r.entry = i;
+                rows.push_back (r);
+            }
+
+        visibleCount += (int) hits.size();
+    }
+
+    list.updateContent();
+}
+
+const Locker::Entry* Locker::entryForRow (int row) const
+{
+    if (row < 0 || row >= (int) rows.size()) return nullptr;
+    const int e = rows[(size_t) row].entry;
+    if (e < 0 || e >= (int) entries.size()) return nullptr;
+    return &entries[(size_t) e];
+}
+
+const Locker::Entry* Locker::entryForFile (const juce::File& f) const
+{
+    if (f == juce::File()) return nullptr;
+    for (const auto& e : entries)
+        if (e.file == f)
+            return &e;
+    return nullptr;
+}
+
+void Locker::selectFileRow (const juce::File& f)
+{
+    if (f != juce::File())
+        for (int i = 0; i < (int) rows.size(); ++i)
+            if (const Entry* e = entryForRow (i))
+                if (e->file == f) { list.selectRow (i, true, true); return; }
+
+    list.deselectAllRows();
 }
 
 juce::File Locker::selectedFile() const
 {
-    const int row = list.getSelectedRow();
-    return (row >= 0 && row < files.size()) ? files.getReference (row)
-                                            : juce::File();
+    /* Answer from the register of what the last walk saw, not from a stat:
+     * ARRANGE asks this on a button press and a disappeared file should read
+     * as "nothing selected", not as a path that no longer resolves. */
+    return entryForFile (selectedPath) != nullptr ? selectedPath : juce::File();
 }
+
+void Locker::selectedRowsChanged (int lastRowSelected)
+{
+    /* Only a FILE row moves the selection. A group header is a fold control,
+     * and listBoxItemClicked() puts the file selection back immediately --
+     * leaving `selectedPath` alone here is what makes that possible. */
+    if (const Entry* e = entryForRow (lastRowSelected))
+        selectedPath = e->file;
+
+    updateDetail();
+    resized();
+    repaint();
+}
+
+void Locker::listBoxItemClicked (int row, const juce::MouseEvent&)
+{
+    if (row < 0 || row >= (int) rows.size()) return;
+    if (rows[(size_t) row].entry >= 0) return;          // a file: normal selection
+
+    const int gi = rows[(size_t) row].group;
+    collapsed[gi] = ! collapsed[gi];
+    rebuildRows();
+    selectFileRow (selectedPath);                       // folding is not deselecting
+    updateDetail();
+    resized();
+    repaint();
+}
+
+void Locker::showKindMenu()
+{
+    juce::PopupMenu m;
+    m.addItem (1, "ALL", true, kindFilter < 0);
+    m.addSeparator();
+
+    for (int i = 0; i < LG_COUNT; ++i)
+    {
+        int n = 0;
+        for (const auto& e : entries)
+            if (e.group == i) ++n;
+
+        m.addItem (100 + i,
+                   juce::String (lockerGroups[i].tag) + U8 ("  \xc2\xb7  ")
+                       + lockerGroups[i].desc + "  " + juce::String (n),
+                   n > 0 || kindFilter == i,
+                   kindFilter == i);
+    }
+
+    juce::Component::SafePointer<Locker> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options()
+                         .withTargetComponent (kindBtn.get())
+                         .withMinimumWidth (210),
+                     [safe] (int result)
+    {
+        if (safe == nullptr || result == 0) return;
+        safe->kindFilter = (result == 1) ? -1 : result - 100;
+        safe->kindBtn->setButtonText (safe->kindFilter < 0
+                                          ? juce::String ("ALL")
+                                          : juce::String (lockerGroups[safe->kindFilter].tag));
+        safe->rebuildRows();
+        safe->updateDetail();
+        safe->resized();
+        safe->repaint();
+    });
+}
+
+/* ---- drag source -------------------------------------------------------- */
+
+juce::var Locker::getDragSourceDescription (const juce::SparseSet<int>& rowsToDescribe)
+{
+    if (rowsToDescribe.isEmpty()) return {};
+
+    /* The absolute path, which is precisely what LicksPanel::itemDropped()
+     * reads out of the description (LicksPanel.cpp:776). A group header
+     * returns void, and ListBox then does not start a drag at all. */
+    if (const Entry* e = entryForRow (rowsToDescribe[0]))
+        return e->file.getFullPathName();
+
+    return {};
+}
+
+bool Locker::shouldDropFilesWhenDraggedExternally (
+        const juce::DragAndDropTarget::SourceDetails& details,
+        juce::StringArray& files, bool& canMoveFiles)
+{
+    const juce::String p = details.description.toString();
+    if (p.isEmpty() || ! juce::File::isAbsolutePath (p)) return false;
+    if (! juce::File (p).existsAsFile()) return false;
+
+    files.add (p);
+
+    /* COPY, never move. The ledger's `file` field points at this path; a
+     * move would silently break every record that names it, and the LOCKER
+     * would go on showing a serial for a file that had walked out of the
+     * building. */
+    canMoveFiles = false;
+    return true;
+}
+
+/* ---- provenance --------------------------------------------------------- */
+
+void Locker::updateDetail()
+{
+    detailLines.clear();
+    detailTitle.clear();
+    detailIsRecord = false;
+
+    const Entry* e = entryForFile (selectedPath);
+    if (e == nullptr) return;
+
+    auto add = [this] (const char* k, const juce::String& v,
+                       juce::Colour c = C::INK_DIM)
+    {
+        if (v.isNotEmpty())
+            detailLines.push_back ({ juce::String (k), v, c });
+    };
+
+    Record r;
+    detailIsRecord = Ledger::shared().findByFile (e->file, r);
+
+    if (! detailIsRecord)
+    {
+        /* Say so plainly. An unregistered file is the normal case for a
+         * locker that predates ACCESSION, and pretending otherwise -- by
+         * printing the filename in the serial column, or a row index, which
+         * is what this panel used to do -- is how a provenance chain grows
+         * an edge that points at nothing. */
+        detailTitle = e->name;
+        add ("SERIAL",   U8 ("\xe2\x80\x94  NOT IN THE REGISTER"), C::INK_FAINT);
+        add ("PATH",     e->subdir.isNotEmpty() ? e->subdir + "/" + e->name : e->name);
+        add ("SIZE",     juce::File::descriptionOfSizeInBytes (e->size).toUpperCase());
+        add ("MODIFIED", juce::Time (e->modified).formatted ("%Y-%m-%d %H:%M"));
+        add ("",         "PLACED HERE BY HAND, OR MADE BEFORE THE REGISTER EXISTED.",
+             C::INK_FAINT);
+        return;
+    }
+
+    detailTitle = r.origin;
+    add ("SERIAL",  r.serial, C::INK);
+    add ("KIND",    juce::String (kindDescription (r.kind)));
+    add ("CREATOR", r.creator);
+    add ("DATE",    r.date);
+    add ("SOURCE",  r.source.isNotEmpty() ? r.source : r.sourceId);
+
+    /* Licence and claimant on one line and never apart: archive.org licence
+     * metadata is uploader-supplied, so "CC0" without a claimant is a rumour
+     * with a URL attached (Ledger.h says this at length). */
+    if (r.licence.isNotEmpty())
+        add ("LICENCE", r.declaredBy.isNotEmpty()
+                            ? r.licence + U8 ("  \xc2\xb7  SAID BY ") + r.declaredBy
+                            : r.licence + U8 ("  \xc2\xb7  UNATTRIBUTED CLAIM"));
+    else if (r.declaredBy.isNotEmpty())
+        add ("LICENCE", U8 ("NONE DECLARED  \xc2\xb7  BY ") + r.declaredBy, C::INK_FAINT);
+
+    /* The effective clearance, which folds the whole ancestry in and is
+     * nearly always worse than the record's own field. That is the number
+     * that decides whether the thing can ship, so it is the one on screen. */
+    const Clearance eff = Ledger::shared().effectiveClearance (r.serial);
+    add ("CLEARANCE", juce::String (clearanceTag (eff)), clearanceColour (eff));
+    if (eff != r.clearance)
+        add ("", U8 ("INHERITED \xe2\x80\x94 THIS RECORD ITSELF READS ")
+                 + juce::String (clearanceTag (r.clearance)), C::INK_FAINT);
+    add ("NOTE", r.note, C::INK_FAINT);
+    add ("TOOL", r.tool, C::INK_FAINT);
+
+    const std::vector<Record> chain = Ledger::shared().ancestry (r.serial);
+    if (chain.empty())
+        add ("FROM", U8 ("\xe2\x80\x94  ORIGINAL ACCESSION"), C::INK_FAINT);
+    else
+        for (size_t i = 0; i < chain.size(); ++i)
+            add (i == 0 ? "FROM" : "",
+                 chain[i].origin.isNotEmpty()
+                     ? chain[i].serial + U8 ("  \xc2\xb7  ") + chain[i].origin
+                     : chain[i].serial,
+                 clearanceColour (chain[i].clearance));
+
+    add ("ACCESSIONED", r.utc, C::INK_FAINT);
+}
+
+int Locker::detailHeight() const
+{
+    if (detailLines.empty()) return 0;
+
+    const int chrome = 22 + kLockerFilterH + 20;      // header + filter + footer
+    const int room   = getHeight() - chrome - 90;     // the list keeps 90px
+    if (room < 60) return 0;
+
+    const int want = 1 + 20 + 15 + (int) detailLines.size() * 12 + 6;
+    return juce::jmin (want, room);
+}
+
+void Locker::paintDetail (juce::Graphics& g, Rectangle<int> b)
+{
+    g.setColour (C::PANEL_ALT);
+    g.fillRect (b);
+    g.setColour (C::HAIRLINE);
+    g.fillRect (b.getX(), b.getY(), b.getWidth(), 1);
+    b.removeFromTop (1);
+
+    // registration crosses, the one corner mark this design owns
+    g.setColour (C::INK_GHOST);
+    paintRegistrationCross (g, b.getX() + 5, b.getY() + 5);
+    paintRegistrationCross (g, b.getRight() - 6, b.getY() + 5);
+
+    paintLabelRow (g, b.removeFromTop (20), "PROVENANCE",
+                   detailIsRecord ? juce::String ("REGISTERED")
+                                  : juce::String ("UNREGISTERED"));
+
+    Rectangle<int> body = b.reduced (10, 0);
+
+    // the human name, 10px, ellipsised
+    g.setColour (C::INK);
+    g.setFont (Type::mono (10.0f));
+    g.drawText (detailTitle, body.removeFromTop (15), Justification::centredLeft, true);
+
+    const juce::Font kf = Type::mono (7.0f, 0.12f);
+    const juce::Font vf = Type::mono (8.0f, 0.02f);
+
+    for (const auto& line : detailLines)
+    {
+        if (body.getHeight() < 12) break;           // draw only what fits
+        Rectangle<int> lr = body.removeFromTop (12);
+
+        Rectangle<int> kr = lr.removeFromLeft (62);
+        if (line.key.isNotEmpty())
+        {
+            g.setColour (C::INK_FAINT);
+            g.setFont (kf);
+            g.drawText (line.key, kr, Justification::centredLeft, true);
+        }
+        lr.removeFromLeft (4);
+
+        g.setColour (line.colour);
+        g.setFont (vf);
+        g.drawText (line.value, lr, Justification::centredLeft, true);
+    }
+}
+
+/* ---- layout and paint --------------------------------------------------- */
 
 void Locker::setContextHint (const juce::String& s)
 {
@@ -428,10 +1201,18 @@ void Locker::resized()
 {
     Rectangle<int> b = getLocalBounds();
     b.removeFromTop (22);                       // header band (painted)
+
+    Rectangle<int> fr = b.removeFromTop (kLockerFilterH).reduced (8, 4);
+    kindBtn->setBounds (fr.removeFromRight (46));
+    fr.removeFromRight (6);
+    filterBox.setBounds (fr);
+
     Rectangle<int> foot = b.removeFromBottom (20);
+    growBtn->setBounds (foot.getRight() - 55, foot.getY() + 2, 50, 16);
+
+    b.removeFromBottom (detailHeight());
     b.removeFromRight (1);                      // right-edge divider stays visible
     list.setBounds (b);
-    growBtn->setBounds (foot.getRight() - 55, foot.getY() + 2, 50, 16);
 }
 
 void Locker::paint (juce::Graphics& g)
@@ -444,21 +1225,62 @@ void Locker::paint (juce::Graphics& g)
                                                   : morgue::morgueDirDisplay();
     paintHeaderBand (g, b.removeFromTop (22), "LOCKER", {}, right);
 
-    // footer 20: count + PLANNED note, 8px .12em INK_FAINT, padding 0 8
+    // filter band: PANEL_ALT with a bottom hairline; the controls sit in it
+    Rectangle<int> fr = b.removeFromTop (kLockerFilterH);
+    g.setColour (C::PANEL_ALT);
+    g.fillRect (fr);
+    g.setColour (C::HAIRLINE);
+    g.fillRect (fr.getX(), fr.getBottom() - 1, fr.getWidth(), 1);
+
+    // footer 20: count left, GROW right, 8px .12em INK_FAINT, padding 0 8
     Rectangle<int> foot = b.removeFromBottom (20);
     g.setColour (C::HAIRLINE);
     g.fillRect (foot.getX(), foot.getY(), foot.getWidth(), 1);
-    g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f, 0.12f));
-    g.drawText (juce::String (files.size()) + " SPECIMENS",
-                foot.reduced (8, 0), Justification::centredLeft);
 
-    if (files.isEmpty())
+    /* "N SPECIMENS" verbatim when nothing is filtered -- the footer this
+     * panel has always had. A filter turns it into shown/total, because a
+     * count that silently means something else is worse than no count. */
+    juce::String count;
+    if (! scanned)          count = "SCANNING";
+    else if (filterActive()) count = juce::String (visibleCount) + "/"
+                                   + juce::String ((int) entries.size()) + " SPECIMENS";
+    else                     count = juce::String ((int) entries.size()) + " SPECIMENS";
+
+    const juce::Font ff = Type::mono (8.0f, 0.12f);
+    g.setColour (C::INK_FAINT);
+    g.setFont (ff);
+    Rectangle<int> fbar = foot.reduced (8, 0);
+    g.drawText (count, fbar.removeFromLeft (textW (ff, count) + 2),
+                Justification::centredLeft);
+
+    /* Two things the player is otherwise never told. Undelivered ledger
+     * writes mean the session's provenance is not durable yet; a truncated
+     * walk means the list on screen is not the whole locker. Both are amber
+     * warnings, not accents -- nothing here is armed or dangerous. */
+    juce::String warn;
+    if (truncated)         warn = "WALK TRUNCATED";
+    else if (pendingWrites > 0) warn = juce::String (pendingWrites) + " UNWRITTEN";
+    if (warn.isNotEmpty())
+    {
+        Rectangle<int> wr = fbar.withTrimmedRight (55);
+        g.setColour (C::AMBER);
+        g.drawText (warn, wr, Justification::centredRight, true);
+    }
+
+    // the provenance block, above the footer
+    Rectangle<int> det = b.removeFromBottom (detailHeight());
+    if (! det.isEmpty())
+        paintDetail (g, det);
+
+    if (rows.empty())
     {
         g.setColour (C::INK_FAINT);
         g.setFont (Type::mono (9.0f, 0.10f));
-        g.drawText ("NO SPECIMENS IN " + morgue::morgueDirDisplay(), b,
-                    Justification::centred, true);
+        juce::String msg;
+        if (! scanned)             msg = "READING " + morgue::morgueDirDisplay();
+        else if (filterActive())   msg = "NOTHING MATCHES THAT";
+        else                       msg = "NO SPECIMENS IN " + morgue::morgueDirDisplay();
+        g.drawText (msg, b.reduced (8, 0), Justification::centred, true);
     }
 
     // right-edge divider against the main stage (spec section 3)
@@ -466,12 +1288,61 @@ void Locker::paint (juce::Graphics& g)
     g.fillRect (getWidth() - 1, 0, 1, getHeight());
 }
 
-int Locker::getNumRows() { return files.size(); }
+int Locker::getNumRows() { return (int) rows.size(); }
 
 void Locker::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected)
 {
-    if (row < 0 || row >= files.size()) return;
-    const juce::File& f = files.getReference (row);
+    if (row < 0 || row >= (int) rows.size()) return;
+    const Row& r = rows[(size_t) row];
+
+    /* ---- a group header: tag, description, count, fold state ---- */
+    if (r.entry < 0)
+    {
+        g.setColour (C::PANEL_ALT);
+        g.fillRect (0, 0, w, h);
+        g.setColour (C::HAIRLINE);
+        g.fillRect (0, 0, w, 1);
+
+        Rectangle<int> band (0, 0, w, h);
+        band.removeFromLeft (8);
+        band.removeFromRight (8);
+
+        // the fold marker: a 4px triangle, the same one the combo boxes use
+        {
+            const float cx = (float) band.getX() + 2.0f;
+            const float cy = (float) band.getCentreY();
+            juce::Path p;
+            if (collapsed[r.group]) p.addTriangle (cx - 2, cy - 4, cx + 3, cy, cx - 2, cy + 4);
+            else                    p.addTriangle (cx - 4, cy - 2, cx + 4, cy - 2, cx, cy + 3);
+            g.setColour (C::INK_GHOST);
+            g.fillPath (p);
+        }
+        band.removeFromLeft (13);
+
+        const juce::Font cf = Type::mono (8.0f, 0.10f);
+        const juce::String cnt (r.count);
+        g.setColour (C::INK_FAINT);
+        g.setFont (cf);
+        g.drawText (cnt, band.removeFromRight (textW (cf, cnt) + 2),
+                    Justification::centredRight);
+        band.removeFromRight (8);
+
+        const juce::Font tf = Type::label();          // 9px .16em, caps
+        const juce::String tag (lockerGroups[r.group].tag);
+        g.setColour (C::INK_DIM);
+        g.setFont (tf);
+        g.drawText (tag, band.removeFromLeft (textW (tf, tag) + 2),
+                    Justification::centredLeft);
+        band.removeFromLeft (8);
+
+        g.setColour (C::INK_GHOST);
+        g.setFont (Type::mono (8.0f, 0.10f));
+        g.drawText (lockerGroups[r.group].desc, band, Justification::centredLeft, true);
+        return;
+    }
+
+    /* ---- a file: two lines, name over serial ---- */
+    const Entry& e = entries[(size_t) r.entry];
 
     if (selected)                                // bg #191816; no row separators
     {
@@ -479,42 +1350,96 @@ void Locker::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool se
         g.fillRect (0, 0, w, h);
     }
 
-    // padding 0 8, gap 8: serial 52 / name flex / meta right
-    Rectangle<int> r (0, 0, w, h);
-    r.removeFromLeft (8);
-    r.removeFromRight (8);
+    /* A 1px rule at the left edge for material that cannot ship. This is the
+     * only place BLOOD appears in the list, and it means exactly one thing:
+     * do not release this. REVIEW gets amber, the warn colour. Everything
+     * else gets nothing -- a mark that is always on is not a mark. */
+    if (e.clearance == (int) Clearance::PersonalOnly)
+    {
+        g.setColour (C::BLOOD);
+        g.fillRect (0, 0, 1, h);
+    }
+    else if (e.clearance == (int) Clearance::Review)
+    {
+        g.setColour (C::AMBER);
+        g.fillRect (0, 0, 1, h);
+    }
 
-    g.setColour (selected ? C::BLOOD_HOT : C::INK_GHOST);
-    g.setFont (Type::mono (8.0f, 0.06f));
-    g.drawText (juce::String (row + 1).paddedLeft ('0', 4),
-                r.removeFromLeft (52), Justification::centredLeft);
-    r.removeFromLeft (8);
+    Rectangle<int> body (0, 0, w, h);
+    body.removeFromLeft (8);
+    body.removeFromRight (8);
 
-    // meta right, 8px INK_FAINT: PATCH for project files, else size
-    const bool patch = f.hasFileExtension ("morgue") || f.hasFileExtension ("conf");
-    juce::String meta = patch ? juce::String ("PATCH")
-                              : juce::File::descriptionOfSizeInBytes (f.getSize())
-                                    .replace (" ", "").toUpperCase();
-    g.setColour (C::INK_FAINT);
+    Rectangle<int> l1 = body.removeFromTop (15);
+    Rectangle<int> l2 = body.removeFromTop (12);
+
+    // line 1 right: PATCH for project files, else the size
+    const juce::String meta = e.patch
+        ? juce::String ("PATCH")
+        : juce::File::descriptionOfSizeInBytes (e.size).replace (" ", "").toUpperCase();
     const juce::Font metaFont = Type::mono (8.0f);
+    g.setColour (C::INK_FAINT);
     g.setFont (metaFont);
-    const int mw = textW (metaFont, meta) + 2;
-    g.drawText (meta, r.removeFromRight (mw), Justification::centredRight);
-    r.removeFromRight (8);
+    g.drawText (meta, l1.removeFromRight (textW (metaFont, meta) + 2),
+                Justification::centredRight);
+    l1.removeFromRight (6);
 
-    // name 10px, ellipsised; OXIDE when a .morgue patch
-    g.setColour (selected ? C::INK_BRIGHT
-                          : (f.hasFileExtension ("morgue") ? C::OXIDE : INK_MID));
+    /* line 1 left: what a HUMAN calls it. The register's origin when there is
+     * one -- an acquisition's real title beats "ACQ-260805-K7J4QWMR.wav" and
+     * beats the archive.org filename it arrived under. */
+    const juce::String title = e.origin.isNotEmpty() ? e.origin : e.name;
+    g.setColour (selected ? C::INK_BRIGHT : (e.patch ? C::OXIDE : INK_MID));
     g.setFont (Type::mono (10.0f));
-    g.drawText (f.getFileName(), r, Justification::centredLeft, true);
+    g.drawText (title, l1, Justification::centredLeft, true);
+
+    /* line 2 right: where it actually lives, when that is not the root --
+     * the structure the old flat listing threw away -- or the name on disk
+     * when the line above is showing the register's title instead. */
+    juce::String where = e.subdir;
+    if (where.isEmpty() && e.origin.isNotEmpty()) where = e.name;
+    if (where.isNotEmpty())
+    {
+        const juce::Font wf = Type::nano (7.0f);
+        g.setColour (C::INK_GHOST);
+        g.setFont (wf);
+        const int ww = juce::jmin (textW (wf, where) + 2,
+                                   juce::jmax (0, l2.getWidth() / 2));
+        g.drawText (where, l2.removeFromRight (ww), Justification::centredRight, true);
+        l2.removeFromRight (6);
+    }
+
+    /* line 2 left: the TRUE serial. This column used to be String(row + 1) --
+     * a list index in a list sorted newest-first, so it renumbered every time
+     * a file landed. With no record it is an em dash, never a fabricated
+     * number and never a bare hash. */
+    const juce::Font serF = Type::mono (8.0f, 0.06f);
+    g.setColour (e.serial.isEmpty() ? C::INK_GHOST
+                                    : (selected ? C::BLOOD_HOT : C::INK_FAINT));
+    g.setFont (serF);
+    g.drawText (e.serial.isNotEmpty() ? e.serial : U8 ("\xe2\x80\x94"),
+                l2, Justification::centredLeft, true);
 }
 
 juce::String Locker::getTooltipForRow (int row)
 {
-    if (row < 0 || row >= files.size()) return {};
-    return files.getReference (row).getFileName()
-         + U8 (" \xe2\x80\x94 specimen in ") + morgue::morgueDirDisplay()
-         + U8 (". Click to select.");
+    if (row < 0 || row >= (int) rows.size()) return {};
+    const Row& r = rows[(size_t) row];
+
+    if (r.entry < 0)
+        return juce::String (lockerGroups[r.group].desc) + U8 (" \xe2\x80\x94 ")
+             + juce::String (r.count) + U8 (" in this locker. Click to fold.");
+
+    const Entry& e = entries[(size_t) r.entry];
+    juce::String t = e.name;
+    if (e.origin.isNotEmpty()) t << U8 (" \xe2\x80\x94 ") << e.origin;
+    if (e.subdir.isNotEmpty()) t << U8 (" \xc2\xb7 ") << e.subdir;
+    t << U8 (" \xc2\xb7 ") << (e.serial.isNotEmpty() ? e.serial
+                                                     : juce::String ("not in the register"));
+    if (e.clearance == (int) Clearance::PersonalOnly)
+        t << U8 (" \xc2\xb7 PERSONAL ONLY: never in a release.");
+    else if (e.clearance == (int) Clearance::Review)
+        t << U8 (" \xc2\xb7 REVIEW: a human has to check this one.");
+    t << U8 (". Click to read its provenance; drag it onto a GRAIN LICKS slot.");
+    return t;
 }
 
 /* ======================================================================== */
@@ -774,8 +1699,14 @@ void TransportBar::paint (juce::Graphics& g)
         }
         case 1:                                  // ARRANGE: song position
         {
-            const unsigned bar = atomic_load (&bb.bar);
-            const int sp = atomic_load (&bb.seq_pos);
+            /* One coherent read: bb.bar and bb.seq_pos are published as two
+             * separate stores, so loading them independently shows a bar and a
+             * step from either side of a boundary. */
+            const float posF = transportPositionBars();
+            const unsigned bar = posF < 0.0f ? (unsigned) atomic_load (&bb.bar)
+                                             : (unsigned) posF;
+            const int sp = posF < 0.0f ? -1
+                         : (int) ((posF - (float) bar) * (float) BB_STEPS + 0.5f);
             juce::String song ("SONG ");
             song << juce::String (bar).paddedLeft ('0', 3) << ":";
             if (sp >= 0)
@@ -813,8 +1744,17 @@ void TransportBar::paint (juce::Graphics& g)
                 "CUT DOES NOT WIPE THE LOOP",                     // SURVIVOR
                 "",
                 "NOTES TRIGGER THE FOCUSED VOICE \xc2\xb7 TRANSPOSE BY NOTE", // HW/SYNC
+                "SPECIMENS ARE ACQUIRED UNVERIFIED \xc2\xb7 CLEAR BEFORE RELEASE", // EXHUME
+                "EVERY PASS IS SEEDED \xc2\xb7 THE LADDER IS REPRODUCIBLE",   // PLATE
                 ""                                                // EXPORT (sheet covers)
             };
+            /* This array is sized [numTabs] and indexed by the selected tab, so
+             * it MUST have exactly numTabs initialisers. A short list leaves the
+             * tail null and the note[0] test below dereferences it -- selecting
+             * the new tab would crash rather than draw nothing. */
+            static_assert (sizeof contextNote / sizeof contextNote[0]
+                               == (size_t) StageTabs::numTabs,
+                           "contextNote must have one entry per tab");
             const char* note = (contextTab >= 0 && contextTab < StageTabs::numTabs)
                                  ? contextNote[contextTab] : "";
             if (note[0] != 0)

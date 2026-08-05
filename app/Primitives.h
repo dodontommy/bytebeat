@@ -337,4 +337,22 @@ void paintHeaderBand (juce::Graphics&, juce::Rectangle<int> band,
 void paintLabelRow (juce::Graphics&, juce::Rectangle<int> row,
                     const juce::String& left, const juce::String& right = {});
 
+/* ---- transport position, read without tearing ---------------------------
+ *
+ * bb.bar and bb.seq_pos are two separate relaxed atomics, stored back to back
+ * at the end of every render period (engine.c). Reading them as two
+ * independent loads is a torn read: the audio thread can have published the
+ * new bar but not yet the new step, so a caller sees bar N+1 combined with
+ * step 15 of bar N and computes a position nearly a whole bar ahead -- which
+ * on screen looks like the playhead lurching forward and then snapping back
+ * every time a bar turns over. It is most obvious when you are watching one
+ * bar boundary repeatedly, which is exactly what overdubbing a loop is.
+ *
+ * Until the engine publishes the two as one packed value, close the window
+ * here: read the bar, read the step, read the bar again, and if it moved
+ * underneath us take the step again -- the two stores are adjacent, so one
+ * retry catches it. Returns the position in bars as a float, or -1 when the
+ * step clock is idle and there is nothing to show. */
+float transportPositionBars();
+
 } // namespace morgue

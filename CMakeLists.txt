@@ -309,6 +309,7 @@ target_sources(MORGUE PRIVATE
     app/AudioEngine.cpp
     app/Theme.cpp
     app/Primitives.cpp
+    app/Ledger.cpp
     app/panels/Chrome.cpp
     app/panels/RackPanel.cpp
     app/panels/ArrangePanel.cpp
@@ -319,6 +320,8 @@ target_sources(MORGUE PRIVATE
     app/panels/HwSyncPanel.cpp
     app/panels/ExportSheet.cpp
     app/panels/FieldManual.cpp
+    app/panels/ExhumePanel.cpp
+    app/panels/PlatePanel.cpp
 )
 
 target_compile_definitions(MORGUE PRIVATE
@@ -354,6 +357,11 @@ target_link_libraries(MORGUE
         juce::juce_audio_basics
         juce::juce_events
         juce::juce_core
+        # SHA-256 for the accession register's content hashes, and MD5 to check
+        # a download against the per-file checksum archive.org publishes in its
+        # /metadata response. Implemented in-module, so this pulls in no
+        # external dependency on any platform.
+        juce::juce_cryptography
     PUBLIC
         juce::juce_recommended_config_flags
         # LTO is scoped to $<CONFIG:Release> inside JUCE, so it does nothing in
