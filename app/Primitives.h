@@ -78,12 +78,26 @@ public:
 /*  MIDI-bound), a 1px INK cut 15 long starting at top+4 rotating           */
 /*  -135..+135 about the centre, inner 1px KNOB_INNER ring inset 9.         */
 /*  76px SURVIVOR variant: 2px cut 26 long, inner ring inset 16.            */
-/*  Below the face: role label (8px), 000-padded value (10px; 12px on 76),  */
-/*  optional 7px INK_GHOST sub-label ("pN" / sub-note).                     */
+/*                                                                          */
+/*  LEGIBILITY PASS -- the text stack under the face. The value is the      */
+/*  number the player reads more often than anything else in this           */
+/*  application, and it was set at 10px, one step above the old floor, in   */
+/*  a 13px box. It is now 12px medium in a 15px box (15px on the 76px       */
+/*  variant, in 17px). The sub-label -- "p3", "STUTTER", the string that    */
+/*  says WHICH parameter you are holding -- was 7px in INK_GHOST, i.e.      */
+/*  parameter identity rendered in the palette's disabled ink at the        */
+/*  smallest size available. It is 8px INK_FAINT now: subordinate to the    */
+/*  role label, still readable.                                             */
+/*                                                                          */
+/*  UNUSED is not DISABLED. A p-knob whose parameter the compiled           */
+/*  expression does not reference still writes to the engine; it was        */
+/*  drawn in lamp and ghost inks and read as broken. It now keeps INK_FAINT */
+/*  text -- clearly subordinate, never mistakable for a fault.              */
 /*                                                                          */
 /*  Interaction (spec section 15): horizontal drag 1 unit / 2px; cmd-drag   */
-/*  fine 1 unit / 8px; double-click = default; right-click = MIDI learn     */
-/*  hook; scroll = +-1.                                                     */
+/*  fine 1 unit / 8px; double-click = default; scroll = +-1. Right-click    */
+/*  does nothing: there is no MIDI learn in this engine, and a gesture      */
+/*  that is silently swallowed is worse than one that was never offered.    */
 /* ======================================================================== */
 class EngravedKnob : public juce::Slider
 {
@@ -97,15 +111,14 @@ public:
     int  value() const noexcept;                // current int value
     bool isUserDragging() const noexcept { return dragging; }
     std::function<void (int)> onChange;         // UI -> engine
-    std::function<void()> onLearnRequest;       // right-click (R8 MIDI learn)
 
     // ---- presentation ----
     void setLabelText (const juce::String&);    // role label (8px under face)
-    void setRole (const juce::String& r);       // alias; "UNUSED" => dead state
-    void setSubLabel (const juce::String&);     // 7px INK_GHOST line ("p3", "STUTTER")
+    void setRole (const juce::String& r);       // alias; "UNUSED" => not referenced
+    void setSubLabel (const juce::String&);     // 8px INK_FAINT line ("p3", "STUTTER")
     void setValueText (const juce::String&);    // text readout override (NORM / OFF / 1/8);
                                                 //   empty => zero-padded number
-    void setUnused (bool);                      // frame 10 UNUSED state colours
+    void setUnused (bool);                      // "this expression does not read pN"
     void setMidiBound (bool);                   // blood ring while bound
     void setDefaultValue (int);                 // double-click target
     void setDiameter (int px);
@@ -181,9 +194,16 @@ private:
 /* ======================================================================== */
 /*  TroughFader : Slider  (frame 10 FADER; spec section 10.5)                */
 /*                                                                          */
-/*  16px trough TROUGH #080807 with HAIRLINE border, BLOOD fill from the    */
-/*  bottom (LAMP_DEAD #2a2927 when muted), 3px INK cap overhanging 3px      */
-/*  each side. Range 0..256. Vertical drag; wheel +-8.                      */
+/*  16px TROUGH well with a HAIRLINE border, BLOOD fill from the bottom     */
+/*  (LAMP_DEAD when muted), 3px INK cap overhanging 3px each side.          */
+/*  Range 0..256. Vertical drag; wheel +-8.                                 */
+/*                                                                          */
+/*  Scale marks: a fader with no reference at all is a stripe you cannot    */
+/*  read a level off, which is what this one was. Four 3px HAIRLINE_DIM     */
+/*  ticks at the quarters and a full-width HAIRLINE rule at the half give   */
+/*  the cap something to be measured against. They are drawn UNDER the      */
+/*  fill, so the travelled part of the trough stays a clean block and the   */
+/*  remaining part carries the scale. 1px, flat, inside the well.           */
 /* ======================================================================== */
 class TroughFader : public juce::Slider
 {
@@ -218,6 +238,13 @@ private:
 /*  BLOOD body, AMBER above -6 dB, BLOOD_HOT segment at the rails. 30 Hz.   */
 /*  `source` returns a linear peak 0..1; with no source the trough stays    */
 /*  empty -- never fake live data.                                          */
+/*                                                                          */
+/*  The -6 dB landmark is drawn as a 1px HAIRLINE tick whether or not the   */
+/*  meter is lit. It used to exist only as a change of hue in the fill, so  */
+/*  an idle meter had no scale and a lit one asked you to tell BLOOD from   */
+/*  AMBER -- two colours that converge under the commonest colour blindness */
+/*  (Theme.h, colour-blind rule). The tick is the reference; the hue is     */
+/*  the confirmation.                                                       */
 /* ======================================================================== */
 class MeterComponent : public juce::Component, private juce::Timer
 {
@@ -239,7 +266,9 @@ private:
 
 /* ======================================================================== */
 /*  StatusBadge  (spec section 1 badge rules)                                */
-/*  Bordered 8px caps tag: LIVE blood, PARTIAL/CANVAS oxide, PLANNED dead.  */
+/*  Bordered caps tag at Type::micro(): LIVE blood, PARTIAL/CANVAS oxide,   */
+/*  PLANNED hairline. This is how the console says whether a thing is real, */
+/*  so it is the one label that must not be the hardest to read on screen.  */
 /* ======================================================================== */
 class StatusBadge : public juce::Component
 {
@@ -259,7 +288,7 @@ private:
 };
 
 /* ======================================================================== */
-/*  SerialTag  -- evidence-tag accession string, 8px INK_FAINT.              */
+/*  SerialTag  -- evidence-tag accession string, Type::micro() INK_FAINT.    */
 /* ======================================================================== */
 class SerialTag : public juce::Component
 {
@@ -277,7 +306,9 @@ private:
 /*                                                                          */
 /*  OFF PANEL/HAIRLINE · HIT HIT_BG/HIT_BD + 6px INK dot · ACCENT           */
 /*  BLOOD/BLOOD_HOT + INK_BRIGHT dot · playhead tint PLATE_HOVER/OXIDE_DIM  */
-/*  with OXIDE_INK dot. 6px index bottom-right.                             */
+/*  with OXIDE_INK dot. Step index bottom-right at Type::nano() -- it was   */
+/*  6px in CELL_NUM_OFF at 1.45:1, so the steps of the one sequencer in     */
+/*  the app could not be counted.                                           */
 /*  Click cycles OFF->HIT->ACCENT->OFF; right-click clears; click-drag      */
 /*  paints the starting state across sibling cells.                         */
 /* ======================================================================== */
@@ -332,8 +363,14 @@ void paintHeaderBand (juce::Graphics&, juce::Rectangle<int> band,
                       const juce::String& subtitle,
                       const juce::String& rightText);
 
-/* 20px label row used inside panels: 9px .16em INK_DIM caps left,
- * 8px INK_FAINT right hint. Transparent background. */
+/* 20px label row used inside panels: Type::label() INK_DIM caps left,
+ * Type::micro() INK_FAINT right hint. Transparent background.
+ *
+ * The right hint used to be drawn right-aligned across the SAME rectangle as
+ * the left label, so a long hint ran underneath the label it was meant to
+ * qualify and both became unreadable -- and this row is on nearly every panel
+ * head in the app. The hint's width is now taken out of the row first, capped
+ * at 60% of it and ellipsised, and the label gets what remains. */
 void paintLabelRow (juce::Graphics&, juce::Rectangle<int> row,
                     const juce::String& left, const juce::String& right = {});
 

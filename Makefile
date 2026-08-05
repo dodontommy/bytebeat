@@ -24,7 +24,7 @@ CFLAGS  += -fwrapv -D_GNU_SOURCE
 
 LDLIBS   = -lasound -lncurses -lpthread -lm
 
-OBJS = main.o expr.o engine.o audio.o dsp.o ui.o sink.o gen.o knob.o rack.o
+OBJS = main.o expr.o engine.o audio.o dsp.o ret.o ui.o sink.o gen.o knob.o rack.o
 BIN  = bytebeat
 
 all: $(BIN)
@@ -34,9 +34,10 @@ $(BIN): $(OBJS)
 
 main.o:  main.c  bytebeat.h expr.h audio.h engine.h sink.h ui.h examples.h rack.h gen.h
 expr.o:  expr.c  expr.h
-engine.o: engine.c bytebeat.h expr.h engine.h dsp.h rack.h gen.h
+engine.o: engine.c bytebeat.h expr.h engine.h dsp.h ret.h rack.h gen.h
 audio.o: audio.c bytebeat.h expr.h audio.h dsp.h engine.h
 dsp.o:   dsp.c   dsp.h
+ret.o:   ret.c   ret.h dsp.h
 ui.o:    ui.c    bytebeat.h expr.h ui.h audio.h sink.h examples.h knob.h rack.h gen.h
 sink.o:  sink.c  bytebeat.h expr.h sink.h
 gen.o:   gen.c   gen.h rack.h knob.h bytebeat.h expr.h dsp.h

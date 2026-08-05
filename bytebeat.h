@@ -45,6 +45,13 @@
 #include <signal.h>
 #include "bb_atomic.h"
 #include "expr.h"
+/* The return bus's DSP core owns BB_NRET, BB_RET_NPARAM, BB_RET_NAME and the
+ * RET_* effect ids, because it is the half that cannot be compiled without
+ * them (it sizes its pools from BB_NRET and switches on the ids). This header
+ * takes them from there rather than the reverse; do NOT paste a second copy.
+ * ret.h also carries DcState/dsp_dc and ret_limit, which the bus's safety
+ * stage in engine.c uses. */
+#include "ret.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -174,6 +181,86 @@ typedef struct {
      * with atomic_exchange(&peak, 0) and applies its own display decay. */
     BB_ATOMIC(int)  peak;
 } SamplerSlot;
+
+/* ---- THE RETURN BUS -------------------------------------------------------
+ * Eight pre-allocated return slots. bb_engine_render() never allocates, so
+ * "create" and "destroy" are a TYPE CHANGE over a fixed array, executed by a
+ * UI-thread quiesce handshake that reuses the same two-render-epoch proof as
+ * bb_reclaim().
+ *
+ * Every return->return edge is delayed by exactly one sample, unconditionally,
+ * including the diagonal. Three things fall out of that and all three are
+ * load-bearing:
+ *
+ *   - slot index is acoustically invisible; renumbering returns is not an
+ *     audio edit;
+ *   - the order in which slots are processed cannot affect one output sample,
+ *     so there is no evaluation-order question to get wrong;
+ *   - the stability argument is one line: x[n+1] = f(A*x[n] + B*u[n]) where f
+ *     ends in a hard-ceilinged limiter, therefore |x[n]| <= CEIL for every n,
+ *     every matrix A, every patch, with no eigenvalue analysis.
+ *
+ * The cost of the uniform rule is 23us per hop at 44.1kHz.
+ *
+ * BB_NRET, BB_RET_NPARAM, BB_RET_NAME and the RET_* effect ids come from
+ * ret.h, included at the top of this file. What lives HERE is everything the
+ * two threads share about the ROUTING: the sources, the per-slot control
+ * block, the send and link matrices, and the slot-0 alias. */
+
+/* Send sources. 0..7 mirror the voices (post-fader `con`, exactly where the
+ * CHAMBER send taps today). 8 is the LICKS sampler bus (mix - premix). 9 is
+ * the DRY master tap: `mix` after voices and sampler, BEFORE any return output
+ * and before the arrangement. 10 is the previous frame's summed return output
+ * -- one knob for global master feedback, the no-input-mixer row, well defined
+ * because it is a frame old.
+ *
+ * The arrangement is NOT a source and must never become one. Clips are summed
+ * AFTER the return bus; that ordering is what makes BB_REC_LIVE exact and it
+ * is written down at the BB_REC_* enum above. The phrase looper is not a
+ * source either -- it lives after dsp_clip16, and a hard clipper inside a
+ * feedback loop is the full-scale-square-into-headphones failure the limiter
+ * exists to prevent. BB_RET_SRC_LOOP = 11 is reserved, unimplemented. */
+enum {
+    BB_RET_SRC_V0    = 0,
+    BB_RET_SRC_LICKS = BB_NLAYER,      /* 8  */
+    BB_RET_SRC_DRY,                    /* 9  */
+    BB_RET_SRC_WET,                    /* 10 */
+    BB_RET_NSRC                        /* 11 */
+};
+
+typedef struct {
+    /* SLOT 0 IS THE CHAMBER, AND ITS STORAGE IS THE LEGACY ATOMICS.
+     * bb.ret[0].level     is UNUSED -- slot 0's level IS bb.verb_level.
+     * bb.ret[0].param[0]  is UNUSED -- slot 0's P0    IS bb.verb_size.
+     * bb.ret[0].param[1]  is UNUSED -- slot 0's P1    IS bb.verb_tone.
+     * bb.ret_send[s][0] for s < 9 is UNUSED -- those cells ARE
+     *   bb.layer[s].send and bb.smp_send.
+     * The alias is UNCONDITIONAL ON TYPE: bb.verb_size is simply where slot 0's
+     * P0 lives whatever effect slot 0 holds. Always go through the
+     * ret_*_load/ret_*_store accessors below (or the bb_engine_ret_* API),
+     * which redirect. DO NOT add a shadow copy that is "kept in sync" -- the
+     * two will drift, the session round-trip will pick the wrong one, and the
+     * chamber's golden hash will fail for a reason that looks like DSP. This
+     * alias is why the mixer's RETURN A strip, the `verb` session key and the
+     * chamber round-trip checks in the suite need zero edits. */
+    BB_ATOMIC(int) type;                 /* raw; may exceed RET_NTYPE          */
+    BB_ATOMIC(int) level;                /* 0..256 into the master             */
+    BB_ATOMIC(int) param[BB_RET_NPARAM]; /* 0..255                             */
+    BB_ATOMIC(int) sync;                 /* 0 = free, 1..10 = step division,
+                                          * same table as space_samples()      */
+    BB_ATOMIC(int) mute;                 /* mixer mute; freezes the slot       */
+    BB_ATOMIC(int) arm;                  /* ENGINE-INTERNAL handshake, 1 = run.
+                                          * NOT persisted, NOT user visible.
+                                          * The UI clears it to quiesce a slot
+                                          * before a type change.              */
+    BB_ATOMIC(int) quiet;                /* audio -> UI: fade reached 0 and the
+                                          * effect was not run for a whole
+                                          * period. Read only by the handshake */
+    BB_ATOMIC(int) peak;                 /* max-hold, clamped 32767; UI clears
+                                          * with atomic_exchange               */
+    BB_ATOMIC(int) gr;                   /* limiter gain reduction, Q8:
+                                          * 256 = none, 0 = fully closed       */
+} Return;
 
 /* Largest period we will ever ask ALSA for. The audio thread's scratch
  * buffer is this big and lives on its stack -- no malloc. */
@@ -312,6 +399,21 @@ struct bb_state {
     BB_ATOMIC(int)   smp_send;      /* LICKS sampler-bus send, 0..255        */
     BB_ATOMIC(int)   verb_peak;     /* return abs peak for the RETURN A meter */
 
+    /* --- the return bus (slot 0 IS the CHAMBER above; see `Return`) ----- */
+    Return ret[BB_NRET];
+
+    /* 0..255. [s][0] for s < BB_RET_SRC_DRY is UNUSED -- those cells ARE
+     * bb.layer[s].send and bb.smp_send. Go through ret_send_load/store. */
+    BB_ATOMIC(int) ret_send[BB_RET_NSRC][BB_NRET];
+
+    /* return -> return, 0..256 (256 = unity). EVERY entry is one frame
+     * delayed, including ret_link[r][r], which is legal and is the
+     * freeze / regeneration cell. No over-unity: it would only make the
+     * runaway arrive faster at the same ceiling. */
+    BB_ATOMIC(int) ret_link[BB_NRET][BB_NRET];
+
+    BB_ATOMIC(int) ret_active;           /* live slot count, published/period  */
+
     /* --- master phrase looper ----------------------------------------- */
     BB_ATOMIC(int)   loop_cmd;       /* UI writes, audio thread consumes     */
     BB_ATOMIC(int)   loop_status;    /* LOOP_* published by audio thread     */
@@ -396,6 +498,78 @@ static inline int bb_clampi(int v, int lo, int hi)
 extern char bb_expr[BB_NLAYER][BB_EXPR_MAX];
 extern Rack bb_rack[BB_NLAYER];
 extern int  bb_custom[BB_NLAYER];
+
+/* Return names: UI-owned, engine-persisted, exactly like bb_expr[]. */
+extern char bb_ret_name[BB_NRET][BB_RET_NAME];
+
+#if !defined(__cplusplus)
+/* ---- the slot-0 alias, in ONE place ------------------------------------
+ * Slot 0's LEVEL / P0 / P1 and its send column have NO storage in bb.ret[0]
+ * or bb.ret_send[][0]: they ARE bb.verb_level / verb_size / verb_tone and
+ * bb.layer[s].send / bb.smp_send. Every read and write of a return knob --
+ * the render snapshot, the session writer, the session loader, the public
+ * API -- goes through these four pairs, and nothing else may touch the
+ * aliased cells. There are NO shadow copies; see the comment on `Return`.
+ *
+ * C only. C++ callers (the GUI) use the bb_engine_ret_* functions in
+ * engine.h, which are these bodies with range clamping in front. */
+static inline int ret_send_load(int s, int r)
+{
+    if (r == 0) {
+        if (s >= 0 && s < BB_NLAYER)
+            return atomic_load_explicit(&bb.layer[s].send, memory_order_relaxed);
+        if (s == BB_RET_SRC_LICKS)
+            return atomic_load_explicit(&bb.smp_send, memory_order_relaxed);
+    }
+    return atomic_load_explicit(&bb.ret_send[s][r], memory_order_relaxed);
+}
+
+static inline void ret_send_store(int s, int r, int v)
+{
+    if (r == 0) {
+        if (s >= 0 && s < BB_NLAYER) {
+            atomic_store_explicit(&bb.layer[s].send, v, memory_order_relaxed);
+            return;
+        }
+        if (s == BB_RET_SRC_LICKS) {
+            atomic_store_explicit(&bb.smp_send, v, memory_order_relaxed);
+            return;
+        }
+    }
+    atomic_store_explicit(&bb.ret_send[s][r], v, memory_order_relaxed);
+}
+
+static inline int ret_level_load(int r)
+{
+    return r == 0 ? atomic_load_explicit(&bb.verb_level, memory_order_relaxed)
+                  : atomic_load_explicit(&bb.ret[r].level, memory_order_relaxed);
+}
+
+static inline void ret_level_store(int r, int v)
+{
+    if (r == 0) atomic_store_explicit(&bb.verb_level, v, memory_order_relaxed);
+    else        atomic_store_explicit(&bb.ret[r].level, v, memory_order_relaxed);
+}
+
+static inline int ret_param_load(int r, int p)
+{
+    if (r == 0 && p == 0)
+        return atomic_load_explicit(&bb.verb_size, memory_order_relaxed);
+    if (r == 0 && p == 1)
+        return atomic_load_explicit(&bb.verb_tone, memory_order_relaxed);
+    return atomic_load_explicit(&bb.ret[r].param[p], memory_order_relaxed);
+}
+
+static inline void ret_param_store(int r, int p, int v)
+{
+    if (r == 0 && p == 0)
+        atomic_store_explicit(&bb.verb_size, v, memory_order_relaxed);
+    else if (r == 0 && p == 1)
+        atomic_store_explicit(&bb.verb_tone, v, memory_order_relaxed);
+    else
+        atomic_store_explicit(&bb.ret[r].param[p], v, memory_order_relaxed);
+}
+#endif /* !__cplusplus */
 
 /* Set by the SIGINT/SIGTERM handler so a kill still reaches the .wav
  * header patch-up on the way out. */

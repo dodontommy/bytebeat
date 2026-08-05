@@ -27,10 +27,13 @@ namespace morgue
 using juce::Rectangle;
 using juce::Justification;
 
-/* HTML literals with no spec token (values verbatim from the mockup). */
-static const juce::Colour TRANSPORT_EDGE { 0xff2a2927 };  // transport border-top / divider
-static const juce::Colour INK_MID        { 0xffc9c4b8 };  // locker row name (idle)
-static const juce::Colour EXPORT_BG      { 0xff161513 };  // EXPORT... plate bg
+/* This file used to carry three colour literals lifted straight out of the
+ * HTML mockup -- a transport border, a locker row ink and an EXPORT plate fill
+ * -- none of which moved when the palette was re-measured, so all three ended
+ * up sitting between two tokens and answering to neither. They are gone: the
+ * transport border and divider are HAIRLINE / HAIRLINE_DIM, the locker row
+ * name is INK, and the plate they belonged to was removed. Nothing in the
+ * window furniture names a colour that Theme.h does not define. */
 
 static int textW (const juce::Font& f, const juce::String& s)
 {
@@ -130,7 +133,7 @@ void TitleBar::paint (juce::Graphics& g)
     // out of the run first so the path below can have the rest and be
     // ellipsised into it rather than drawn straight through the serial.
     g.setColour (C::INK_FAINT);
-    const juce::Font serialF = Type::mono (9.0f, 0.14f);
+    const juce::Font serialF = Type::micro();
     g.setFont (serialF);
     g.drawText (serial, r.removeFromRight (textW (serialF, serial) + 2),
                 Justification::centredRight);
@@ -139,9 +142,12 @@ void TitleBar::paint (juce::Graphics& g)
     /* Session path: the REAL one, from the engine. This used to be the
      * hardcoded string "~/MORGUE/session.conf", which on Windows named a
      * directory that does not exist. Windows paths are also long, so the
-     * middle is ellipsised rather than silently painted over the serial. */
+     * middle is ellipsised rather than silently painted over the serial.
+     * INK_DIM, one rung above the serial beside it: which session is open is
+     * something the player acts on, an accession number is not. */
     r.removeFromLeft (12);
-    g.setFont (Type::mono (9.0f, 0.06f));
+    g.setColour (C::INK_DIM);
+    g.setFont (Type::micro());
     g.drawText (morgue::sessionFileDisplay(), r, Justification::centredLeft, true);
 }
 
@@ -214,14 +220,14 @@ static const char* const stageTabNames[StageTabs::numTabs] =
 
 static int infoCellWidth()
 {
-    // "INFO / ?", 9px .14em, padding 0 12
-    return textW (Type::mono (9.0f, 0.14f), "INFO / ?") + 24;
+    // "INFO / ?", padding 0 12 -- must stay in step with the face paint() uses
+    return textW (Type::micro(), "INFO / ?") + 24;
 }
 
 StageTabs::StageTabs()
 {
     setRepaintsOnMouseActivity (true);
-    setTooltip (U8 ("STAGES \xe2\x80\x94 the eight workspaces of this console. Click to switch."));
+    setTooltip (U8 ("STAGES \xe2\x80\x94 the workspaces of this console. Click to switch."));
 }
 
 const char* StageTabs::tabName (int i)
@@ -298,7 +304,7 @@ void StageTabs::paint (juce::Graphics& g)
     g.setColour (C::HAIRLINE);
     g.fillRect (ic.getX(), ic.getY(), 1, th);
     g.setColour (hover == numTabs ? C::INK : C::TAB_INACTIVE_FG);
-    g.setFont (Type::mono (9.0f, 0.14f));
+    g.setFont (Type::micro());
     g.drawText ("INFO / ?", ic, Justification::centred);
 }
 
@@ -469,8 +475,18 @@ namespace
     constexpr int kScanMaxFiles = 20000;
     constexpr int kScanIdleMs   = 2000;
 
-    constexpr int kLockerRowH   = 28;
+    /* Row geometry. The LOCKER is the densest table in the application and it
+     * was set as two lines of 15 and 12 inside 28px with no rule between rows,
+     * so a hundred specimens read as one block of text. The two lines are now
+     * Type::rowH(10) and Type::rowH(8) -- the minimum glyph box for the faces
+     * they actually carry -- and the last pixel of the row is a
+     * HAIRLINE_FAINT separator, which is what that token is for and which was
+     * invisible before the palette pass (it was byte-identical to PLATE). */
+    constexpr int kLockerLine1H = 16;                       // Type::rowH(10)
+    constexpr int kLockerLine2H = 13;                       // Type::rowH(8)
+    constexpr int kLockerRowH   = kLockerLine1H + kLockerLine2H + 1;
     constexpr int kLockerFilterH = 26;
+    constexpr int kLockerDetailRowH = 13;                   // Type::rowH(8)
 }
 
 /* ======================================================================== */
@@ -733,7 +749,7 @@ Locker::Locker()
      * a specimen must not silence the instrument. */
     filterBox.setMultiLine (false);
     filterBox.setReturnKeyStartsNewLine (false);
-    filterBox.setFont (Type::mono (9.0f, 0.06f));
+    filterBox.setFont (Type::mono (10.0f, 0.02f));
     filterBox.setJustification (Justification::centredLeft);
     filterBox.setColour (juce::TextEditor::textColourId, C::INK);
     filterBox.setColour (juce::TextEditor::backgroundColourId, C::SOCKET);
@@ -1137,7 +1153,8 @@ int Locker::detailHeight() const
     const int room   = getHeight() - chrome - 90;     // the list keeps 90px
     if (room < 60) return 0;
 
-    const int want = 1 + 20 + 15 + (int) detailLines.size() * 12 + 6;
+    const int want = 1 + 20 + 16                      // rule + label row + title
+                   + (int) detailLines.size() * kLockerDetailRowH + 6;
     return juce::jmin (want, room);
 }
 
@@ -1160,18 +1177,22 @@ void Locker::paintDetail (juce::Graphics& g, Rectangle<int> b)
 
     Rectangle<int> body = b.reduced (10, 0);
 
-    // the human name, 10px, ellipsised
+    // the human name, ellipsised
     g.setColour (C::INK);
-    g.setFont (Type::mono (10.0f));
-    g.drawText (detailTitle, body.removeFromTop (15), Justification::centredLeft, true);
+    g.setFont (Type::monoMedium (11.0f));
+    g.drawText (detailTitle, body.removeFromTop (16), Justification::centredLeft, true);
 
-    const juce::Font kf = Type::mono (7.0f, 0.12f);
-    const juce::Font vf = Type::mono (8.0f, 0.02f);
+    /* Key column at Type::nano() (was 7px .12em, i.e. letterspaced caps below
+     * the readable floor), value one rung up at Type::micro(). The keys are a
+     * closed set of eleven words and the longest, ACCESSIONED, measures 58px
+     * at this face, so the 62px column still holds them all. */
+    const juce::Font kf = Type::nano();
+    const juce::Font vf = Type::micro();
 
     for (const auto& line : detailLines)
     {
-        if (body.getHeight() < 12) break;           // draw only what fits
-        Rectangle<int> lr = body.removeFromTop (12);
+        if (body.getHeight() < kLockerDetailRowH) break;    // draw only what fits
+        Rectangle<int> lr = body.removeFromTop (kLockerDetailRowH);
 
         Rectangle<int> kr = lr.removeFromLeft (62);
         if (line.key.isNotEmpty())
@@ -1246,7 +1267,7 @@ void Locker::paint (juce::Graphics& g)
                                    + juce::String ((int) entries.size()) + " SPECIMENS";
     else                     count = juce::String ((int) entries.size()) + " SPECIMENS";
 
-    const juce::Font ff = Type::mono (8.0f, 0.12f);
+    const juce::Font ff = Type::micro();
     g.setColour (C::INK_FAINT);
     g.setFont (ff);
     Rectangle<int> fbar = foot.reduced (8, 0);
@@ -1274,8 +1295,9 @@ void Locker::paint (juce::Graphics& g)
 
     if (rows.empty())
     {
-        g.setColour (C::INK_FAINT);
-        g.setFont (Type::mono (9.0f, 0.10f));
+        // the only thing on screen when it shows, so it gets label ink
+        g.setColour (C::INK_DIM);
+        g.setFont (Type::micro());
         juce::String msg;
         if (! scanned)             msg = "READING " + morgue::morgueDirDisplay();
         else if (filterActive())   msg = "NOTHING MATCHES THAT";
@@ -1319,24 +1341,26 @@ void Locker::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool se
         }
         band.removeFromLeft (13);
 
-        const juce::Font cf = Type::mono (8.0f, 0.10f);
+        const juce::Font cf = Type::micro();
         const juce::String cnt (r.count);
-        g.setColour (C::INK_FAINT);
+        g.setColour (C::INK_DIM);
         g.setFont (cf);
         g.drawText (cnt, band.removeFromRight (textW (cf, cnt) + 2),
                     Justification::centredRight);
         band.removeFromRight (8);
 
-        const juce::Font tf = Type::label();          // 9px .16em, caps
+        const juce::Font tf = Type::label();
         const juce::String tag (lockerGroups[r.group].tag);
-        g.setColour (C::INK_DIM);
+        g.setColour (C::INK);
         g.setFont (tf);
         g.drawText (tag, band.removeFromLeft (textW (tf, tag) + 2),
                     Justification::centredLeft);
         band.removeFromLeft (8);
 
-        g.setColour (C::INK_GHOST);
-        g.setFont (Type::mono (8.0f, 0.10f));
+        /* The description was INK_GHOST -- the disabled ink -- on a header
+         * that is a live fold control. It is metadata, so it is INK_FAINT. */
+        g.setColour (C::INK_FAINT);
+        g.setFont (Type::micro());
         g.drawText (lockerGroups[r.group].desc, band, Justification::centredLeft, true);
         return;
     }
@@ -1344,11 +1368,17 @@ void Locker::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool se
     /* ---- a file: two lines, name over serial ---- */
     const Entry& e = entries[(size_t) r.entry];
 
-    if (selected)                                // bg #191816; no row separators
+    if (selected)
     {
         g.setColour (C::TAB_ACTIVE_BG);
         g.fillRect (0, 0, w, h);
     }
+
+    /* One separator per row. Without it this list is an unruled block: two
+     * lines of text per entry, thirty entries on screen, and nothing telling
+     * the eye where one specimen stops and the next begins. */
+    g.setColour (C::HAIRLINE_FAINT);
+    g.fillRect (0, h - 1, w, 1);
 
     /* A 1px rule at the left edge for material that cannot ship. This is the
      * only place BLOOD appears in the list, and it means exactly one thing:
@@ -1369,15 +1399,17 @@ void Locker::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool se
     body.removeFromLeft (8);
     body.removeFromRight (8);
 
-    Rectangle<int> l1 = body.removeFromTop (15);
-    Rectangle<int> l2 = body.removeFromTop (12);
+    Rectangle<int> l1 = body.removeFromTop (kLockerLine1H);
+    Rectangle<int> l2 = body.removeFromTop (kLockerLine2H);
 
-    // line 1 right: PATCH for project files, else the size
+    /* line 1 right: PATCH for project files, else the size. A selected row's
+     * ground is TAB_ACTIVE_BG, where INK_FAINT falls to 3.8:1 -- so the size
+     * column steps up a rung exactly when its ground does. */
     const juce::String meta = e.patch
         ? juce::String ("PATCH")
         : juce::File::descriptionOfSizeInBytes (e.size).replace (" ", "").toUpperCase();
-    const juce::Font metaFont = Type::mono (8.0f);
-    g.setColour (C::INK_FAINT);
+    const juce::Font metaFont = Type::micro();
+    g.setColour (selected ? C::INK_DIM : C::INK_FAINT);
     g.setFont (metaFont);
     g.drawText (meta, l1.removeFromRight (textW (metaFont, meta) + 2),
                 Justification::centredRight);
@@ -1387,8 +1419,8 @@ void Locker::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool se
      * one -- an acquisition's real title beats "ACQ-260805-K7J4QWMR.wav" and
      * beats the archive.org filename it arrived under. */
     const juce::String title = e.origin.isNotEmpty() ? e.origin : e.name;
-    g.setColour (selected ? C::INK_BRIGHT : (e.patch ? C::OXIDE : INK_MID));
-    g.setFont (Type::mono (10.0f));
+    g.setColour (selected ? C::INK_BRIGHT : (e.patch ? C::OXIDE_INK : C::INK));
+    g.setFont (Type::monoMedium (11.0f));
     g.drawText (title, l1, Justification::centredLeft, true);
 
     /* line 2 right: where it actually lives, when that is not the root --
@@ -1398,8 +1430,11 @@ void Locker::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool se
     if (where.isEmpty() && e.origin.isNotEmpty()) where = e.name;
     if (where.isNotEmpty())
     {
-        const juce::Font wf = Type::nano (7.0f);
-        g.setColour (C::INK_GHOST);
+        /* Where the file actually is on disk, which is the one string in this
+         * row a player types into a file manager. It was INK_GHOST at 7px --
+         * the disabled ink, at the old floor -- for real path information. */
+        const juce::Font wf = Type::nano();
+        g.setColour (C::INK_FAINT);
         g.setFont (wf);
         const int ww = juce::jmin (textW (wf, where) + 2,
                                    juce::jmax (0, l2.getWidth() / 2));
@@ -1411,9 +1446,13 @@ void Locker::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool se
      * a list index in a list sorted newest-first, so it renumbered every time
      * a file landed. With no record it is an em dash, never a fabricated
      * number and never a bare hash. */
-    const juce::Font serF = Type::mono (8.0f, 0.06f);
+    /* Selected used to print the serial in BLOOD_HOT. The row already carries
+     * its selection in the fill, and the accent is reserved for armed, live
+     * and dangerous -- a highlighted row is none of the three. The left-edge
+     * clearance rule below is the only accent this list is allowed. */
+    const juce::Font serF = Type::micro();
     g.setColour (e.serial.isEmpty() ? C::INK_GHOST
-                                    : (selected ? C::BLOOD_HOT : C::INK_FAINT));
+                                    : (selected ? C::INK : C::INK_FAINT));
     g.setFont (serF);
     g.drawText (e.serial.isNotEmpty() ? e.serial : U8 ("\xe2\x80\x94"),
                 l2, Justification::centredLeft, true);
@@ -1464,8 +1503,10 @@ void Scope::paint (juce::Graphics& g)
     Rectangle<int> foot = b.removeFromBottom (18);
     Rectangle<int> plot = b.reduced (8);
 
-    // centre-zero hairline
-    g.setColour (C::HAIRLINE);
+    /* centre-zero hairline, one weight down from a structural rule: it is a
+     * reference under the trace, and HAIRLINE against the new SOCKET would
+     * read as loud as the waveform itself on a quiet passage. */
+    g.setColour (C::HAIRLINE_DIM);
     g.fillRect (plot.getX(), plot.getCentreY(), plot.getWidth(), 1);
 
     // waveform: 1px INK polyline from the engine ring (min/max per column)
@@ -1503,27 +1544,32 @@ void Scope::paint (juce::Graphics& g)
         g.strokePath (p, juce::PathStrokeType (1.0f));
     }
 
-    // footer 18: PRE-GAIN  PRE-MUTE ... PK -N.NdB
-    g.setColour (C::INK_FAINT);
-    const juce::Font ff = Type::mono (8.0f, 0.10f);
-    g.setFont (ff);
+    /* footer 18: PRE-GAIN  PRE-MUTE ... PK -N.N dB
+     * These two words are what the whole trace means -- that it is taken
+     * before the master gain and before CUT, so a flat scope with the fader
+     * down is not a fault. They were the faintest thing in the panel and the
+     * number beside them was the brightest; both now read. */
+    const juce::Font ff = Type::micro();
     Rectangle<int> fr = foot.reduced (8, 0);
-    g.drawText ("PRE-GAIN", fr.removeFromLeft (textW (ff, "PRE-GAIN") + 2),
-                Justification::centredLeft);
-    fr.removeFromLeft (10);
-    g.drawText ("PRE-MUTE", fr.removeFromLeft (textW (ff, "PRE-MUTE") + 2),
-                Justification::centredLeft);
 
     juce::String pk ("PK ");
     if (peak > 0)
     {
         const float dB = 20.0f * std::log10 ((float) peak / 32768.0f);
-        pk << juce::String (dB, 1) << "dB";
+        pk << juce::String (dB, 1) << " dB";
     }
     else
-        pk << U8 ("\xe2\x88\x92\xe2\x88\x9e") << "dB";   // −∞
-    g.setColour (C::INK_DIM);
-    g.drawText (pk, fr, Justification::centredRight);
+        pk << U8 ("\xe2\x88\x92\xe2\x88\x9e") << " dB";   // −∞
+
+    const juce::Font pkf = Type::monoMedium (10.0f, 0.02f);
+    g.setColour (C::INK);
+    g.setFont (pkf);
+    g.drawText (pk, fr.removeFromRight (textW (pkf, pk) + 2), Justification::centredRight);
+    fr.removeFromRight (10);
+
+    g.setColour (C::INK_FAINT);
+    g.setFont (ff);
+    g.drawText (U8 ("PRE-GAIN \xc2\xb7 PRE-MUTE"), fr, Justification::centredLeft, true);
 
     // right-edge divider against the main stage (spec section 3)
     g.setColour (C::HAIRLINE);
@@ -1534,27 +1580,12 @@ void Scope::paint (juce::Graphics& g)
 /*  TransportBar                                                             */
 /* ======================================================================== */
 
-namespace
-{
-    /* the MIXER-context EXPORT... action plate (HTML frame 06 transport) */
-    class ExportPlate : public juce::Button
-    {
-    public:
-        ExportPlate() : juce::Button ("EXPORT") {}
-
-        void paintButton (juce::Graphics& g, bool over, bool) override
-        {
-            Rectangle<int> b = getLocalBounds();
-            g.setColour (over ? C::PLATE_HOVER : EXPORT_BG);
-            g.fillRect (b);
-            g.setColour (C::EDGE);
-            g.drawRect (b, 1);
-            g.setColour (C::INK);
-            g.setFont (Type::mono (10.0f, 0.16f));
-            g.drawText (U8 ("EXPORT\xe2\x80\xa6"), b, Justification::centred);
-        }
-    };
-}
+/* The MIXER-context EXPORT... plate used to live here. It was removed, not
+ * disabled: it opened a sheet in which the render button is a documented
+ * no-op, the stem list is twelve hardcoded file sizes and the format picker
+ * is not hit-tested. A plate drawn exactly like RUN that reaches nothing is
+ * the thing this pass exists to delete. The tab remains only because
+ * StageTabs::numTabs is welded into Main.cpp, which this pass does not own. */
 
 static const char* const transportKnobLabels[4] = { "BPM", "BEATS", "BARS", "GAIN" };
 
@@ -1616,12 +1647,6 @@ TransportBar::TransportBar()
     masterMeter.source = [this] { return masterPeak; };
     addAndMakeVisible (masterMeter);
 
-    // MIXER context: EXPORT... plate
-    exportBtn = std::make_unique<ExportPlate>();
-    exportBtn->setTooltip (U8 ("EXPORT \xe2\x80\x94 open the stem render sheet."));
-    exportBtn->onClick = [this] { if (onExport) onExport(); };
-    addAndMakeVisible (*exportBtn);
-
     applyContext();
 }
 
@@ -1641,10 +1666,7 @@ void TransportBar::resized()
         x += 34 + 8 + 52 + 16;
     }
 
-    masterMeter.setBounds (getWidth() - 12 - 120, 33, 120, 7);
-
-    const int ew = textW (Type::mono (10.0f, 0.16f), U8 ("EXPORT\xe2\x80\xa6")) + 24;
-    exportBtn->setBounds (getWidth() - 12 - ew, 17, ew, 26);
+    masterMeter.setBounds (getWidth() - 12 - 120, 32, 120, 8);
 }
 
 void TransportBar::paint (juce::Graphics& g)
@@ -1652,20 +1674,27 @@ void TransportBar::paint (juce::Graphics& g)
     Rectangle<int> b = getLocalBounds();
     g.setColour (C::TRANSPORT);
     g.fillRect (b);
-    g.setColour (TRANSPORT_EDGE);                // HTML: border-top #2a2927
-    g.fillRect (b.getX(), b.getY(), b.getWidth(), 1);
 
-    // divider between plates and knobs: 1px x 38, #2a2927
+    /* border-top and the plates/knobs divider. Both were a #2a2927 literal
+     * carried over from the mockup; they are the structural rule and the
+     * inner sub-rule, which is what HAIRLINE and HAIRLINE_DIM are. */
+    g.setColour (C::HAIRLINE);
+    g.fillRect (b.getX(), b.getY(), b.getWidth(), 1);
+    g.setColour (C::HAIRLINE_DIM);
     g.fillRect (282, 11, 1, 38);
 
-    // knob readouts: 8px .14em label over 15px value, right of each knob
+    /* Knob readouts. These four numbers -- tempo, metre, loop length, master
+     * gain -- are the most-read figures in the console, so the value keeps
+     * Type::data() and the label above it went from 8px .14em to Type::micro()
+     * in a box tall enough to hold it (it was 11px for a face that now floors
+     * at 8, i.e. tight before the type pass and clipping after it). */
     for (int i = 0; i < knobs.size(); ++i)
     {
         auto* k = knobs.getUnchecked (i);
-        Rectangle<int> t (k->getRight() + 8, 14, 52, 31);
+        Rectangle<int> t (k->getRight() + 8, 12, 52, 34);
         g.setColour (C::INK_DIM);
-        g.setFont (Type::mono (8.0f, 0.14f));
-        g.drawText (transportKnobLabels[i], t.removeFromTop (11), Justification::centredLeft);
+        g.setFont (Type::micro());
+        g.drawText (transportKnobLabels[i], t.removeFromTop (13), Justification::centredLeft);
         const int v = k->value();
         juce::String vs = (i == 1 || i == 2) ? juce::String (v).paddedLeft ('0', 2)
                                              : juce::String (v);
@@ -1678,22 +1707,29 @@ void TransportBar::paint (juce::Graphics& g)
     Rectangle<int> ctx = b.reduced (12, 0);
     switch (contextTab)
     {
-        case 0:                                  // RACK: master meter + labels
+        case 0:                                  // RACK: master meter + readout
         {
             g.setColour (C::INK_FAINT);
-            g.setFont (Type::mono (8.0f, 0.12f));
+            g.setFont (Type::micro());
             g.drawText (U8 ("MASTER \xc2\xb7 POST-GAIN"),
-                        Rectangle<int> (ctx.getRight() - 200, 6, 200, 11),
+                        Rectangle<int> (ctx.getRight() - 200, 6, 200, 14),
                         Justification::centredRight);
 
-            juce::String db;
+            /* ONE figure, because there is one. This line used to compute a
+             * single dB value from the mono sink ring and then print it twice,
+             * once labelled L and once labelled R -- a stereo readout in which
+             * the two numbers were identical on every frame by construction.
+             * The engine's master is mono; the readout says so. */
+            juce::String db ("PEAK ");
             if (masterPeak > 0.0001f)
-                db = juce::String (20.0f * std::log10 (masterPeak), 1);
+                db << juce::String (20.0f * std::log10 (masterPeak), 1);
             else
-                db = U8 ("\xe2\x88\x92\xe2\x88\x9e");     // −∞
-            g.setFont (Type::mono (8.0f, 0.10f));
-            g.drawText ("L " + db + " / R " + db + " dBFS",
-                        Rectangle<int> (ctx.getRight() - 200, 43, 200, 11),
+                db << U8 ("\xe2\x88\x92\xe2\x88\x9e");     // -inf
+            db << " dBFS";
+
+            g.setColour (C::INK_DIM);
+            g.setFont (Type::monoMedium (10.0f, 0.02f));
+            g.drawText (db, Rectangle<int> (ctx.getRight() - 200, 42, 200, 14),
                         Justification::centredRight);
             break;
         }
@@ -1707,33 +1743,39 @@ void TransportBar::paint (juce::Graphics& g)
                                              : (unsigned) posF;
             const int sp = posF < 0.0f ? -1
                          : (int) ((posF - (float) bar) * (float) BB_STEPS + 0.5f);
-            juce::String song ("SONG ");
-            song << juce::String (bar).paddedLeft ('0', 3) << ":";
+
+            g.setColour (C::INK_FAINT);
+            g.setFont (Type::micro());
+            g.drawText ("SONG POSITION",
+                        Rectangle<int> (ctx.getRight() - 200, 8, 200, 13),
+                        Justification::centredRight);
+
+            /* BAR:BEAT:SUBDIVISION, at readout size. It was 9px caps sharing
+             * the ink of the hint underneath it. */
+            juce::String song (juce::String (bar).paddedLeft ('0', 3));
+            song << ":";
             if (sp >= 0)
                 song << juce::String (sp / 4 + 1).paddedLeft ('0', 2) << ":"
                      << juce::String (sp % 4 + 1);
             else
                 song << "--:-";
-            g.setColour (C::INK_DIM);
-            g.setFont (Type::mono (9.0f, 0.10f));
-            g.drawText (song, Rectangle<int> (ctx.getRight() - 200, 17, 200, 12),
+            g.setColour (C::INK);
+            g.setFont (Type::data());
+            g.drawText (song, Rectangle<int> (ctx.getRight() - 200, 22, 200, 20),
                         Justification::centredRight);
+
+            /* What the gesture actually is. The old hint read "SCRUB -> bb.k",
+             * which named an engine variable and promised a scrub the panel
+             * does not implement: ARRANGE seeks on a single click in the ruler
+             * and does nothing on a drag there. */
             g.setColour (C::INK_FAINT);
-            g.setFont (Type::mono (8.0f, 0.06f));
-            g.drawText (U8 ("SCRUB \xe2\x86\x92 bb.k"),
-                        Rectangle<int> (ctx.getRight() - 200, 31, 200, 11),
+            g.setFont (Type::micro());
+            g.drawText ("CLICK THE RULER TO SEEK",
+                        Rectangle<int> (ctx.getRight() - 200, 43, 200, 13),
                         Justification::centredRight);
             break;
         }
-        case 5:                                  // MIXER: STEM EXPORT + plate
-        {
-            g.setColour (C::INK_FAINT);
-            g.setFont (Type::mono (8.0f, 0.12f));
-            g.drawText ("STEM EXPORT",
-                        Rectangle<int> (0, 0, exportBtn->getX() - 10, getHeight()),
-                        Justification::centredRight);
-            break;
-        }
+
         default:                                 // deadpan note (per-frame copy)
         {
             static const char* const contextNote[StageTabs::numTabs] =
@@ -1760,8 +1802,9 @@ void TransportBar::paint (juce::Graphics& g)
             if (note[0] != 0)
             {
                 g.setColour (C::INK_FAINT);
-                g.setFont (Type::mono (8.0f, 0.12f));
-                g.drawText (juce::String::fromUTF8 (note), ctx, Justification::centredRight);
+                g.setFont (Type::micro());
+                g.drawText (juce::String::fromUTF8 (note), ctx,
+                            Justification::centredRight, true);
             }
             break;
         }
@@ -1798,7 +1841,6 @@ void TransportBar::sync()
 void TransportBar::applyContext()
 {
     masterMeter.setVisible (contextTab == 0);
-    exportBtn->setVisible (contextTab == 5);
 }
 
 void TransportBar::setContextTab (int t)
@@ -1841,59 +1883,121 @@ void StatusBar::paint (juce::Graphics& g)
     g.setColour (C::HAIRLINE);
     g.fillRect (b.getX(), b.getY(), b.getWidth(), 1);
 
-    // padding 0 10, gap 16, all 9px .12em
+    /* ---- the readouts ----------------------------------------------------
+     * Every segment used to be one string in one colour at one size -- "BAR
+     * 007", "CPU 31%" -- so the words and the numbers had identical weight and
+     * the eye had to read the whole bar to find any of it. Each segment is now
+     * a Type::nano() caption in metadata ink followed by its value at
+     * Type::micro() in label ink or, where the value means something, in the
+     * colour that means it. A HAIRLINE_FAINT rule sits in each gap, which is
+     * the same separator the LOCKER's rows use. */
     Rectangle<int> r = b.reduced (10, 0).withTrimmedTop (1);
-    const juce::Font f = Type::mono (9.0f, 0.12f);
-    g.setFont (f);
+    const juce::Font capF = Type::nano();
+    const juce::Font valF = Type::monoMedium (9.0f, 0.05f);
 
-    auto seg = [&] (const juce::String& text, juce::Colour col)
+    bool first = true;
+    auto seg = [&] (const juce::String& cap, const juce::String& val, juce::Colour col)
     {
-        g.setColour (col);
-        g.drawText (text, r.removeFromLeft (textW (f, text) + 2),
+        if (! first)
+        {
+            g.setColour (C::HAIRLINE_FAINT);
+            g.fillRect (r.getX() + 7, r.getY() + 4, 1, r.getHeight() - 8);
+            r.removeFromLeft (16);
+        }
+        first = false;
+
+        g.setColour (C::INK_FAINT);
+        g.setFont (capF);
+        g.drawText (cap, r.removeFromLeft (textW (capF, cap) + 2),
                     Justification::centredLeft);
-        r.removeFromLeft (14);                   // + the 2px slop = gap 16
+        r.removeFromLeft (4);
+
+        g.setColour (col);
+        g.setFont (valF);
+        g.drawText (val, r.removeFromLeft (textW (valF, val) + 2),
+                    Justification::centredLeft);
     };
 
-    seg ("BAR " + juce::String (atomic_load (&bb.bar)).paddedLeft ('0', 3),
-         C::TAB_INACTIVE_FG);
+    seg ("BAR", juce::String (atomic_load (&bb.bar)).paddedLeft ('0', 3), C::INK);
 
     const int sp = atomic_load (&bb.seq_pos);
-    seg ("STEP " + (sp >= 0 ? juce::String (sp + 1).paddedLeft ('0', 2)
-                            : juce::String ("--")) + "/16",
-         C::TAB_INACTIVE_FG);
+    seg ("STEP", (sp >= 0 ? juce::String (sp + 1).paddedLeft ('0', 2)
+                          : juce::String ("--")) + "/16",
+         sp >= 0 ? C::INK : C::INK_FAINT);
 
     // CPU: INK_DIM < 60%, AMBER 60-85%, BLOOD_HOT above
     const int cpu = atomic_load (&bb.cpu_us);
     const int bud = atomic_load (&bb.budget_us);
     const int pct = bud > 0 ? juce::roundToInt (100.0f * (float) cpu / (float) bud) : 0;
-    seg ("CPU " + juce::String (pct) + "%",
+    seg ("CPU", juce::String (pct) + "%",
          pct < 60 ? C::INK_DIM : pct <= 85 ? C::AMBER : C::BLOOD_HOT);
 
-    // CLIP: INK_GHOST until it fires, then BLOOD_HOT holding 800 ms
+    /* CLIP holds 800 ms. It used to say the same word in every state and
+     * signal purely by going from INK_GHOST to BLOOD_HOT -- which is state
+     * carried by colour alone (Theme.h forbids exactly that), and at 1.66:1
+     * you could not find the indicator before it fired to know where to look.
+     * There is a lamp now, the word is legible cold, and the value changes:
+     * "CLEAR" or "OVER". */
     const bool clipLit = lastClipMs != 0
         && juce::Time::getMillisecondCounter() - lastClipMs < 800;
-    seg ("CLIP", clipLit ? C::BLOOD_HOT : C::INK_GHOST);
+    {
+        if (! first)
+        {
+            g.setColour (C::HAIRLINE_FAINT);
+            g.fillRect (r.getX() + 7, r.getY() + 4, 1, r.getHeight() - 8);
+            r.removeFromLeft (16);
+        }
+        g.setColour (clipLit ? C::BLOOD_HOT : C::LAMP_DEAD);
+        g.fillRect (r.getX(), r.getCentreY() - 2, 5, 5);
+        r.removeFromLeft (5 + 4);
+    }
+    {
+        g.setColour (C::INK_FAINT);
+        g.setFont (capF);
+        g.drawText ("CLIP", r.removeFromLeft (textW (capF, "CLIP") + 2),
+                    Justification::centredLeft);
+        r.removeFromLeft (4);
+        const juce::String cs = clipLit ? "OVER" : "CLEAR";
+        g.setColour (clipLit ? C::BLOOD_HOT : C::INK_DIM);
+        g.setFont (valF);
+        g.drawText (cs, r.removeFromLeft (textW (valF, cs) + 2),
+                    Justification::centredLeft);
+    }
 
-    // device rate / buffer, one segment with the only middot
+    // device rate / buffer
     int rate = 0, bufSmp = 0;
     if (auto* dev = audio.getManager().getCurrentAudioDevice())
     {
         rate = (int) dev->getCurrentSampleRate();
         bufSmp = dev->getCurrentBufferSizeSamples();
     }
-    seg (juce::String (rate) + " Hz " + U8 ("\xc2\xb7") + " "
-             + juce::String (bufSmp) + " SMP",
-         C::TAB_INACTIVE_FG);
+    seg ("DEVICE", juce::String (rate) + " Hz " + U8 ("\xc2\xb7") + " "
+                       + juce::String (bufSmp) + " SMP",
+         rate > 0 ? C::INK_DIM : C::INK_FAINT);
 
     /* The right-hand slot is the hint until something goes wrong, then it is
      * the notice. There is nowhere else in this console for a device that
      * would not open or a session that would not write to say so, and both
-     * used to fail without a word. */
-    g.setColour (alert.isNotEmpty() ? C::BLOOD_HOT : C::INK_FAINT);
-    g.setFont (f);
-    g.drawText (alert.isNotEmpty() ? alert
-                                   : juce::String ("PRESS ? FOR A MAP OF THIS CONSOLE"),
-                r, Justification::centredRight, true);
+     * used to fail without a word. An alert is prefixed rather than only
+     * recoloured, for the same reason CLIP now carries a lamp. */
+    if (alert.isNotEmpty())
+    {
+        const int tw = juce::jlimit (0, juce::jmax (0, r.getWidth() - 10),
+                                     textW (valF, alert) + 2);
+        Rectangle<int> ar = r.removeFromRight (tw);
+        g.setColour (C::BLOOD_HOT);
+        g.setFont (valF);
+        g.drawText (alert, ar, Justification::centredRight, true);
+        g.fillRect (ar.getX() - 9, ar.getCentreY() - 2, 5, 5);
+    }
+    else
+    {
+        g.setColour (C::INK_FAINT);
+        g.setFont (Type::micro());
+        g.drawText ("PRESS ? FOR A MAP OF THIS CONSOLE", r,
+                    Justification::centredRight, true);
+    }
 }
+
 
 } // namespace morgue

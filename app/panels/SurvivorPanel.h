@@ -7,11 +7,19 @@
  *
  * Layout (spec section 9 / HTML frame 05):
  *   header band 24
- *   row 1 (120): three 150x74 stencil buttons - divider - BUFFER/SOURCE/
- *                CAPTURE data block - right: LOOP OUT meter 140x8
+ *   row 1 (120): three 150x74 stencil buttons - divider - LOOP STATE block
+ *                - right: LOOP OUT meter 140x8
  *   row 2 (210): loop buffer waveform in a SOCKET box, slice grid,
  *                BLOOD_HOT loop position
  *   row 3 (flex): six 76px EngravedKnobs MIX/FB/OD/HALF/REV/SLICE
+ *
+ * The LOOP STATE block is the point of the legibility pass here. This panel
+ * is played live, by glance, and the state used to be the third value on the
+ * third line of a 9px key/value block: IDLE / ARMED / RECORDING / PLAYING is
+ * now a stencil word as tall as the buttons next to it, with the detail
+ * (bar counts, the countdown to the capture bar, the buffer length) under
+ * it and a lamp beside it. The word carries the state; the lamp only
+ * confirms it, so nothing here depends on telling two hues apart.
  */
 
 #pragma once

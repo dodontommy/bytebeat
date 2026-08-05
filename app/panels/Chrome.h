@@ -240,14 +240,19 @@ public:
 
     PlateButton run, cut, rec, info;
     juce::OwnedArray<EngravedKnob> knobs;       // BPM BEATS BARS GAIN
-    std::function<void()> onExport;             // MIXER context EXPORT... plate
+
+    /* Assigned by Main.cpp and no longer fired from here. The transport's
+     * EXPORT... plate was removed in the legibility pass: it was drawn like
+     * every other working action plate and its only destination was a sheet in
+     * which nothing is wired to the engine. Kept declared because Main.cpp
+     * assigns it and Main.cpp is not this pass's to edit. */
+    std::function<void()> onExport;
 
 private:
     void applyContext();                        // show/hide per-tab children
     int contextTab = 0;
     float masterPeak = 0.0f;                    // post-gain sink peak (sync)
     MeterComponent masterMeter;                 // RACK context: master meter
-    std::unique_ptr<juce::Button> exportBtn;    // MIXER context (local class)
 };
 
 /* ---- STATUS (20, spec section 13) --------------------------------------- */

@@ -2,12 +2,19 @@
  * serial N.72-0419, LIVE).
  *
  * 8 one-shot slots, 16-step patterns on the engine's clock (bb.seq_pos),
- * rendered to the master bus. Layout per spec section 7:
- *   toolbar 28  -- PATTERN A/B/C/D plates, FILL EUCLID / RAND / CLEAR, hints
- *   header 22   -- 300 gutter, 16 numbered columns (current tinted), 140 gutter
+ * rendered to the master bus. Layout:
+ *   toolbar 28  -- FILL EUCLID / RAND / CLEAR, hints
+ *   header 24   -- 300 gutter, 16 numbered columns (playhead tinted), 140 gutter
  *   8 slot rows -- equal flex: row head 300 (index 16, name + meta, M/S 18x18,
  *                  divider, three 26px knobs PIT/VEL/LVL), 16-column StepCell
  *                  grid with 3px padding, right gutter 140 (CHOKE tag + meter)
+ *
+ * The PATTERN A/B/C/D tags are gone. B, C and D were constructed INERT --
+ * ToolTag::mouseDown is guarded on style, so they could not be clicked at all
+ * -- and their tooltips described "pattern banks" the engine does not have.
+ * With them removed, PATTERN A was a one-item choice, so the label and the
+ * group went too: the engine holds exactly one 16-step pattern per slot and
+ * the panel now says nothing to the contrary.
  *
  * Everything writes the bb.sampler atomics; the engine is the source of
  * truth and sync() (30 Hz, driven by MainComponent) pulls state back with
@@ -61,8 +68,6 @@ private:
 
     AudioEngine& audio;
     juce::OwnedArray<LickSlotRow> rows;
-    juce::OwnedArray<ToolTag> patternTags;         // A live; B-D drawn only (engine
-                                                   //   holds a single pattern bank)
     juce::OwnedArray<ToolTag> fillTags;            // EUCLID / RAND / CLEAR
     juce::StringArray names, metas;                // UI-side slot identity
     std::unique_ptr<juce::FileChooser> chooser;
@@ -72,7 +77,7 @@ private:
     int  euclidK[8] { };                           // per-slot euclid density memory
 
     juce::Rectangle<int> toolbarRect, stepHeaderRect, rowsRect;
-    juce::Rectangle<int> patLabelR, fillLabelR, tbDividerR;
+    juce::Rectangle<int> fillLabelR;
 };
 
 } // namespace morgue

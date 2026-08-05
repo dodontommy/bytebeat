@@ -1350,6 +1350,1111 @@ static void test_arr_transport_and_rec_src(void)
     bb_engine_clip_release(ab);
 }
 
+/* ======================================================================== */
+/*  The RETURN BUS                                                           */
+/* ======================================================================== */
+
+/* One CHAMBER became eight return slots, a send matrix and a link graph. The
+ * single hardest thing to prove about that change is the thing nobody can
+ * hear until it is too late: that a session which uses only the CHAMBER still
+ * renders THE SAME SAMPLES it rendered before the bus existed.
+ *
+ * Everything else in this file compares two renders of the current binary
+ * against each other. That is the right tool for "these two paths agree", and
+ * it is completely blind to a change that moves BOTH sides -- which is exactly
+ * what a refactor of the mix bus does. So the first test below is different in
+ * kind: it hashes 4096 rendered frames of a fixed CHAMBER session and compares
+ * them against a 64-bit constant that was captured from the binary BEFORE the
+ * return bus was written, and committed on its own.
+ *
+ * THAT CONSTANT IS NEVER TO BE UPDATED. If it changes, the arithmetic of the
+ * mix bus changed, and the correct response is to bisect until you find the
+ * commit that moved it -- not to paste in the new number. The five ways the
+ * bus can break bit-exactness silently are all detectable here and nowhere
+ * else: a create/destroy fade that starts at 0 instead of unity, a safety
+ * stage armed on a return that has no feedback edge, two reads of the same
+ * send atomic at different instants, a wet-bus limiter armed unconditionally,
+ * and a snapshot that forgets to clamp a hand-edited session's values.
+ *
+ * The scenario is deliberately boring and deliberately explicit. Two voices
+ * with fixed expressions, two different send amounts, the sampler send open
+ * over an empty sampler, the sequencer off, the timeline empty, and the two
+ * things that survive bb_engine_set_defaults() -- the free-running sample
+ * clock and the master gain ramp -- pinned by hand. Every one of those is
+ * load-bearing: leave any of them to whatever ran earlier in the suite and the
+ * hash stops being a property of the engine and starts being a property of the
+ * test order.
+ *
+ * THE TWO-STAGE SETTLE BELOW IS NOT DECORATION, AND IT WAS NOT MY FIRST
+ * ATTEMPT. Two pieces of render state outlive both bb_engine_set_defaults()
+ * and bb_engine_init(): the per-voice level ramp g_lvl[] and the master gain
+ * ramp gain_cur. Both walk toward their target at 32 per frame, so they are
+ * settled by rendering. Everything ELSE -- and in particular the chamber's
+ * comb and allpass lines -- is cleared by bb_engine_init(), and it has to be,
+ * because at 8 kHz this reverb's tail is far longer than any settle worth
+ * rendering: the state left behind by the ramp-in transient is still audible
+ * thousands of frames later. Measured: settling the ramps alone gave three
+ * DIFFERENT hashes depending on whether the test ran first, second, or after
+ * the whole suite. Rendering to settle the ramps, then wiping the DSP state
+ * with a second bb_engine_init(), then filling the chamber from a known-empty
+ * state, gives one hash from any starting point. If you reorder this you will
+ * get a constant that describes the suite instead of the engine. */
+/* Captured on b9d8fbc -- the last commit before the return bus -- with MSVC
+ * 19.44 at both /O2 and /Od, from three different positions in the suite, all
+ * four agreeing. The render path is pure integer (the only float in engine.c
+ * is the specimen synthesizer, which never runs here), so this number is a
+ * property of the arithmetic and not of the compiler. */
+#define CHAMBER_GOLDEN 0xd3be940ff58259ddULL
+
+static void test_chamber_golden(void)
+{
+    static int16_t out[4096];
+    ExprError er;
+
+    bb_engine_set_defaults();
+    bb_engine_init(8000);
+    bb_engine_song_publish(NULL, 0);
+    bb_engine_rec_src(BB_REC_MASTER);
+    bb_engine_song_play(1);
+
+    for (int L = 0; L < BB_NLAYER; L++) {
+        atomic_store(&bb.layer[L].on, 0);
+        atomic_store(&bb.layer[L].send, 0);
+    }
+    test_expect(bb_publish(0, "t*p0", &er),
+                "golden-hash voice 0 compiles: %s", er.msg);
+    test_expect(bb_publish(1, "t*p0&t>>3", &er),
+                "golden-hash voice 1 compiles: %s", er.msg);
+    for (int L = 0; L < 2; L++) {
+        atomic_store(&bb.layer[L].on, 1);
+        atomic_store(&bb.layer[L].mode, BB_WORD);
+        atomic_store(&bb.layer[L].seq_on, 0);
+        atomic_store(&bb.layer[L].ctl[LCTL_LEVEL], L == 0 ? 256 : 200);
+    }
+    atomic_store(&bb.layer[0].param[0], 37);
+    atomic_store(&bb.layer[1].param[0], 91);
+    atomic_store(&bb.gain, 256);
+
+    atomic_store(&bb.verb_size,  172);
+    atomic_store(&bb.verb_tone,   96);
+    atomic_store(&bb.verb_level, 132);
+    atomic_store(&bb.layer[0].send, 200);
+    atomic_store(&bb.layer[1].send,  90);
+    atomic_store(&bb.smp_send,       64);
+
+    /* Stage one: settle the two ramps. 4096 frames is twice the 2048 a full
+     * 0 -> 256 sweep needs at 32 per frame, so both are pinned at their
+     * targets no matter where the previous test left them. */
+    bb_engine_render(out, 4096, 1);
+
+    /* Stage two: wipe every piece of DSP state that ISN'T one of those two
+     * ramps -- the chamber's lines, the per-voice post chains and DC
+     * blockers, the expression contexts, the envelopes -- and restart the
+     * sample clock and the bar grid. From here the render is a pure function
+     * of the controls set above. */
+    bb_engine_init(8000);
+    bb_engine_reset_t();
+    bb_engine_reset_loop();
+
+    /* Stage three: fill the chamber from empty, then hash the window after
+     * it, where the reverb is developed and the only thing still moving is
+     * the instrument. */
+    bb_engine_render(out, 4096, 1);
+    unsigned w0 = atomic_load(&bb.sink_w);
+    bb_engine_render(out, 4096, 1);
+
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (unsigned j = 0; j < 4096; j++) {
+        h ^= (uint64_t)(uint16_t)bb.sink[(w0 + j) & BB_SINK_MASK];
+        h *= 0x100000001b3ULL;
+    }
+    test_expect(h == CHAMBER_GOLDEN,
+                "the CHAMBER renders bit-identically to the pre-return-bus "
+                "engine (got 0x%016llx, want 0x%016llx)",
+                (unsigned long long)h, (unsigned long long)CHAMBER_GOLDEN);
+
+    /* A hash is only worth what its input is worth: if the scenario ever
+     * stops making sound, the constant above would still match a buffer of
+     * silence and this test would pass forever while proving nothing. */
+    int nonzero = 0;
+    for (unsigned j = 0; j < 4096; j++)
+        if (bb.sink[(w0 + j) & BB_SINK_MASK] != 0) { nonzero++; }
+    test_expect(nonzero > 3000,
+                "the golden-hash scenario is real audio, not silence");
+    test_expect(atomic_load(&bb.verb_peak) > 0,
+                "the golden-hash scenario actually runs the chamber");
+}
+
+/* Everything from here down needs the return bus itself. It is compiled only
+ * once bytebeat.h defines BB_NRET, so this file builds -- and the golden hash
+ * above still runs -- both before the bus lands and after. That is not a
+ * courtesy to the build: the golden constant HAS to be captured and committed
+ * on a binary that does not have the bus yet, and a test file that could not
+ * compile against that binary could not have captured it. */
+#if defined(BB_NRET)
+
+/* The contract fixes the per-return ceiling at 24576 (-2.5 dBFS) and the
+ * summed-wet ceiling at 30000. Taken as literals rather than pulled out of
+ * ret.h so that a change to either shows up here as a failed bound rather
+ * than as a test that silently re-derives whatever the engine now does. */
+#ifndef BB_RET_CEIL
+#  define BB_RET_CEIL      24576
+#endif
+#ifndef BB_RET_BUS_CEIL
+#  define BB_RET_BUS_CEIL  30000
+#endif
+
+/* One switch per shipping effect type, so a type that slips to a later commit
+ * costs one line here instead of a red suite. The contract ships four. */
+#define RET_HAVE_CHAMBER 1
+#define RET_HAVE_DELAY   1
+#define RET_HAVE_DRIVE   1
+#define RET_HAVE_CHOIR   1
+
+enum { RET_SETTLE = 4096 };          /* frames: gain and level ramps at 32 */
+
+static int16_t ret_out[8192];
+
+static void ret_render(int frames)
+{
+    while (frames > 0) {
+        int n = frames > (int)(sizeof ret_out / sizeof ret_out[0])
+              ? (int)(sizeof ret_out / sizeof ret_out[0]) : frames;
+        bb_engine_render(ret_out, n, 1);
+        frames -= n;
+    }
+}
+
+/* Capture the RECORD sink rather than the render buffer, for the same reason
+ * test_arr_transport_and_rec_src does: the sink is what the instrument
+ * committed to, and reading it keeps the comparison independent of how the
+ * frames were chunked into render calls. */
+static void ret_capture(int16_t *dst, int n)
+{
+    unsigned w0 = atomic_load(&bb.sink_w);
+    ret_render(n);
+    for (int j = 0; j < n; j++)
+        dst[j] = bb.sink[(w0 + (unsigned)j) & BB_SINK_MASK];
+}
+
+static int ret_pending_any(void)
+{
+    for (int r = 0; r < BB_NRET; r++)
+        if (bb_engine_ret_pending(r)) return 1;
+    return 0;
+}
+
+/* Create and destroy are asynchronous: the render thread fades the slot out,
+ * reports itself quiet, and two render epochs later the UI thread swaps the
+ * type in. In this process there is no render thread, so the suite has to be
+ * both threads -- render, then service, until nothing is pending. Returns 0
+ * if it never landed, which is a deadlock in the handshake and is asserted on
+ * once, in test_ret_lifecycle, rather than at every call site. */
+static int ret_finish(void)
+{
+    /* The handshake needs one period to fade, one to report quiet and two
+     * more epochs to prove nobody is inside the old type -- call it five.
+     * The budget here is 256 periods, which is 65536 frames, eight seconds at
+     * 8 kHz. That is enormous compared to what a working handshake needs and
+     * small enough that a handshake which never lands fails in a moment
+     * instead of grinding through half a million frames per slot. */
+    for (int i = 0; i < 256; i++) {
+        if (!ret_pending_any()) return 1;
+        bb_engine_render(ret_out, 256, 1);
+        bb_engine_ret_service();
+    }
+    return !ret_pending_any();
+}
+
+static int ret_set_type(int slot, int type)
+{
+    if (type == RET_NONE) bb_engine_ret_destroy(slot);
+    else                  bb_engine_ret_create(slot, type);
+    return ret_finish();
+}
+
+/* Read and clear a return's max-hold meter, which is the only view the suite
+ * gets of a return's own output -- everything downstream of it is summed with
+ * the dry bus. Clear before a window, read after it. */
+static int ret_peak(int r)
+{
+    return atomic_exchange(&bb.ret[r].peak, 0);
+}
+
+/* A known-empty engine with a known-empty graph. Deliberately does not trust
+ * bb_engine_set_defaults() to have cleared the matrix -- that is asserted
+ * exactly once, in test_ret_defaults, and everywhere else the scenario is
+ * made explicit so a failure there cannot cascade into every other test. */
+static void ret_scene(int rate)
+{
+    bb_engine_set_defaults();
+    bb_engine_init(rate);
+    bb_engine_song_publish(NULL, 0);
+    bb_engine_rec_src(BB_REC_MASTER);
+    bb_engine_song_play(1);
+    atomic_store(&bb.gain, 256);
+    atomic_store(&bb.panic, 0);
+    atomic_store(&bb.mute, 0);
+    for (int L = 0; L < BB_NLAYER; L++) atomic_store(&bb.layer[L].on, 0);
+
+    for (int r = 0; r < BB_NRET; r++) {
+        bb_engine_ret_mute(r, 0);
+        bb_engine_ret_sync(r, 0);
+        bb_engine_ret_level(r, 0);
+        for (int s = 0; s < BB_RET_NSRC; s++) bb_engine_ret_send(s, r, 0);
+        for (int q = 0; q < BB_NRET; q++)     bb_engine_ret_link(q, r, 0);
+        bb_ret_name[r][0] = '\0';
+        atomic_exchange(&bb.ret[r].peak, 0);
+    }
+    atomic_store(&bb.verb_peak, 0);
+
+    bb_engine_reset_t();
+    bb_engine_reset_loop();
+}
+
+static void ret_voice(int L, const char *src, int p0, int level)
+{
+    ExprError er;
+    bb_publish(L, src, &er);
+    atomic_store(&bb.layer[L].on, 1);
+    atomic_store(&bb.layer[L].mode, BB_WORD);
+    atomic_store(&bb.layer[L].seq_on, 0);
+    atomic_store(&bb.layer[L].ctl[LCTL_LEVEL], level);
+    atomic_store(&bb.layer[L].param[0], p0);
+}
+
+/* ---- slot 0 is the CHAMBER, and its storage IS the legacy atomics -------
+ *
+ * bb.ret[0].level and bb.ret[0].param[0..1] are documented as UNUSED: slot
+ * 0's level, SIZE and DARK live in bb.verb_level / verb_size / verb_tone, and
+ * send column 0 lives in bb.layer[s].send / bb.smp_send. That alias is the
+ * whole reason the mixer panel, the `verb` session key and the chamber checks
+ * further up this file needed no edits -- and it is exactly the kind of thing
+ * a later "cleanup" adds a shadow copy to. The moment there are two storages
+ * they drift, and the drift shows up as a session that loads the wrong reverb
+ * or as a golden hash that fails for a reason that looks like DSP. So: pin it
+ * in both directions, through the accessors and through the raw atomics. */
+static void test_ret_defaults(void)
+{
+    bb_engine_set_defaults();
+    bb_engine_init(8000);
+
+    test_expect(bb_engine_ret_type_get(0) == RET_CHAMBER,
+                "slot 0 comes up as the CHAMBER");
+    int empty = 0;
+    for (int r = 1; r < BB_NRET; r++)
+        empty += bb_engine_ret_type_get(r) == RET_NONE;
+    test_expect(empty == BB_NRET - 1,
+                "slots 1..7 come up empty");
+
+    int sends = 0, links = 0;
+    for (int s = 0; s < BB_RET_NSRC; s++)
+        for (int r = 0; r < BB_NRET; r++)
+            sends += bb_engine_ret_send_get(s, r) != 0;
+    for (int a = 0; a < BB_NRET; a++)
+        for (int b2 = 0; b2 < BB_NRET; b2++)
+            links += bb_engine_ret_link_get(a, b2) != 0;
+    test_expect(sends == 0 && links == 0,
+                "a defaulted session has an empty routing graph");
+
+    /* reads go through the alias */
+    atomic_store(&bb.verb_level, 111);
+    atomic_store(&bb.verb_size,  222);
+    atomic_store(&bb.verb_tone,   33);
+    atomic_store(&bb.layer[4].send, 44);
+    atomic_store(&bb.smp_send,      55);
+    test_expect(bb_engine_ret_level_get(0) == 111 &&
+                bb_engine_ret_param_get(0, 0) == 222 &&
+                bb_engine_ret_param_get(0, 1) == 33,
+                "slot 0's level and first two params read the legacy atomics");
+    test_expect(bb_engine_ret_send_get(BB_RET_SRC_V0 + 4, 0) == 44 &&
+                bb_engine_ret_send_get(BB_RET_SRC_LICKS, 0) == 55,
+                "send column 0 reads Layer.send and smp_send");
+
+    /* writes go through it too */
+    bb_engine_ret_level(0, 88);
+    bb_engine_ret_param(0, 0, 77);
+    bb_engine_ret_param(0, 1, 66);
+    bb_engine_ret_send(BB_RET_SRC_V0 + 4, 0, 22);
+    bb_engine_ret_send(BB_RET_SRC_LICKS, 0, 11);
+    test_expect(atomic_load(&bb.verb_level) == 88 &&
+                atomic_load(&bb.verb_size)  == 77 &&
+                atomic_load(&bb.verb_tone)  == 66,
+                "writing slot 0 writes the legacy atomics, not a shadow copy");
+    test_expect(atomic_load(&bb.layer[4].send) == 22 &&
+                atomic_load(&bb.smp_send) == 11,
+                "writing send column 0 writes Layer.send and smp_send");
+
+    /* and the aliased cells of the new arrays stay out of it entirely */
+    test_expect(atomic_load(&bb.ret_send[BB_RET_SRC_V0 + 4][0]) == 0 &&
+                atomic_load(&bb.ret_send[BB_RET_SRC_LICKS][0]) == 0,
+                "the aliased send cells are left unused");
+
+    bb_engine_set_defaults();
+}
+
+/* ---- create, destroy, and the promise that neither leaves a residue ----- */
+static void test_ret_lifecycle(void)
+{
+    const int rate = 8000;
+    ret_scene(rate);
+
+    test_expect(bb_engine_ret_create(-1, RET_DELAY) == -1 &&
+                bb_engine_ret_create(BB_NRET, RET_DELAY) == -1 &&
+                bb_engine_ret_destroy(-1) == -1 &&
+                bb_engine_ret_destroy(BB_NRET) == -1,
+                "return lifecycle calls reject a bad slot");
+
+    test_expect(bb_engine_ret_create(1, RET_DELAY) == 0,
+                "a return can be created at runtime");
+    test_expect(ret_finish(), "the create handshake completes");
+    test_expect(bb_engine_ret_type_get(1) == RET_DELAY,
+                "the created slot reports its type");
+
+    bb_engine_ret_level(1, 256);
+    bb_engine_ret_send(BB_RET_SRC_V0, 1, 255);
+    ret_voice(0, "t*p0", 37, 256);
+    ret_render(RET_SETTLE);
+    ret_peak(1);
+    ret_render(2048);
+    test_expect(ret_peak(1) > 0, "a created return is audible");
+
+    /* Destroy while it is ringing, then put a different effect in the same
+     * slot: the first sample out of the new type must be silence. A stale
+     * tail here means the arena was not cleared, which is the one failure a
+     * "does it make sound" test would happily walk past. */
+    test_expect(bb_engine_ret_destroy(1) == 0, "a return can be destroyed");
+    test_expect(ret_finish(), "the destroy handshake completes");
+    test_expect(bb_engine_ret_type_get(1) == RET_NONE,
+                "a destroyed slot reports itself empty");
+
+    atomic_store(&bb.layer[0].on, 0);
+    bb_engine_ret_send(BB_RET_SRC_V0, 1, 0);
+    test_expect(ret_set_type(1, RET_CHAMBER), "the slot takes a new type");
+    bb_engine_ret_level(1, 256);
+    ret_peak(1);
+    ret_render(512);
+    test_expect(ret_peak(1) == 0,
+                "a re-created slot starts from silence, with no stale tail");
+
+    ret_scene(rate);
+}
+
+/* ---- the bit-exact bypass, as an audio property ------------------------- */
+static void test_ret_bypass(void)
+{
+    const int rate = 8000;
+    static int16_t a[2048], b[2048];
+
+    /* (1) Eight slots created and destroyed, then all empty, must render
+     * bit-identically to a session that never touched them. This is the
+     * contract's "disabled costs nothing" stated as sound rather than as
+     * cycles: an empty slot is not visited, so it cannot contribute a sample
+     * and it cannot advance a state. */
+    ret_scene(rate);
+    ret_voice(0, "t*p0", 37, 256);
+    bb_engine_ret_level(0, 132);
+    bb_engine_ret_send(BB_RET_SRC_V0, 0, 200);
+    bb_engine_reset_t();
+    bb_engine_reset_loop();
+    ret_render(RET_SETTLE);
+    ret_capture(a, 2048);
+
+    ret_scene(rate);
+    for (int r = 1; r < BB_NRET; r++) {
+        ret_set_type(r, r & 1 ? RET_DELAY : RET_CHOIR);
+        bb_engine_ret_level(r, 256);
+    }
+    ret_render(2048);                       /* let them all run for a while */
+    for (int r = 1; r < BB_NRET; r++) {
+        bb_engine_ret_level(r, 0);
+        ret_set_type(r, RET_NONE);
+    }
+    ret_voice(0, "t*p0", 37, 256);
+    bb_engine_ret_level(0, 132);
+    bb_engine_ret_send(BB_RET_SRC_V0, 0, 200);
+    bb_engine_reset_t();                    /* the churn advanced the clock */
+    bb_engine_reset_loop();
+    ret_render(RET_SETTLE);
+    ret_capture(b, 2048);
+
+    int churn_diff = 0;
+    for (int j = 0; j < 2048; j++) if (a[j] != b[j]) churn_diff++;
+    test_expect(churn_diff == 0,
+                "creating and destroying every return leaves the mix bus "
+                "bit-identical");
+
+    /* (2) A closed return is not merely silent, it is FROZEN. Blast the sends
+     * at a chamber whose level is 0, then open it: at 8 kHz the shortest comb
+     * is 202 frames long, so if the state really did not advance, the first
+     * 100 frames after opening are EXACTLY zero. If the closed return had
+     * been running under the level multiply, the tail would arrive already at
+     * full amplitude the instant the fader moved. */
+    ret_scene(rate);
+    ret_voice(0, "t*p0", 37, 256);
+    bb_engine_ret_send(BB_RET_SRC_V0, 0, 255);
+    bb_engine_ret_level(0, 0);
+    ret_render(RET_SETTLE + 8192);
+    ret_peak(0);
+    atomic_store(&bb.verb_peak, 0);
+    test_expect(ret_peak(0) == 0 && atomic_load(&bb.verb_peak) == 0,
+                "a closed return meters nothing while it is closed");
+
+    bb_engine_ret_level(0, 256);
+    ret_render(100);
+    test_expect(ret_peak(0) == 0,
+                "a closed return did not advance its state while closed");
+    ret_render(4096);
+    test_expect(ret_peak(0) > 0, "the same return sounds once it is opened");
+
+    /* (3) With the return closed, the sends are inaudible whatever they are
+     * set to -- the bypass is the whole send path, not just the return
+     * fader. */
+    ret_scene(rate);
+    ret_voice(0, "t*p0", 37, 256);
+    bb_engine_ret_level(0, 0);
+    for (int s = 0; s < BB_RET_NSRC; s++) bb_engine_ret_send(s, 0, 255);
+    bb_engine_reset_t();
+    bb_engine_reset_loop();
+    ret_render(RET_SETTLE);
+    ret_capture(a, 2048);
+
+    ret_scene(rate);
+    ret_voice(0, "t*p0", 37, 256);
+    bb_engine_ret_level(0, 0);
+    bb_engine_reset_t();
+    bb_engine_reset_loop();
+    ret_render(RET_SETTLE);
+    ret_capture(b, 2048);
+
+    int send_diff = 0;
+    for (int j = 0; j < 2048; j++) if (a[j] != b[j]) send_diff++;
+    test_expect(send_diff == 0,
+                "sends into a closed return contribute nothing at all");
+
+    ret_scene(rate);
+}
+
+/* ---- one section per effect type ---------------------------------------
+ *
+ * Three questions per type, and they are the three that catch everything
+ * cheap: does it stay quiet when nothing is going in (uninitialised state, a
+ * DC offset, self-oscillation from nothing), does it do SOMETHING when
+ * something is (a type that is inaudible at its own defaults is a bug, not a
+ * preference), and does it do the same thing twice (an uninitialised read or
+ * a dependence on whatever ran before it). */
+static const struct { int type; const char *name; int rings; } RET_KIND[] = {
+#if RET_HAVE_CHAMBER
+    { RET_CHAMBER, "CHAMBER", 1 },
+#endif
+#if RET_HAVE_DELAY
+    { RET_DELAY,   "DELAY",   1 },
+#endif
+#if RET_HAVE_DRIVE
+    { RET_DRIVE,   "DRIVE",   0 },
+#endif
+#if RET_HAVE_CHOIR
+    { RET_CHOIR,   "CHOIR",   1 },
+#endif
+};
+
+static void test_ret_types(void)
+{
+    const int rate = 8000;
+    const int NKIND = (int)(sizeof RET_KIND / sizeof RET_KIND[0]);
+    static int16_t a[1024], b[1024];
+
+    test_expect(NKIND == 4, "all four shipping return types are present");
+
+    for (int i = 0; i < NKIND; i++) {
+        int type = RET_KIND[i].type;
+        const char *nm = RET_KIND[i].name;
+
+        /* --- silence in, silence out ---------------------------------- */
+        ret_scene(rate);
+        test_expect(ret_set_type(1, type), "%s can be created", nm);
+        bb_engine_ret_level(1, 256);
+        ret_render(2048);                 /* settle any DC the type makes */
+        ret_peak(1);
+        ret_render(2048);
+        test_expect(ret_peak(1) == 0, "%s is silent on silence", nm);
+
+        /* --- something in, something out ------------------------------- */
+        ret_voice(0, "t*p0", 37, 256);
+        bb_engine_ret_send(BB_RET_SRC_V0, 1, 255);
+        ret_render(RET_SETTLE);
+        ret_peak(1);
+        ret_render(2048);
+        test_expect(ret_peak(1) > 0, "%s responds to its send", nm);
+
+        /* --- and it behaves like the kind of effect it says it is ------ */
+        atomic_store(&bb.layer[0].on, 0);
+        bb_engine_ret_send(BB_RET_SRC_V0, 1, 0);
+        ret_render(64);                   /* one period for the snapshot   */
+        ret_peak(1);
+        ret_render(512);
+        int tail = ret_peak(1);
+        if (RET_KIND[i].rings)
+            test_expect(tail > 0, "%s rings after its input stops", nm);
+        else
+            test_expect(tail == 0,
+                        "%s stops when its input stops (it has no tail)", nm);
+
+        /* --- deterministic across identical runs ----------------------- */
+        for (int pass = 0; pass < 2; pass++) {
+            ret_scene(rate);
+            ret_set_type(1, type);
+            bb_engine_ret_level(1, 256);
+            ret_voice(0, "t*p0", 37, 256);
+            bb_engine_ret_send(BB_RET_SRC_V0, 1, 255);
+            bb_engine_reset_t();
+            bb_engine_reset_loop();
+            ret_render(RET_SETTLE);
+            ret_capture(pass ? b : a, 1024);
+        }
+        int drift = 0, energy = 0;
+        for (int j = 0; j < 1024; j++) {
+            if (a[j] != b[j]) drift++;
+            if (a[j] != 0) energy++;
+        }
+        test_expect(drift == 0 && energy > 0,
+                    "%s renders identically on two identical runs", nm);
+    }
+
+    ret_scene(rate);
+}
+
+/* ---- the matrix: who feeds what ---------------------------------------- */
+static void test_ret_routing(void)
+{
+    const int rate = 8000;
+    ret_scene(rate);
+
+    test_expect(ret_set_type(1, RET_CHAMBER) && ret_set_type(2, RET_CHAMBER) &&
+                ret_set_type(3, RET_CHAMBER),
+                "three returns can exist at once");
+    for (int r = 1; r <= 3; r++) bb_engine_ret_level(r, 256);
+
+    /* a send at zero contributes nothing, even with the voice at full tilt */
+    ret_voice(0, "t*p0", 37, 256);
+    ret_render(RET_SETTLE);
+    ret_peak(1); ret_peak(2); ret_peak(3);
+    ret_render(4096);
+    test_expect(ret_peak(1) == 0 && ret_peak(2) == 0 && ret_peak(3) == 0,
+                "a send at zero puts nothing into any return");
+
+    /* a send at full feeds ONLY the return it names */
+    bb_engine_ret_send(BB_RET_SRC_V0, 2, 255);
+    ret_render(RET_SETTLE);
+    ret_peak(1); ret_peak(2); ret_peak(3);
+    ret_render(4096);
+    int p1 = ret_peak(1), p2 = ret_peak(2), p3 = ret_peak(3);
+    test_expect(p2 > 0, "a send at full feeds its return");
+    test_expect(p1 == 0 && p3 == 0,
+                "a send feeds the return it names and no other");
+
+    /* A second source column is independent of the first.
+     *
+     * Zeroing a send does NOT silence the return it was feeding: return 2 is a
+     * CHAMBER that has just been driven at full for 4096 frames, and a reverb
+     * tail is precisely the thing that outlives its input. Measured, it was
+     * still putting 10 counts into its meter a full RET_SETTLE later, which is
+     * the tail decaying exactly as it should rather than a routing fault.
+     *
+     * So re-arm all three returns before measuring. Destroying and recreating
+     * clears the slot's arena, which is what actually establishes the
+     * precondition this assertion needs -- an empty return -- instead of
+     * hoping a decay outruns the window. The assertion itself is unchanged. */
+    bb_engine_ret_send(BB_RET_SRC_V0, 2, 0);
+    for (int r = 1; r <= 3; r++) {
+        ret_set_type(r, RET_NONE);
+        ret_set_type(r, RET_CHAMBER);
+        bb_engine_ret_level(r, 256);
+    }
+    ret_voice(5, "t*p0&t>>5", 90, 256);
+    bb_engine_ret_send(BB_RET_SRC_V0 + 5, 3, 255);
+    ret_render(RET_SETTLE);
+    ret_peak(1); ret_peak(2); ret_peak(3);
+    ret_render(4096);
+    test_expect(ret_peak(3) > 0 && ret_peak(1) == 0 && ret_peak(2) == 0,
+                "each voice's send row is routed independently");
+
+    /* the DRY master tap: a source with no voice send of its own */
+    ret_scene(rate);
+    ret_set_type(4, RET_CHAMBER);
+    bb_engine_ret_level(4, 256);
+    ret_voice(0, "t*p0", 37, 256);
+    ret_render(RET_SETTLE);
+    ret_peak(4);
+    ret_render(4096);
+    test_expect(ret_peak(4) == 0, "the DRY row is off until it is opened");
+    bb_engine_ret_send(BB_RET_SRC_DRY, 4, 255);
+    ret_render(RET_SETTLE);
+    ret_peak(4);
+    ret_render(4096);
+    test_expect(ret_peak(4) > 0, "the DRY master tap feeds a return");
+
+    /* mute freezes a return, exactly like a level of zero */
+    bb_engine_ret_mute(4, 1);
+    test_expect(bb_engine_ret_mute_get(4) == 1, "return mute round-trips");
+    ret_render(1024);
+    ret_peak(4);
+    ret_render(4096);
+    test_expect(ret_peak(4) == 0, "a muted return contributes nothing");
+    bb_engine_ret_mute(4, 0);
+
+    /* the published live count is what STATUS renders */
+    ret_scene(rate);
+    ret_render(512);
+    test_expect(atomic_load(&bb.ret_active) == 0,
+                "an all-closed graph publishes no live returns");
+    bb_engine_ret_level(0, 200);
+    ret_set_type(2, RET_CHAMBER);
+    bb_engine_ret_level(2, 200);
+    ret_render(512);
+    test_expect(atomic_load(&bb.ret_active) == 2,
+                "the live-return count reaches STATUS");
+
+    ret_scene(rate);
+}
+
+/* ---- links, feedback, and the reason any of this is safe ---------------
+ *
+ * Returns feeding returns is the point of the feature, not an edge case: it
+ * is the no-input-mixer technique. So the test is not "does feedback work",
+ * it is "when the user does the thing the feature exists for, does the
+ * instrument stay inside the rails". That is a hearing-safety property and it
+ * gets asserted like one -- on the peak, on the limiter's own published gain
+ * reduction, and on the DC content, which is the one that a peak assertion
+ * cannot see and the one that damages hardware. */
+#if RET_HAVE_DELAY
+static void test_ret_feedback(void)
+{
+    const int rate = 8000;
+    ret_scene(rate);
+
+    test_expect(ret_set_type(1, RET_DELAY) && ret_set_type(2, RET_CHAMBER),
+                "a two-node feedback graph can be built");
+    bb_engine_ret_level(1, 256);
+    bb_engine_ret_level(2, 0);          /* node 2 is heard only through 1 */
+
+    /* A short, hot delay with a unity self-link. Loop gain is above one by
+     * construction, so this WILL run away -- that is the point. */
+    bb_engine_ret_param(1, 0, 0);       /* TIME: as short as it goes       */
+    bb_engine_ret_param(1, 1, 200);     /* FEED: hot, but under unity      */
+    bb_engine_ret_link(1, 1, 256);
+    test_expect(bb_engine_ret_link_get(1, 1) == 256,
+                "a return can be linked to itself");
+
+    ret_voice(0, "t*p0", 37, 256);
+    bb_engine_ret_send(BB_RET_SRC_V0, 1, 255);
+    ret_render(RET_SETTLE);
+    ret_render(8000);                   /* one second of full-tilt input   */
+    atomic_store(&bb.layer[0].on, 0);
+    bb_engine_ret_send(BB_RET_SRC_V0, 1, 0);
+    /* Let the voice's own level ramp reach zero before measuring, so what
+     * follows is the loop and nothing but the loop -- otherwise the dry
+     * signal rides on top of the wet sum and the bus-ceiling assertion below
+     * would be measuring the wrong thing. */
+    ret_render(RET_SETTLE);
+
+    int32_t rail = 0, worst = 0, gr_min = 256;
+    int64_t sum = 0;
+    long counted = 0;
+    for (int blk = 0; blk < 80; blk++) { /* ten seconds with no input at all */
+        ret_peak(1);
+        bb_engine_render(ret_out, 1000, 1);
+        int p = ret_peak(1);
+        if (p > worst) worst = p;
+        int gr = atomic_load(&bb.ret[1].gr);
+        if (gr < gr_min) gr_min = gr;
+        for (int j = 0; j < 1000; j++) {
+            int32_t v = ret_out[j] < 0 ? -ret_out[j] : ret_out[j];
+            if (v > rail) rail = v;
+            if (blk >= 72) { sum += ret_out[j]; counted++; }
+        }
+    }
+
+    test_expect(worst > 4096,
+                "the feedback loop really does sustain with no input");
+    test_expect(worst <= BB_RET_CEIL,
+                "a runaway return stays under the return ceiling "
+                "(peaked at %d, ceiling %d)", (int)worst, BB_RET_CEIL);
+    test_expect(rail < 32767,
+                "a runaway return never pins the master output "
+                "(peaked at %d)", (int)rail);
+    /* With the voices gone the master IS the summed wet bus, so this is the
+     * wet-bus limiter being measured directly. Eight returns each held at
+     * their own ceiling still sum to eight times unity, and the master's only
+     * other protection is a hard clipper -- which in a feedback loop settles
+     * into a full-scale square wave, the worst waveform at the worst level. */
+    test_expect(rail <= BB_RET_BUS_CEIL,
+                "the summed wet bus stays under its own ceiling "
+                "(peaked at %d, ceiling %d)", (int)rail, BB_RET_BUS_CEIL);
+    test_expect(gr_min < 256,
+                "the limiter engages rather than letting the loop run away");
+    long mean = counted ? (long)(sum / counted) : 0;
+    test_expect(mean > -256 && mean < 256,
+                "a pinned feedback loop is not sitting on a DC offset "
+                "(mean %ld)", mean);
+
+    /* PANIC has to BREAK the loop, not hide it. Before the return bus it
+     * only zeroed the master gain, which with feedback in the graph would
+     * mean releasing it dumps a fully saturated loop straight back at you. */
+    atomic_store(&bb.panic, 1);
+    ret_render(24000);                  /* three seconds, muted             */
+    ret_peak(1);
+    ret_render(4000);
+    int after = ret_peak(1);
+    atomic_store(&bb.panic, 0);
+    test_expect(after < worst / 8,
+                "PANIC decays a feedback loop instead of muting it "
+                "(%d, was %d)", after, (int)worst);
+
+    /* and the explicit escape hatch does what it says */
+    bb_engine_ret_link(1, 1, 256);
+    bb_engine_ret_link(2, 1, 128);
+    bb_engine_ret_level(1, 256);
+    bb_engine_ret_panic();
+    int live_links = 0, live_levels = 0;
+    for (int x = 0; x < BB_NRET; x++) {
+        live_levels += bb_engine_ret_level_get(x) != 0;
+        for (int y = 0; y < BB_NRET; y++)
+            live_links += bb_engine_ret_link_get(x, y) != 0;
+    }
+    test_expect(live_links == 0 && live_levels == 0,
+                "bb_engine_ret_panic zeroes every link and every return level");
+
+    /* A link into a return that is NOT part of a cycle still carries audio:
+     * the safety stage must not be a mute. */
+    ret_scene(rate);
+    ret_set_type(1, RET_CHAMBER);
+    ret_set_type(2, RET_DELAY);
+    bb_engine_ret_level(1, 0);
+    bb_engine_ret_level(2, 256);
+    ret_voice(0, "t*p0", 37, 256);
+    bb_engine_ret_send(BB_RET_SRC_V0, 1, 255);
+    ret_render(RET_SETTLE);
+    ret_peak(2);
+    ret_render(4096);
+    test_expect(ret_peak(2) == 0, "an unlinked return hears nothing");
+    bb_engine_ret_link(1, 2, 256);
+    ret_render(RET_SETTLE);
+    ret_peak(2);
+    ret_render(4096);
+    test_expect(ret_peak(2) > 0, "a return -> return link carries audio");
+
+    ret_scene(rate);
+}
+#endif /* RET_HAVE_DELAY */
+
+/* ---- persistence -------------------------------------------------------
+ *
+ * A routing graph that does not survive a save is a feature that does not
+ * exist. Everything the mixer can edit has to come back: eight slot configs,
+ * eight names, the whole send matrix and the whole link matrix -- and the
+ * legacy `verb` and `send` keys have to keep meaning what they meant, since
+ * slot 0 and send column 0 are stored in them. */
+static void test_ret_session(void)
+{
+    char root[720];
+    int made = tmp_dir_make(root, sizeof root, "rettest") == 0;
+    test_expect(made, "temporary return-bus session directory can be created");
+    if (!made) return;
+    bb_config_set_root(root);
+
+    ret_scene(8000);
+
+    /* a graph with something of everything in it */
+    ret_set_type(1, RET_DELAY);
+    ret_set_type(3, RET_CHOIR);
+    ret_set_type(5, RET_DRIVE);
+
+    bb_engine_ret_level(0, 132);            /* aliased -> bb.verb_level     */
+    bb_engine_ret_param(0, 0, 201);         /* aliased -> bb.verb_size      */
+    bb_engine_ret_param(0, 1,  55);         /* aliased -> bb.verb_tone      */
+    bb_engine_ret_param(0, 2,  90);         /* real storage                 */
+
+    bb_engine_ret_level(1, 200);
+    bb_engine_ret_mute(1, 1);
+    bb_engine_ret_sync(1, 4);
+    for (int p = 0; p < BB_RET_NPARAM; p++) bb_engine_ret_param(1, p, 10 + p * 7);
+
+    bb_engine_ret_level(3, 90);
+    for (int p = 0; p < BB_RET_NPARAM; p++) bb_engine_ret_param(3, p, 200 - p * 3);
+
+    bb_engine_ret_level(5, 256);
+
+    snprintf(bb_ret_name[1], BB_RET_NAME, "long hall");
+    snprintf(bb_ret_name[3], BB_RET_NAME, "choir II");
+
+    bb_engine_ret_send(BB_RET_SRC_V0 + 0, 1, 200);
+    bb_engine_ret_send(BB_RET_SRC_V0 + 2, 3,  17);
+    bb_engine_ret_send(BB_RET_SRC_LICKS,  5,  64);
+    bb_engine_ret_send(BB_RET_SRC_DRY,    1, 255);
+    bb_engine_ret_send(BB_RET_SRC_WET,    3, 128);
+    bb_engine_ret_send(BB_RET_SRC_V0 + 4, 0,  77);   /* aliased -> layer 4  */
+    bb_engine_ret_send(BB_RET_SRC_LICKS,  0,  31);   /* aliased -> smp_send */
+
+    bb_engine_ret_link(1, 3, 256);
+    bb_engine_ret_link(3, 3, 200);          /* the self-link is legal       */
+    bb_engine_ret_link(5, 1,  33);
+
+    test_expect(bb_config_save() == 0, "a session with a return graph saves");
+
+    int ret_lines = 0, rsend_lines = 0, rlink_lines = 0, rname_lines = 0;
+    int saw_verb = 0;
+    FILE *f = bb_fopen(bb_config_path(), "r");
+    if (f) {
+        char line[1200];
+        while (fgets(line, sizeof line, f)) {
+            if (!strncmp(line, "ret ",   4)) ret_lines++;
+            if (!strncmp(line, "rsend ", 6)) rsend_lines++;
+            if (!strncmp(line, "rlink ", 6)) rlink_lines++;
+            if (!strncmp(line, "rname ", 6)) rname_lines++;
+            if (!strncmp(line, "verb ",  5)) saw_verb++;
+        }
+        fclose(f);
+    }
+    test_expect(f != NULL, "the return-bus session can be reopened");
+    test_expect(ret_lines == BB_NRET,
+                "the session carries one ret line per slot (%d)", ret_lines);
+    test_expect(rsend_lines == 5,
+                "only nonzero, non-aliased sends are written (%d lines)",
+                rsend_lines);
+    test_expect(rlink_lines == 3,
+                "only nonzero links are written (%d lines)", rlink_lines);
+    test_expect(rname_lines == 2,
+                "only named returns are written (%d lines)", rname_lines);
+    test_expect(saw_verb == 1,
+                "the legacy verb line is still written for older binaries");
+
+    /* wipe every trace of the graph, then load it back */
+    ret_scene(8000);
+    bb_engine_ret_param(0, 2, 0);
+    test_expect(bb_engine_ret_type_get(1) == RET_NONE &&
+                bb_engine_ret_level_get(1) == 0,
+                "the graph really was wiped before the reload");
+    test_expect(bb_config_load() == 1, "a session with a return graph loads");
+
+    test_expect(bb_engine_ret_type_get(0) == RET_CHAMBER &&
+                bb_engine_ret_type_get(1) == RET_DELAY &&
+                bb_engine_ret_type_get(3) == RET_CHOIR &&
+                bb_engine_ret_type_get(5) == RET_DRIVE,
+                "return types survive a session round-trip");
+    int still_empty = 0;
+    for (int r = 0; r < BB_NRET; r++)
+        if (r != 0 && r != 1 && r != 3 && r != 5)
+            still_empty += bb_engine_ret_type_get(r) == RET_NONE;
+    test_expect(still_empty == 4, "unused slots come back empty");
+
+    test_expect(bb_engine_ret_level_get(0) == 132 &&
+                atomic_load(&bb.verb_level) == 132 &&
+                bb_engine_ret_param_get(0, 0) == 201 &&
+                atomic_load(&bb.verb_size) == 201 &&
+                bb_engine_ret_param_get(0, 1) == 55 &&
+                atomic_load(&bb.verb_tone) == 55 &&
+                bb_engine_ret_param_get(0, 2) == 90,
+                "slot 0 round-trips through the legacy verb storage");
+    test_expect(bb_engine_ret_level_get(1) == 200 &&
+                bb_engine_ret_mute_get(1) == 1 &&
+                bb_engine_ret_sync_get(1) == 4,
+                "level, mute and sync survive a session round-trip");
+
+    int pdiff = 0;
+    for (int p = 0; p < BB_RET_NPARAM; p++) {
+        if (bb_engine_ret_param_get(1, p) != 10 + p * 7) pdiff++;
+        if (bb_engine_ret_param_get(3, p) != 200 - p * 3) pdiff++;
+    }
+    test_expect(pdiff == 0, "every effect parameter survives a round-trip");
+
+    test_expect(!strcmp(bb_ret_name[1], "long hall") &&
+                !strcmp(bb_ret_name[3], "choir II") &&
+                bb_ret_name[2][0] == '\0',
+                "return names, spaces and all, survive a round-trip");
+
+    /* the whole matrix, cell by cell */
+    int sdiff = 0, ldiff = 0;
+    for (int s = 0; s < BB_RET_NSRC; s++) {
+        for (int r = 0; r < BB_NRET; r++) {
+            int want = 0;
+            if (s == BB_RET_SRC_V0 + 0 && r == 1) want = 200;
+            if (s == BB_RET_SRC_V0 + 2 && r == 3) want = 17;
+            if (s == BB_RET_SRC_LICKS  && r == 5) want = 64;
+            if (s == BB_RET_SRC_DRY    && r == 1) want = 255;
+            if (s == BB_RET_SRC_WET    && r == 3) want = 128;
+            if (s == BB_RET_SRC_V0 + 4 && r == 0) want = 77;
+            if (s == BB_RET_SRC_LICKS  && r == 0) want = 31;
+            if (bb_engine_ret_send_get(s, r) != want) sdiff++;
+        }
+    }
+    for (int x = 0; x < BB_NRET; x++) {
+        for (int y = 0; y < BB_NRET; y++) {
+            int want = 0;
+            if (x == 1 && y == 3) want = 256;
+            if (x == 3 && y == 3) want = 200;
+            if (x == 5 && y == 1) want = 33;
+            if (bb_engine_ret_link_get(x, y) != want) ldiff++;
+        }
+    }
+    test_expect(sdiff == 0,
+                "all %d send cells survive a session round-trip",
+                BB_RET_NSRC * BB_NRET);
+    test_expect(ldiff == 0,
+                "all %d link cells survive a session round-trip",
+                BB_NRET * BB_NRET);
+    test_expect(atomic_load(&bb.layer[4].send) == 77 &&
+                atomic_load(&bb.smp_send) == 31,
+                "the aliased send cells land on the legacy storage");
+
+    /* ---- a session written before the return bus existed --------------
+     * This is the case every existing session on disk is in: no ret, rsend,
+     * rlink or rname lines at all. It must load to a graph that reproduces
+     * the old audio exactly -- slot 0 a CHAMBER carrying the verb line's
+     * values, everything else empty, matrix zero. Binary mode so the bytes
+     * are the same on every platform, like the v3 and v6 fixtures above. */
+    f = bb_fopen(bb_config_path(), "wb");
+    if (f) {
+        fputs("version 7\n"
+              "rate 22050\n"
+              "gain 180\n"
+              "verb 11 22 33 44\n"
+              "layer 0 on 1 mode 2 seq 0\n"
+              "expr 0 t*p0\n", f);
+        fclose(f);
+    }
+    test_expect(f != NULL, "a pre-return-bus session fixture can be written");
+    ret_scene(8000);
+    test_expect(bb_config_load() == 1, "a pre-return-bus session still loads");
+    test_expect(bb_engine_ret_type_get(0) == RET_CHAMBER &&
+                bb_engine_ret_level_get(0) == 33 &&
+                bb_engine_ret_param_get(0, 0) == 11 &&
+                bb_engine_ret_param_get(0, 1) == 22 &&
+                atomic_load(&bb.smp_send) == 44,
+                "an old session's verb line still lands on slot 0");
+    int old_empty = 0, old_graph = 0;
+    for (int r = 1; r < BB_NRET; r++) old_empty += bb_engine_ret_type_get(r) == RET_NONE;
+    for (int s = 0; s < BB_RET_NSRC; s++)
+        for (int r = 0; r < BB_NRET; r++)
+            old_graph += bb_engine_ret_send_get(s, r) != 0;
+    for (int x = 0; x < BB_NRET; x++)
+        for (int y = 0; y < BB_NRET; y++)
+            old_graph += bb_engine_ret_link_get(x, y) != 0;
+    /* The graph is not EMPTY, and it must not be: the old `verb` line's fourth
+     * field is the sampler bus send, and the assertion directly above this one
+     * requires it to survive as 44. The loader mirrors it into the matrix as
+     * SRC_SMP -> slot 0, which is the only way a pre-return-bus session still
+     * sounds the same -- bb.smp_send is no longer read by the render loop at
+     * all (it is written on load, written on save, and cleared on defaults),
+     * so the matrix is the single source of truth and there is no double
+     * count. Expecting a literally empty graph contradicted the line above it.
+     *
+     * What actually matters is that the migration invents nothing else: one
+     * entry, from the sampler row, into slot 0, carrying exactly the value the
+     * old file held. */
+    const int smp_row = bb_engine_ret_send_get(BB_RET_SRC_LICKS, 0);
+    test_expect(old_empty == BB_NRET - 1 && old_graph == 1 && smp_row == 44,
+                "an old session opens with one CHAMBER and only its sampler send");
+
+    /* ---- a session written by a NEWER build ----------------------------
+     * Effect ids 5..9 are reserved. A slot carrying one of them was written
+     * by a build that has an effect this one does not, and the only safe
+     * behaviour is to render it as silence and write the number back out
+     * untouched -- clamping it would silently rewrite somebody's patch, and
+     * indexing a dispatch table with it would be a jump into nowhere. */
+    f = bb_fopen(bb_config_path(), "wb");
+    if (f) {
+        fputs("version 7\n"
+              "rate 8000\n"
+              "verb 172 96 0 0\n"
+              "ret 2 47 100 0 0 11 12 13 14 15 16 17 18\n"
+              "rsend 9 2 255\n", f);
+        fclose(f);
+    }
+    test_expect(f != NULL, "a newer-build session fixture can be written");
+    ret_scene(8000);
+    test_expect(bb_config_load() == 1, "a session from a newer build loads");
+    test_expect(bb_engine_ret_type_get(2) == 47,
+                "an unknown effect id is preserved, not clamped");
+    /* and it is silent WITH A SIGNAL POINTED AT IT -- the fixture opens the
+     * DRY row into slot 2, so this is the dispatch's `default: return 0`
+     * being exercised, not just an absence of input. */
+    ret_voice(0, "t*p0", 37, 256);
+    ret_render(2048);
+    ret_peak(2);
+    ret_render(2048);
+    test_expect(ret_peak(2) == 0, "an unknown effect id renders as silence");
+    atomic_store(&bb.layer[0].on, 0);
+    test_expect(bb_config_save() == 0, "a session with an unknown id saves");
+    int saw_unknown = 0;
+    f = bb_fopen(bb_config_path(), "r");
+    if (f) {
+        char line[1200];
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "ret 2 47 ", 9)) saw_unknown = 1;
+        fclose(f);
+    }
+    test_expect(saw_unknown,
+                "an unknown effect id survives load and save unchanged");
+
+    /* ---- CRLF, for the same reason the arrangement has a CRLF test ----- */
+    f = bb_fopen(bb_config_path(), "wb");
+    if (f) {
+        fputs("version 7\r\n"
+              "rate 8000\r\n"
+              "verb 172 96 0 0\r\n"
+              "ret 1 2 190 0 3 5 6 7 8 9 10 11 12\r\n"
+              "rsend 9 1 240\r\n"
+              "rlink 1 1 128\r\n"
+              "rname 1 9:cold organ\r\n", f);
+        fclose(f);
+    }
+    test_expect(f != NULL, "a CRLF return-bus fixture can be written");
+    ret_scene(8000);
+    test_expect(bb_config_load() == 1, "a CRLF return-bus session loads");
+    test_expect(bb_engine_ret_type_get(1) == RET_DELAY &&
+                bb_engine_ret_level_get(1) == 190 &&
+                bb_engine_ret_sync_get(1) == 3 &&
+                bb_engine_ret_param_get(1, 0) == 5,
+                "return fields survive CRLF line endings");
+    test_expect(bb_engine_ret_send_get(BB_RET_SRC_DRY, 1) == 240 &&
+                bb_engine_ret_link_get(1, 1) == 128,
+                "the matrix survives CRLF line endings");
+    test_expect(!strcmp(bb_ret_name[1], "cold organ"),
+                "a return name read from a CRLF session carries no stray "
+                "carriage return");
+
+    bb_remove(bb_config_path());
+    tmp_dir_remove(root);
+
+    ret_scene(8000);
+    bb_engine_set_defaults();
+    bb_engine_reclaim();
+}
+
+#endif /* BB_NRET */
+
+static void test_return_bus(void)
+{
+    test_chamber_golden();
+#if defined(BB_NRET)
+    test_ret_defaults();
+    test_ret_lifecycle();
+    test_ret_bypass();
+    test_ret_types();
+    test_ret_routing();
+#if RET_HAVE_DELAY
+    test_ret_feedback();
+#endif
+    test_ret_session();
+
+    /* leave the engine the way an empty session would */
+    bb_engine_set_defaults();
+    bb_engine_init(44100);
+    bb_engine_reclaim();
+#endif
+}
+
 
 static int self_test_mode(void)
 {
@@ -1381,12 +2486,19 @@ static int self_test_mode(void)
     test_port_paths();
     test_arr_transport_and_rec_src();
 
+    /* The return bus is counted separately again, and for the same reason:
+     * the golden CHAMBER hash inside it is the one check whose whole job is
+     * to notice a change nobody meant to make, so it must never be able to
+     * hide inside a total that moved for an unrelated reason. */
+    int port = test_checks - historical;
+    test_return_bus();
+
     if (test_failures) {
         fprintf(stderr, "%d of %d checks failed\n", test_failures, test_checks);
         return 1;
     }
-    printf("%d historical checks, %d port checks\n",
-           historical, test_checks - historical);
+    printf("%d historical checks, %d port checks, %d return-bus checks\n",
+           historical, port, test_checks - historical - port);
     printf("all %d checks passed (%d sources, session v3/v4)\n",
            test_checks, rack_nsrc());
     return 0;

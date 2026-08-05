@@ -1,7 +1,8 @@
 /* FieldManual.h -- the full-window field manual overlay (spec section 14).
  *
- * Opaque #080807 sheet: 64px stencil header, 2-column grid of 12 zone
- * cards, GOLDEN RULES + KEY REFERENCE right column (400), 26px footer.
+ * Opaque MANUAL_BG sheet: 64px stencil header, 2-column grid of zone cards
+ * (one per zone of the console, EXHUME and PLATE included), GOLDEN RULES +
+ * KEY REFERENCE right column (400), 26px footer.
  * Toggled by '?' / F1 / the transport ? plate; ESC dismisses (handled in
  * Main). Static content, no animation. Swallows all mouse input; any
  * click dismisses.

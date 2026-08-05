@@ -1,17 +1,31 @@
-/* HwSyncPanel.h -- HW / SYNC: MIDI in, CC routing (spec section 12,
- * serial N.72-0424, LIVE input; CC matrix + clock are R8 PLANNED).
+/* HwSyncPanel.h -- HW / SYNC: MIDI input (spec section 12, serial N.72-0424).
  *
- * Live: device open/start/stop, notes -> bb_engine_note_on/off of the
- * focused voice, CC -> bb_engine_cc (engine maps CC to p0). The focused
- * voice is supplied by Main via focusProvider (RACK owns focus).
+ * Everything on this panel is live. What it does, exactly:
+ *   note on  -> bb_engine_note_on  (focused voice, RACK owns focus)
+ *   note off -> bb_engine_note_off (focused voice)
+ *   CC 1     -> bb_engine_cc       (mod wheel, scaled 0-127 -> 0-255, into p0
+ *                                   of the focused voice; engine.c:954 drops
+ *                                   every other controller on purpose)
  *
- * Layout (spec section 12, HTML frame "08 HW SYNC"):
+ * WHAT WAS REMOVED IN THE LEGIBILITY PASS, and why it is not coming back as
+ * a greyed-out version of itself:
+ *   - the 10x14 CC MATRIX. 140 intersections of which exactly one was ever
+ *     filled, eight of ten source cells blank, nine of ten value gutters
+ *     drawing an empty bar and no number. It was not clickable -- this panel
+ *     has no mouseDown -- so it was a large expensive-looking grid carrying
+ *     one number. That one number is now a readable row.
+ *   - CLK IN / CLK OUT / MIDI OUT plates. Painted in the ordinary idle plate
+ *     style, wired to nothing. Nothing in the engine reads MIDI clock.
+ *   - "FOOTSWITCH -> ARM" / "24 PPQN" footnotes, describing that clock.
+ *   - "RIGHT-CLICK ANY KNOB -> LEARN - SAVED IN SESSION". Both halves false:
+ *     EngravedKnob::onLearnRequest has no subscriber anywhere in the app and
+ *     there is no learn state to save.
+ *
+ * Layout:
  *   header band 24
- *   row 1 (104): left INPUT DEVICE combo + 90x26 ENABLE, telemetry line;
- *                right 340 CLOCK/OUT block (R8 PLANNED, painted)
- *   row 2 (flex): 20px label row, 24px matrix header, 10 equal-flex rows.
- * Only the CC 001 -> p0 mapping is live today; every other matrix cell is
- * drawn in the exact unmapped state. Right-click learn is R8 (not built).
+ *   INPUT block  -- device combo + ENABLE plate, live link state, telemetry
+ *   ROUTING      -- what MIDI does here, in full-size type, and the live p0
+ *                   value of the focused voice with a real bar behind it.
  */
 
 #pragma once

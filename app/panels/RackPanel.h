@@ -8,6 +8,19 @@
  * Geometry per spec section 5 / HTML frame "01 RACK":
  *   header band 24 | voice strip 46 | SOURCE column 222 |
  *   expression 20+122 | p0-p7 20+knob row | POST 420 wide | sequencer flex.
+ *
+ * ---- p0-p7: no knob without a parameter behind it ----------------------
+ * A p-knob only reaches the sound when the COMPILED PROGRAM reads that
+ * parameter (Program::used_p). For every other slot, turning the knob
+ * stores a number nothing ever loads. Those slots therefore do not get a
+ * knob at all: the child is hidden and paint() draws the slot as an empty
+ * recess carrying its own identifier ("p5 / NOT IN EXPRESSION").
+ *
+ * The slot RECT is kept, not the control. Hiding the whole slot would
+ * reshuffle eight positions every time the expression is recompiled, and
+ * these knobs are identified by position -- p3 is "the fourth one". So the
+ * grid never moves; only its contents appear and disappear, and the moment
+ * an edited expression mentions p5 the knob is back in the same place.
  */
 
 #pragma once
@@ -81,6 +94,8 @@ private:
 
     int layer = 0;
     int lockView = 0;                       // viewed lock lane, 0-based
+    unsigned paramUsed = 0;                 // Program::used_p mirror; drives
+                                            //   which p-slots carry a knob
 
     /* per-layer macro state: knob positions + the base they scale around */
     struct Macro
@@ -118,6 +133,7 @@ private:
                          rcParamHead, rcParamArea,
                          rcPostCol, rcPostHead, rcPostFoot,
                          rcSeqHead, rcLockFoot;
+    juce::Rectangle<int> rcParamSlot[BB_NPARAM];   // one per p-knob position
 };
 
 } // namespace morgue

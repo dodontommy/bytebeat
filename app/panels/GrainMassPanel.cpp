@@ -1,10 +1,23 @@
 /* GrainMassPanel.cpp -- see GrainMassPanel.h.
  *
- * Pixel pass per spec section 8 + HTML frame "04 GRAIN MASS". All
- * SamplerVoice wiring preserved: double-click (or file drop) loads via the
- * async chooser, PLAY/STOP/R/O plates and the PITCH knob write straight to
- * the voice, keys 1-4/P/A/Z/R/O act on the selected well. The waveform is
- * the real decoded file (peaks computed once at load); nothing is faked. */
+ * Spec section 8 + HTML frame "04 GRAIN MASS". All SamplerVoice wiring
+ * preserved: double-click (or file drop) loads via the async chooser,
+ * PLAY/STOP/R/O plates and the PITCH knob write straight to the voice, keys
+ * 1-4/P/A/Z/R/O act on the selected well. The waveform is the real decoded
+ * file (peaks computed once at load); nothing is faked.
+ *
+ * LEGIBILITY PASS. Removed: the GRAIN and ERASE "knobs". They were a paint
+ * lambda -- a CONTROL circle, a dead ring and a pointer frozen at -135
+ * degrees -- called twice per well, so the panel carried eight knob faces
+ * that were not components, had no hit test, and could never move. Their
+ * caption ("GRAIN/ERASE: PLANNED", 7px OXIDE) sat 70px to the right of them.
+ * Also removed: the footer's "VISION: SLICING - TAPE ERASER - CROSS-MOD WITH
+ * VOICES", three features that do not exist drawn as a status line.
+ *
+ * Added instead: each well states its own state as a WORD (EMPTY / LOADED /
+ * PLAYING) beside its lamp, an empty well says how to fill it in the middle
+ * of the empty space, and the selected well carries a full EDGE frame -- it
+ * is where every key press lands, so it needs the strongest cue here. */
 
 #include "GrainMassPanel.h"
 #include "AudioEngine.h"
@@ -221,7 +234,7 @@ public:
     void resized() override
     {
         auto b = getLocalBounds();
-        b.removeFromTop (22);                                // header
+        b.removeFromTop (24);                                // header
         auto ctl = b.removeFromBottom (56);                  // control row
         const int by = ctl.getY() + 16;                      // 24 tall, centred in 56
         play .setBounds (8,   by, 44, 24);
@@ -242,46 +255,63 @@ public:
         g.setColour (C::PANEL);
         g.fillRect (b);
 
-        /* ---- header 22: WELL NN · filename · duration/rate · lamp ------ */
-        Rectangle<int> head = b.removeFromTop (22);
+        /* ---- header 24: WELL NN · filename · duration/rate · STATE ----- */
+        Rectangle<int> head = b.removeFromTop (24);
+        g.setColour (selected ? C::RAISED : C::PANEL_ALT);
+        g.fillRect (head);
         g.setColour (C::HAIRLINE);
         g.fillRect (head.getX(), head.getBottom() - 1, head.getWidth(), 1);
 
-        const juce::Font hf = Type::mono (9.0f, 0.14f);
+        const juce::Font hf = Type::micro();
         g.setFont (hf);
         const juce::String wl = "WELL 0" + juce::String (index + 1);
-        g.setColour (C::INK_FAINT);
-        g.drawText (wl, head.getX() + 8, head.getY(), textW (hf, wl) + 2, 22,
-                    Justification::centredLeft);
+        g.setColour (selected ? C::INK_DIM : C::INK_FAINT);
+        g.drawText (wl, head.getX() + 8, head.getY(), textW (hf, wl) + 2,
+                    head.getHeight(), Justification::centredLeft);
 
-        const int lampX = head.getRight() - 8 - 5;
-        g.setColour (sounding ? C::BLOOD_HOT : C::LAMP_DEAD);
-        g.fillRect (lampX, head.getY() + 8, 5, 5);           // 5px playing lamp
+        /* STATE, as a word AND a lamp. Colour alone would not survive
+         * greyscale (Theme.h colour-blind rule), and the old header conveyed
+         * the whole of a well's state through one 5px square. The lamp triple
+         * is the documented monotonic luminance ladder. */
+        const juce::String stateWord = sounding ? "PLAYING" : has ? "LOADED" : "EMPTY";
+        const juce::Colour stateInk  = sounding ? C::BLOOD_HOT
+                                     : has      ? C::INK_DIM
+                                                : C::INK_FAINT;
+        const juce::Colour lampCol   = sounding ? C::BLOOD_HOT
+                                     : has      ? C::LAMP_SOUNDING
+                                                : C::LAMP_DEAD;
+        const int lampX = head.getRight() - 8 - 6;
+        g.setColour (lampCol);
+        g.fillRect (lampX, head.getCentreY() - 3, 6, 6);
 
-        /* header meta: duration/rate when loaded, the load hint when empty
-         * (HTML frame 04 empty well: meta 'DOUBLE-CLICK TO LOAD') */
-        int metaR = lampX - 8;
+        const juce::Font sf = Type::micro();
+        const int sw = textW (sf, stateWord) + 2;
+        g.setFont (sf);
+        g.setColour (stateInk);
+        g.drawText (stateWord, lampX - 6 - sw, head.getY(), sw, head.getHeight(),
+                    Justification::centredRight);
+
+        /* header meta: duration/rate when loaded. An empty well says EMPTY in
+         * the state slot and says how to fill it in the plot, so it does not
+         * need a third notice here. */
+        int metaR = lampX - 6 - sw - 10;
+        if (has && metaText.isNotEmpty())
         {
-            const juce::String meta = has ? metaText
-                                          : juce::String ("DOUBLE-CLICK TO LOAD");
-            if (meta.isNotEmpty())
-            {
-                const juce::Font mf = Type::mono (8.0f, 0.10f);
-                g.setFont (mf);
-                g.setColour (C::INK_FAINT);
-                const int mw = textW (mf, meta) + 2;
-                g.drawText (meta, metaR - mw, head.getY(), mw, 22,
-                            Justification::centredRight);
-                metaR -= mw + 8;
-            }
+            const juce::Font mf = Type::nano();
+            g.setFont (mf);
+            g.setColour (C::INK_FAINT);
+            const int mw = textW (mf, metaText) + 2;
+            g.drawText (metaText, metaR - mw, head.getY(), mw, head.getHeight(),
+                        Justification::centredRight);
+            metaR -= mw + 8;
         }
 
-        g.setFont (hf);
-        g.setColour (has ? (selected ? C::INK : C::INK_DIM) : C::INK_GHOST);
-        const int nameX = head.getX() + 8 + textW (hf, wl) + 8;
+        g.setFont (Type::monoMedium (10.0f, 0.04f));
+        g.setColour (has ? (selected ? C::INK : C::INK_DIM) : C::INK_FAINT);
+        const int nameX = head.getX() + 8 + textW (hf, wl) + 10;
         g.drawText (has ? v->getName() : U8 ("\xe2\x80\x94 EMPTY \xe2\x80\x94"),
-                    nameX, head.getY(), juce::jmax (0, metaR - nameX), 22,
-                    Justification::centredLeft, true);
+                    nameX, head.getY(), juce::jmax (0, metaR - nameX),
+                    head.getHeight(), Justification::centredLeft, true);
 
         /* ---- control row 56 (children live here; chrome painted now) --- */
         Rectangle<int> ctl = b.removeFromBottom (56);
@@ -293,47 +323,33 @@ public:
 
         // PITCH + LEVEL labels (live) under the knobs the children paint
         g.setColour (C::INK_DIM);
-        g.setFont (Type::mono (7.0f, 0.10f));
-        g.drawText ("PITCH", ctl.getX() + 186, ctl.getY() + 40, 32, 9,
+        g.setFont (Type::nano());
+        g.drawText ("PITCH", ctl.getX() + 186, ctl.getY() + 40, 32, Type::rowH (8.0f),
                     Justification::centred);
-        g.drawText ("LEVEL", ctl.getX() + 228, ctl.getY() + 40, 32, 9,
+        g.drawText ("LEVEL", ctl.getX() + 228, ctl.getY() + 40, 32, Type::rowH (8.0f),
                     Justification::centred);
 
-        // GRAIN + ERASE: drawn disabled exactly per spec section 8 --
-        // ring #2a2927, cut #4a4842, label #4a4842, pointer at -135 deg.
-        auto deadKnob = [&g, &ctl] (int x, const juce::String& label)
-        {
-            Rectangle<int> face (ctl.getX() + x, ctl.getY() + 6, 32, 32);
-            g.setColour (C::CONTROL);
-            g.fillEllipse (face.toFloat());
-            g.setColour (C::LAMP_DEAD);
-            g.drawEllipse (face.toFloat().reduced (0.5f), 1.0f);
+        /* The GRAIN and ERASE knobs are gone. They were never components --
+         * a paint lambda drew a CONTROL circle, a dead ring and a pointer
+         * frozen at -135 degrees, twice per well, eight fake knobs on the
+         * panel, with a 7px "GRAIN/ERASE: PLANNED" caption stranded 70px away
+         * from them. A knob that cannot be turned is not a control, and the
+         * space is better spent on the readout that is real. */
 
-            const float ang = juce::degreesToRadians (-135.0f);
-            const float cx = (float) face.getCentreX(), cy = (float) face.getCentreY();
-            const float dx = std::sin (ang), dy = -std::cos (ang);
-            g.setColour (C::LAMP_SOUNDING);
-            g.drawLine (cx + dx * 2.0f,  cy + dy * 2.0f,
-                        cx + dx * 13.0f, cy + dy * 13.0f, 1.0f);
-
-            g.setFont (Type::mono (7.0f, 0.10f));
-            g.drawText (label, face.getX(), face.getBottom() + 2, 32, 9,
-                        Justification::centred);
-        };
-        deadKnob (270, "GRAIN");
-        deadKnob (312, "ERASE");
-
-        // right column: rate readout + PLANNED note, 7px, right-aligned
+        // RATE: the live playback rate of this well, read from the voice
         const float rate = v != nullptr ? v->getRate() : 1.0f;
-        g.setFont (Type::nano (7.0f));
+        Rectangle<int> rateR (ctl.getX() + 270, ctl.getY() + 12,
+                              juce::jmax (0, ctl.getWidth() - 270 - 8), 16);
+        g.setFont (Type::micro());
         g.setColour (C::INK_FAINT);
-        g.drawText ("RATE " + juce::String (rate, 2) + "X",
-                    ctl.getX() + 344, ctl.getY() + 18, ctl.getWidth() - 344 - 8, 9,
-                    Justification::centredRight);
-        g.setColour (C::OXIDE);
-        g.drawText ("GRAIN/ERASE: PLANNED",
-                    ctl.getX() + 344, ctl.getY() + 29, ctl.getWidth() - 344 - 8, 9,
-                    Justification::centredRight);
+        g.drawText ("RATE", rateR, Justification::centredLeft);
+        g.setFont (Type::monoMedium (13.0f, 0.04f));
+        g.setColour (has ? C::INK : C::INK_GHOST);
+        g.drawText (juce::String (rate, 2) + U8 ("\xc3\x97"),
+                    rateR.withTrimmedLeft (44), Justification::centredLeft);
+        g.setFont (Type::nano());
+        g.setColour (C::INK_FAINT);
+        g.drawText ("A / Z", rateR.translated (0, 18), Justification::centredLeft);
 
         /* ---- waveform area: SOCKET, 8px margin, HAIRLINE_DIM border ---- */
         Rectangle<int> plot = b.reduced (8);
@@ -378,13 +394,32 @@ public:
             }
         }
 
+        /* An empty well must say so, in the middle of the space it is empty
+         * in -- not in a 7px corner note in the palette's dimmest ink, which
+         * is where this used to live. */
         if (! has)
         {
-            g.setColour (C::INK_GHOST);                      // 7px corner hint
-            g.setFont (Type::mono (7.0f, 0.12f));
-            g.drawText ("WAV / AIFF / MP3 / OGG / FLAC",
-                        plot.getX() + 6, plot.getY() + 4, plot.getWidth() - 12, 9,
-                        Justification::centredLeft);
+            Rectangle<int> mid = inner.withSizeKeepingCentre (
+                inner.getWidth(), Type::rowH (10.0f) + Type::rowH (8.0f) + 4);
+            g.setColour (C::INK_FAINT);
+            g.setFont (Type::label());
+            g.drawText ("DOUBLE-CLICK OR DROP A FILE",
+                        mid.removeFromTop (Type::rowH (10.0f)), Justification::centred);
+            mid.removeFromTop (4);
+            g.setColour (C::INK_GHOST);
+            g.setFont (Type::nano());
+            g.drawText (U8 ("WAV \xc2\xb7 AIFF \xc2\xb7 MP3 \xc2\xb7 OGG \xc2\xb7 FLAC"),
+                        mid, Justification::centred);
+        }
+
+        /* Selection frame, drawn last so it sits over the plot edge. The
+         * selected well is where every key press lands, so it gets the
+         * strongest structural cue on the panel: a full EDGE border (3.37:1)
+         * against the HAIRLINE gaps the grid is otherwise made of. */
+        if (selected)
+        {
+            g.setColour (C::EDGE);
+            g.drawRect (getLocalBounds(), 1);
         }
     }
 
@@ -521,6 +556,7 @@ void GrainMassPanel::select (int w)
         wells[(size_t) slot]->setSelected (false);
         slot = w;
         wells[(size_t) slot]->setSelected (true);
+        repaint();                  // the footer names the selected well
     }
     if (! hasKeyboardFocus (true))
     {
@@ -634,7 +670,7 @@ void GrainMassPanel::paint (juce::Graphics& g)
     g.setColour (C::HAIRLINE);
     g.fillRect (foot.getX(), foot.getY(), foot.getWidth(), 1);
 
-    const juce::Font ff = Type::mono (8.0f, 0.12f);
+    const juce::Font ff = Type::micro();
     g.setFont (ff);
     g.setColour (C::INK_FAINT);
     const juce::String mixNote = U8 ("PLAY ALL FIRES ON THE NEXT BAR");
@@ -642,11 +678,17 @@ void GrainMassPanel::paint (juce::Graphics& g)
     g.drawText (mixNote, fx, foot.getY(), textW (ff, mixNote) + 2, foot.getHeight(),
                 Justification::centredLeft);
     fx += textW (ff, mixNote) + 14;
-    g.drawText (U8 ("A / Z = PITCH \xc2\xb7 R = REVERSE \xc2\xb7 O = LOOP"),
+    g.drawText (U8 ("P = PLAY \xc2\xb7 R = REVERSE \xc2\xb7 O = LOOP \xc2\xb7 A / Z = PITCH"),
                 fx, foot.getY(), foot.getWidth(), foot.getHeight(),
                 Justification::centredLeft);
-    g.setColour (C::OXIDE);
-    g.drawText (U8 ("VISION: SLICING \xc2\xb7 TAPE ERASER \xc2\xb7 CROSS-MOD WITH VOICES"),
+
+    /* The old right slot carried "VISION: SLICING - TAPE ERASER - CROSS-MOD
+     * WITH VOICES" in OXIDE: three features that do not exist, drawn as a
+     * status line on the instrument's face. What belongs in that slot is the
+     * one thing the player needs to know before pressing a key -- which well
+     * the keys are going to act on. */
+    g.setColour (C::INK_DIM);
+    g.drawText ("KEYS ACT ON WELL 0" + juce::String (slot + 1),
                 foot.reduced (10, 0), Justification::centredRight);
 }
 

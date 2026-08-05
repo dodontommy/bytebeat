@@ -50,6 +50,7 @@ struct bb_state bb;
 char bb_expr[BB_NLAYER][BB_EXPR_MAX];
 Rack bb_rack[BB_NLAYER];
 int  bb_custom[BB_NLAYER];
+char bb_ret_name[BB_NRET][BB_RET_NAME];
 
 volatile sig_atomic_t bb_quit_signal;
 
@@ -145,7 +146,7 @@ static void free_all_programs(void)
 int bb_engine_publish(int layer, const char *src, ExprError *err)
 { return bb_publish(layer, src, err); }
 
-void bb_engine_reclaim(void) { bb_reclaim(); bb_engine_sampler_reclaim(); arr_clip_reclaim(); arr_song_reclaim(); }
+void bb_engine_reclaim(void) { bb_reclaim(); bb_engine_sampler_reclaim(); arr_clip_reclaim(); arr_song_reclaim(); bb_engine_ret_service(); }
 
 void bb_engine_shutdown(void) { free_all_programs(); free_all_sampler_data(); free_all_arr_clips(); free_all_arr_songs(); }
 
@@ -507,6 +508,13 @@ static int32_t   g_hit_age[BB_NLAYER];
 static int32_t   g_hit_vel[BB_NLAYER];
 static int32_t   g_lvl[BB_NLAYER];       /* smoothed mix level, Q16    */
 
+/* The master gain ramp. File scope rather than a static inside
+ * bb_engine_render(), which is where it used to live, purely so that
+ * bb_engine_init() can reach it: see the ramp-settling block there. Its
+ * lifetime and its ownership are unchanged -- audio thread, one instance,
+ * survives a device change -- and the render loop still drives it. */
+static int32_t   g_gain_cur;
+
 /* Step sampler playback state -- audio thread only (see below). */
 static const SmpBuf *g_smp_cur[BB_SAMPLER]; /* last published buf seen   */
 static int16_t  *g_smp_ds[BB_SAMPLER];   /* snapshot of the sample ptr   */
@@ -560,68 +568,89 @@ static int32_t   g_loop_wet;              /* Q16 click-free crossfade */
 static int       g_loop_state;
 static int       g_loop_last_slice = 1;
 
-/* ---- RETURN A: the CHAMBER ----------------------------------------------
- * A mono Freeverb-shaped reverb in integer arithmetic: eight parallel
- * feedback combs, each with a one-pole damping filter inside the loop (so
- * every reflection is darker than the last -- same reasoning as SPACE's
- * filter-in-the-loop), then four serial allpasses to smear the combs'
- * metallic bus into a wash. All state static, all math int32/int64: the
- * render thread never touches the allocator.
+/* ---- THE RETURN BUS -------------------------------------------------------
+ * RETURN A -- the CHAMBER -- is now slot 0 of an eight-slot return bus. The
+ * reverb itself did not move an instruction: ret.c holds the identical comb
+ * and allpass loops, reindexed off a carved block instead of five file
+ * statics, and slot 0's SIZE / DARK / LEVEL and send column are still
+ * bb.verb_size / verb_tone / verb_level and bb.layer[].send / bb.smp_send.
+ * See the comment on `Return` in bytebeat.h for why the alias is
+ * unconditional and why there is no shadow copy of it anywhere.
  *
- * Comb/allpass lengths are the classic 44.1k tunings scaled to the actual
- * rate once per period. Buffers are sized for the longest comb at 96kHz. */
-#define VERB_NCOMB  8
-#define VERB_NAP    4
-#define VERB_CSIZE  4096         /* > 1617 * 96000/44100 = 3520 */
-#define VERB_ASIZE  2048         /* >  556 * 96000/44100 = 1210 */
-static const int VERB_CTUNE[VERB_NCOMB] =
-    { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };
-static const int VERB_ATUNE[VERB_NAP] = { 556, 441, 341, 225 };
+ * These two forwarders exist so the chamber block in the regression suite
+ * compiles and passes UNEDITED, with its hard-coded fb 28880, damp 14848 and
+ * line lengths. If that block ever needs new numbers, the chamber's
+ * arithmetic moved and the whole bit-exactness argument is already broken --
+ * stop and bisect rather than adjusting the test. */
+static void verb_reset(void) { ret_chamber_reset(0); }
 
-static int32_t  g_vcomb[VERB_NCOMB][VERB_CSIZE];
-static int32_t  g_vap[VERB_NAP][VERB_ASIZE];
-static int32_t  g_vdamp[VERB_NCOMB];    /* per-comb damping filter state */
-static uint32_t g_vcpos[VERB_NCOMB];
-static uint32_t g_vapos[VERB_NAP];
-
-static void verb_reset(void)
-{
-    memset(g_vcomb, 0, sizeof g_vcomb);
-    memset(g_vap,   0, sizeof g_vap);
-    memset(g_vdamp, 0, sizeof g_vdamp);
-    memset(g_vcpos, 0, sizeof g_vcpos);
-    memset(g_vapos, 0, sizeof g_vapos);
-}
-
-/* One frame in, one wet frame out. fb/damp are Q15; clen/alen are the
- * rate-scaled line lengths for this period. */
 static int32_t verb_process(int32_t in, int32_t fb, int32_t damp,
                             const int *clen, const int *alen)
 {
-    int32_t out = 0;
-    in >>= 2;                    /* headroom: eight combs sum below */
-
-    for (int c = 0; c < VERB_NCOMB; c++) {
-        uint32_t p = g_vcpos[c];
-        int32_t  y = g_vcomb[c][p];
-        g_vdamp[c] += (int32_t)(((int64_t)(y - g_vdamp[c]) * damp) >> 15);
-        g_vcomb[c][p] = in + (int32_t)(((int64_t)g_vdamp[c] * fb) >> 15);
-        if (++p >= (uint32_t)clen[c]) p = 0;
-        g_vcpos[c] = p;
-        out += y;
-    }
-    out >>= 3;                   /* back to unit-ish gain */
-
-    for (int a = 0; a < VERB_NAP; a++) {
-        uint32_t p = g_vapos[a];
-        int32_t  b = g_vap[a][p];
-        g_vap[a][p] = out + (b >> 1);
-        out = b - out;
-        if (++p >= (uint32_t)alen[a]) p = 0;
-        g_vapos[a] = p;
-    }
-    return out;
+    return ret_chamber_process(0, in, fb, damp, clen, alen);
 }
+
+/* ---- the bus's own state, audio thread only ------------------------------
+ * The effects' state lives in ret.c. What lives here is everything the GRAPH
+ * needs: the one-sample delay that makes every link edge well defined, the
+ * create/destroy fade, the safety stage, and the meters.
+ *
+ * g_ret_prev[] is the z^-1 on every return->return edge. It is what turns a
+ * cycle from an algebraic loop into a difference equation, so the slots may
+ * be walked in any order and the slot NUMBER never reaches the ears. */
+static int32_t g_ret_prev[BB_NRET];   /* previous frame's raw output, z^-1   */
+static int32_t g_ret_cur [BB_NRET];   /* this frame's, before the copy back  */
+static int32_t g_ret_wprev;           /* previous frame's summed wet bus     */
+static int32_t g_ret_fade[BB_NRET];   /* Q16 create/destroy ramp             */
+static int32_t g_ret_pk  [BB_NRET];   /* post-level abs peak this period     */
+
+/* The safety stage. Armed per slot, and STICKY: once a slot has ever had an
+ * incoming feedback edge it keeps its DC blocker and limiter until its type
+ * changes. A non-sticky rule would engage and disengage a filter every time a
+ * link knob crossed zero, which is a real, small, audible discontinuity
+ * mid-performance that would be reported as a bug. Sticky costs one bit and
+ * removes it entirely.
+ *
+ * It stays EXACTLY FALSE for a legacy session: a chamber fed only by voice
+ * sends has never had an incoming link, so nothing is armed, not one extra
+ * arithmetic operation runs, and the golden hash is safe. */
+static int     g_ret_sticky[BB_NRET];
+static DcState g_ret_dc[BB_NRET];     /* the ~4Hz highpass, ret.h/dsp.c      */
+static int32_t g_ret_lg[BB_NRET];     /* per-return limiter gain, Q16        */
+static int32_t g_ret_buslg;           /* the summed-wet limiter's gain, Q16  */
+
+/* THE SUMMED WET BUS GETS ITS OWN DC BLOCKER, AND IT IS THE LAST THING IN THE
+ * CHAIN ON PURPOSE.
+ *
+ * The per-return safety stage ends in an unconditional clamp to the return
+ * ceiling, and it has to: the bound on the whole feedback graph is that clamp,
+ * and a filter is not allowed to be the last word on amplitude. But a clamp on
+ * an asymmetric waveform MANUFACTURES DC -- which is the one thing the per-slot
+ * blocker cannot clean up, because it ran a line earlier. A pinned loop is
+ * exactly the case where the clamp fires on every sample, so exactly the case
+ * where it manufactures the most: measured, a self-linked delay held at the
+ * ceiling parked the master a couple of thousand counts off centre, inaudible
+ * and permanent, while every peak assertion in the suite stayed green.
+ *
+ * So the summed bus is blocked after everything that clamps it. Armed by the
+ * same bus_hot flag as the wet limiter, so a session with no feedback anywhere
+ * never executes it and the CHAMBER's golden hash is untouched. */
+static DcState g_ret_busdc;
+
+/* ---- create / destroy: the quiesce handshake -----------------------------
+ * The arenas are statically allocated and never move, so there is nothing to
+ * pointer-swap: the correct primitive is an epoch-gated quiesce, not an
+ * atomic exchange. Fade the slot's output to zero, wait for the render thread
+ * to report it stopped running the effect, wait two more render epochs -- the
+ * same proof bb_reclaim() uses -- and only then clear the arena and arm the
+ * new type. Knob changes never come near this path. */
+enum { RQ_IDLE = 0, RQ_FADE, RQ_WAIT, RQ_SWAP };
+static struct {
+    int st, want;
+    unsigned long long e0;      /* epoch latched on entry to RQ_WAIT        */
+    unsigned long long t0;      /* bb_now_us() when the current state began */
+    unsigned long long ew;      /* epoch when the current state began       */
+} g_ret_req[BB_NRET];
 
 /* Semitone -> playback-rate ratio in Q32; see audio.c's comment (index
  * = semitones + 12, offset 12 is exactly 1<<32). */
@@ -665,7 +694,12 @@ typedef struct {
     int        prob[BB_STEPS];
     int        lock[BB_LOCK_COUNT][BB_STEPS];
     unsigned   motion_mask;
-    int        send;                    /* CHAMBER send, 0..255 */
+    /* NO `send` FIELD, DELIBERATELY. The voice sends are part of the routing
+     * matrix and are read ONCE per period by ret_snapshot(), through the
+     * slot-0 alias. A second read here would let the voice loop and the
+     * routing snapshot see bb.layer[L].send at two different instants and
+     * disagree by one knob step -- which is not a crash, not a warning, and
+     * exactly the kind of thing that breaks a bit-exactness proof silently. */
 } LSnap;
 
 static inline uint32_t seq_rand(int L)
@@ -706,6 +740,192 @@ static int space_samples(int raw, int sync, uint32_t beat_len,
     if (smp < 1) smp = 1;
     if (smp > BB_SPACE_MASK) smp = BB_SPACE_MASK;
     return (int)smp;
+}
+
+/* ---- the routing matrix, snapshotted once per period ----------------------
+ *
+ * Everything the frame loop needs about the graph, resolved into PACKED EDGE
+ * LISTS. Packed rather than scanned, for one reason that matters more than
+ * speed: with a legacy session -- one CHAMBER, no links, no DRY or WET row --
+ * every list but the voice sends is empty and the voice list holds exactly the
+ * terms the old `if (sn->send) verb_in += ...` produced, in the same order.
+ * The legacy path therefore executes the same instruction sequence it always
+ * did, which is what makes the bit-exactness claim inspectable rather than
+ * merely tested.
+ *
+ * A dead slot is not branched over, it is not VISITED: rb.live[] holds only
+ * the slots that run. That is also what preserves verb_level 0 as a bit-exact
+ * bypass rather than a merely silent one -- an absent slot's effect is not
+ * called, so its comb and allpass state does not advance, exactly as
+ * `if (v_level > 0)` used to arrange. */
+typedef struct {
+    int nlive, live[BB_NRET];        /* packed live slots, ascending          */
+    int ran[BB_NRET];                /* per slot: was it run this period      */
+    int bus_hot;                     /* the graph contains feedback at all    */
+
+    /* per-source edge lists; amounts are pre-clamped */
+    int nv[BB_NLAYER];
+    int vr[BB_NLAYER][BB_NRET], va[BB_NLAYER][BB_NRET];   /* voices  0..255 */
+    int nl, lr[BB_NRET], la[BB_NRET];                     /* LICKS   0..255 */
+    int nd, dr[BB_NRET], da[BB_NRET];                     /* DRY     0..255 */
+    int nw, wr[BB_NRET], wa[BB_NRET];                     /* WET     0..255 */
+    int nk, kt[BB_NRET * BB_NRET],                        /* links   0..256 */
+            kf[BB_NRET * BB_NRET],
+            ka[BB_NRET * BB_NRET];
+
+    RetSnap s[BB_NRET];
+} RetBus;
+
+static void ret_snapshot(RetBus *rb, int rate, uint32_t beat_len,
+                         uint32_t bar_len, int panicked)
+{
+    int lvl[BB_NRET];
+
+    rb->nlive   = 0;
+    rb->bus_hot = 0;
+
+    for (int r = 0; r < BB_NRET; r++) {
+        /* acquire on type and arm: the swap side releases them after it has
+         * zeroed the arena, so the cleared memory is visible to the first
+         * ret_run() that sees the new type. */
+        int type = atomic_load_explicit(&bb.ret[r].type, memory_order_acquire);
+        int arm  = atomic_load_explicit(&bb.ret[r].arm,  memory_order_acquire);
+        int mute = atomic_load_explicit(&bb.ret[r].mute, memory_order_relaxed);
+
+        int valid = type > RET_NONE && type < RET_NTYPE;
+        lvl[r] = mute ? 0 : bb_clampi(ret_level_load(r), 0, 256);
+
+        /* `feeds` keeps a slot alive when its LEVEL is down but its output
+         * still reaches something -- a reverb at zero return level driving a
+         * gate is a real patch. `raw_hot` is the safety arming test: does
+         * anything a frame old arrive at this slot. Both are read from the
+         * true matrix even while panicked, so that a held PANIC lets loops
+         * DECAY instead of freezing them for the release. */
+        int feeds = 0, raw_hot = 0;
+        for (int q = 0; q < BB_NRET; q++) {
+            if (atomic_load_explicit(&bb.ret_link[r][q], memory_order_relaxed))
+                feeds = 1;
+            if (atomic_load_explicit(&bb.ret_link[q][r], memory_order_relaxed))
+                raw_hot = 1;
+            if (atomic_load_explicit(&bb.ret_send[BB_RET_SRC_WET][q],
+                                     memory_order_relaxed))
+                feeds = 1;
+        }
+        if (atomic_load_explicit(&bb.ret_send[BB_RET_SRC_WET][r],
+                                 memory_order_relaxed))
+            raw_hot = 1;
+
+        g_ret_sticky[r] |= raw_hot;
+        rb->s[r].hot = g_ret_sticky[r];
+        if (g_ret_sticky[r]) rb->bus_hot = 1;
+
+        /* LIVENESS, and the `lvl > 0` term in it IS the bit-exact bypass. A
+         * non-live slot is absent from rb.live[], so its effect is NOT CALLED
+         * and its comb and allpass state does not advance -- which is exactly
+         * what `if (v_level > 0)` used to arrange, and is why closing the
+         * return is bit-exact rather than merely silent. Mute therefore also
+         * FREEZES a slot's tail, the same semantics verb_level 0 has always
+         * had; that is documented on the mute button.
+         *
+         * The fade term is deliberately gated on `!arm`. The fade exists for
+         * the create/destroy handshake -- it keeps a slot running while its
+         * tail rings out before its type is swapped -- and NOT for the level
+         * knob. Without the gate, a slot sitting at its initial fade of 65536
+         * would be live at level 0 forever: ret_active would over-report, the
+         * effect would run under a zero multiply, and the bypass would stop
+         * being bit-exact in the one way a "does it make sound" test cannot
+         * see. */
+        int run_wanted = arm && (lvl[r] > 0 || feeds);
+        int live = valid && (run_wanted || (!arm && g_ret_fade[r] > 0));
+        rb->ran[r] = live;
+        if (!live) {
+            /* A slot that stops running must stop contributing to the link
+             * matrix too, or its last output sits in g_ret_prev forever and
+             * every link out of it becomes a DC source. */
+            g_ret_prev[r] = 0;
+            g_ret_cur[r]  = 0;
+            /* An EMPTY slot has no tail to fade, so its ramp is snapped to the
+             * target rather than left stale -- otherwise the quiesce handshake
+             * waits forever for a fade that nothing is driving, and create()
+             * on an empty slot never lands.
+             *
+             * A slot that holds a real effect keeps whatever the ramp left it,
+             * which is what gives a freshly created return a genuine fade-in
+             * while a closed CHAMBER, whose fade has never moved off 65536,
+             * re-opens instantly exactly as it always did. */
+            if (!valid) g_ret_fade[r] = arm ? 65536 : 0;
+            continue;
+        }
+        rb->live[rb->nlive++] = r;
+
+        /* IN fields, read through the slot-0 alias -- this is the ONLY place
+         * the render thread reads a return knob. */
+        RetSnap *s = &rb->s[r];
+        s->type  = type;
+        s->level = lvl[r];
+        s->sync  = bb_clampi(atomic_load_explicit(&bb.ret[r].sync,
+                                                  memory_order_relaxed), 0, 10);
+        for (int p = 0; p < BB_RET_NPARAM; p++)
+            s->p[p] = bb_clampi(ret_param_load(r, p), 0, 255);
+
+        ret_period(r, s, rate, beat_len, bar_len);
+
+        /* Bus state, after ret_period so it cannot be clobbered by it. The
+         * level is re-clamped for the same reason: a hand-edited session must
+         * not be able to push a multiply out of range. */
+        s->level    = lvl[r];
+        s->hot      = g_ret_sticky[r];
+        s->fade_tgt = arm ? 65536 : 0;
+    }
+
+    /* ---- the edge lists ---------------------------------------------------
+     * Only LIVE targets get edges, because rin[] is zeroed (and read) only for
+     * live slots. A link from a dead source is dropped rather than carried at
+     * zero: g_ret_prev is zero there anyway, so the two are identical and the
+     * shorter list is the cheaper one.
+     *
+     * PANIC zeroes every amount. Not the master gain -- that is already
+     * handled -- but the matrix itself, so a feedback network decays while you
+     * are muted instead of being handed back to you saturated the moment you
+     * let go. */
+    for (int L = 0; L < BB_NLAYER; L++) {
+        rb->nv[L] = 0;
+        for (int j = 0; j < rb->nlive; j++) {
+            int r = rb->live[j];
+            int a = panicked ? 0 : bb_clampi(ret_send_load(L, r), 0, 255);
+            if (a) { rb->vr[L][rb->nv[L]] = r; rb->va[L][rb->nv[L]] = a; rb->nv[L]++; }
+        }
+    }
+
+    rb->nl = rb->nd = rb->nw = rb->nk = 0;
+    for (int j = 0; j < rb->nlive; j++) {
+        int r = rb->live[j], a;
+
+        a = panicked ? 0 : bb_clampi(ret_send_load(BB_RET_SRC_LICKS, r), 0, 255);
+        if (a) { rb->lr[rb->nl] = r; rb->la[rb->nl] = a; rb->nl++; }
+
+        a = panicked ? 0 : bb_clampi(ret_send_load(BB_RET_SRC_DRY, r), 0, 255);
+        if (a) { rb->dr[rb->nd] = r; rb->da[rb->nd] = a; rb->nd++; }
+
+        a = panicked ? 0 : bb_clampi(ret_send_load(BB_RET_SRC_WET, r), 0, 255);
+        if (a) { rb->wr[rb->nw] = r; rb->wa[rb->nw] = a; rb->nw++; }
+    }
+
+    for (int jt = 0; jt < rb->nlive; jt++) {
+        int to = rb->live[jt];
+        for (int jf = 0; jf < rb->nlive; jf++) {
+            int from = rb->live[jf];
+            int a = panicked ? 0
+                  : bb_clampi(atomic_load_explicit(&bb.ret_link[from][to],
+                                                   memory_order_relaxed), 0, 256);
+            if (a) {
+                rb->kt[rb->nk] = to;
+                rb->kf[rb->nk] = from;
+                rb->ka[rb->nk] = a;
+                rb->nk++;
+            }
+        }
+    }
 }
 
 static inline int locked(const LSnap *sn, int target, int step, int base,
@@ -982,6 +1202,277 @@ static inline void sampler_process(int32_t *mix, uint32_t tick, int rate, int32_
 }
 
 /* ======================================================================== */
+/*  THE RETURN BUS: the public API (UI thread)                               */
+/* ======================================================================== */
+
+static int ret_slot_ok(int s) { return s >= 0 && s < BB_NRET; }
+
+/* ---- knobs. One atomic store each, effective next period ------------------
+ * Every one of these goes through the slot-0 alias in bytebeat.h, so writing
+ * return 0's LEVEL writes bb.verb_level and nothing else. There is no second
+ * copy to keep in sync. */
+void bb_engine_ret_level(int slot, int v)
+{ if (ret_slot_ok(slot)) ret_level_store(slot, bb_clampi(v, 0, 256)); }
+
+int bb_engine_ret_level_get(int slot)
+{ return ret_slot_ok(slot) ? bb_clampi(ret_level_load(slot), 0, 256) : 0; }
+
+void bb_engine_ret_param(int slot, int p, int v)
+{
+    if (ret_slot_ok(slot) && p >= 0 && p < BB_RET_NPARAM)
+        ret_param_store(slot, p, bb_clampi(v, 0, 255));
+}
+
+int bb_engine_ret_param_get(int slot, int p)
+{
+    return (ret_slot_ok(slot) && p >= 0 && p < BB_RET_NPARAM)
+         ? bb_clampi(ret_param_load(slot, p), 0, 255) : 0;
+}
+
+void bb_engine_ret_sync(int slot, int v)
+{
+    if (ret_slot_ok(slot))
+        atomic_store_explicit(&bb.ret[slot].sync, bb_clampi(v, 0, 10),
+                              memory_order_relaxed);
+}
+
+int bb_engine_ret_sync_get(int slot)
+{
+    return ret_slot_ok(slot)
+         ? atomic_load_explicit(&bb.ret[slot].sync, memory_order_relaxed) : 0;
+}
+
+void bb_engine_ret_mute(int slot, int on)
+{
+    if (ret_slot_ok(slot))
+        atomic_store_explicit(&bb.ret[slot].mute, on ? 1 : 0,
+                              memory_order_relaxed);
+}
+
+int bb_engine_ret_mute_get(int slot)
+{
+    return ret_slot_ok(slot)
+         ? atomic_load_explicit(&bb.ret[slot].mute, memory_order_relaxed) : 0;
+}
+
+int bb_engine_ret_type_get(int slot)
+{
+    return ret_slot_ok(slot)
+         ? atomic_load_explicit(&bb.ret[slot].type, memory_order_relaxed)
+         : RET_NONE;
+}
+
+/* ---- the matrix ---------------------------------------------------------- */
+void bb_engine_ret_send(int src, int slot, int amt)
+{
+    if (src >= 0 && src < BB_RET_NSRC && ret_slot_ok(slot))
+        ret_send_store(src, slot, bb_clampi(amt, 0, 255));
+}
+
+int bb_engine_ret_send_get(int src, int slot)
+{
+    return (src >= 0 && src < BB_RET_NSRC && ret_slot_ok(slot))
+         ? bb_clampi(ret_send_load(src, slot), 0, 255) : 0;
+}
+
+void bb_engine_ret_link(int from, int to, int amt)
+{
+    if (ret_slot_ok(from) && ret_slot_ok(to))
+        atomic_store_explicit(&bb.ret_link[from][to], bb_clampi(amt, 0, 256),
+                              memory_order_relaxed);
+}
+
+int bb_engine_ret_link_get(int from, int to)
+{
+    return (ret_slot_ok(from) && ret_slot_ok(to))
+         ? atomic_load_explicit(&bb.ret_link[from][to], memory_order_relaxed) : 0;
+}
+
+void bb_engine_ret_panic(void)
+{
+    for (int a = 0; a < BB_NRET; a++) {
+        ret_level_store(a, 0);
+        for (int b = 0; b < BB_NRET; b++)
+            atomic_store_explicit(&bb.ret_link[a][b], 0, memory_order_relaxed);
+    }
+}
+
+/* ---- create / destroy ----------------------------------------------------
+ * How long to wait on a render thread that may not be there. bb.epoch is
+ * incremented at the top of EVERY period, so "the epoch has not moved for
+ * several periods" is the only honest liveness signal available. bb.budget_us
+ * is that period's length in microseconds, published by the render loop, so
+ * the window scales with the actual buffer size instead of guessing at it --
+ * and a 4096-frame period at 8 kHz does not get the same 2 ms grace as a
+ * 64-frame period at 96 kHz. */
+static unsigned long long ret_wait_budget_us(void)
+{
+    int b = atomic_load_explicit(&bb.budget_us, memory_order_relaxed);
+    long long us = (long long)(b > 0 ? b : 0) * 3 + 2000;
+    if (us < 2000)   us = 2000;
+    if (us > 250000) us = 250000;
+    return (unsigned long long)us;
+}
+
+/* Clear everything the BUS owns for one slot. The effect's own state and
+ * arena belong to ret_reset(). */
+static void ret_bus_clear(int r)
+{
+    g_ret_sticky[r] = 0;
+    g_ret_dc[r].x1  = 0;
+    g_ret_dc[r].y1  = 0;
+    g_ret_lg[r]     = BB_RET_GAIN_UNITY;
+    g_ret_prev[r]   = 0;
+    g_ret_cur[r]    = 0;
+}
+
+static void ret_service_slot(int r)
+{
+    if (g_ret_req[r].st == RQ_IDLE) return;
+
+    unsigned long long ep  = atomic_load(&bb.epoch);
+    unsigned long long now = bb_now_us();
+
+    /* Any epoch progress re-arms the clock, so `stalled` means precisely
+     * "the render thread has not started a period in a while" -- not "this
+     * request is taking a while", which would be a race against a slow but
+     * perfectly healthy device. */
+    if (ep != g_ret_req[r].ew) { g_ret_req[r].ew = ep; g_ret_req[r].t0 = now; }
+    int stalled = (now - g_ret_req[r].t0) > ret_wait_budget_us();
+
+    switch (g_ret_req[r].st) {
+    case RQ_FADE:
+        /* Waiting for the render thread to ramp the slot to silence and stop
+         * calling its effect. If it is not running at all, the fade will never
+         * complete on its own -- and nothing can be inside ret_run() either,
+         * so there is nothing to wait for. */
+        if (atomic_load_explicit(&bb.ret[r].quiet, memory_order_relaxed)) {
+            g_ret_req[r].st = RQ_WAIT;
+            g_ret_req[r].e0 = ep;
+        } else if (stalled) {
+            g_ret_fade[r]   = 0;
+            g_ret_req[r].st = RQ_SWAP;
+        }
+        break;
+
+    case RQ_WAIT:
+        /* Two full render epochs: the same proof bb_reclaim() uses, applied
+         * to STATE rather than to memory. After it, the render thread cannot
+         * still be inside a call that saw the old type. */
+        if (ep >= g_ret_req[r].e0 + 2 || stalled) g_ret_req[r].st = RQ_SWAP;
+        break;
+
+    default:
+        break;
+    }
+
+    if (g_ret_req[r].st == RQ_SWAP) {
+        int want = g_ret_req[r].want;
+
+        /* DESTROYING CLEARS THE ARENA TOO, and the comment that used to sit
+         * here said the opposite: that the arena would be cleared on the next
+         * create, so there was no point walking a megabyte to make silence
+         * quieter. That reasoning holds only if a create clears everything the
+         * previous type dirtied, and it does not -- ret_reset() sizes its clear
+         * by footprint, and a CHAMBER's footprint is a quarter of a DELAY's.
+         * Destroy a DELAY, create a CHAMBER, and three quarters of a megabyte
+         * of the delay's audio is still in the pool. It is inaudible under the
+         * CHAMBER and it comes straight back the moment anything with a longer
+         * reach is created in that slot.
+         *
+         * ret_reset() now clears the union of the outgoing and the incoming
+         * footprint, so the honest thing is to call it on every swap and let it
+         * decide. Destroying a slot that held nothing still costs nothing. */
+        ret_reset(r, want);
+
+        /* THE TYPE'S DEFAULT KNOB VALUES ARE NOT STAMPED HERE, DELIBERATELY.
+         * bb_config_load() also drives type changes, and a create that wrote
+         * ret_param_def would stamp over the parameters it just read out of the
+         * session file. The UI applies them on an explicit user create instead
+         * -- see MixerPanel::typeMenu, which says the same thing from the other
+         * side. Every effect therefore has to behave itself at ANY parameter
+         * setting, including the all-zero one a slot that has never held an
+         * effect carries; that is a property of the types, and it is where it
+         * belongs. */
+
+        ret_bus_clear(r);
+        /* release, paired with the render snapshot's acquire loads, so the
+         * zeroed arena is visible before the first ret_run() of the new type */
+        atomic_store_explicit(&bb.ret[r].type, want, memory_order_release);
+        atomic_store_explicit(&bb.ret[r].arm,  1,    memory_order_release);
+        g_ret_req[r].st = RQ_IDLE;
+    }
+}
+
+void bb_engine_ret_service(void)
+{
+    for (int r = 0; r < BB_NRET; r++) ret_service_slot(r);
+}
+
+int bb_engine_ret_create(int slot, int type)
+{
+    if (!ret_slot_ok(slot)) return -1;
+    if (type < RET_NONE || type >= RET_NTYPE) return -1;
+
+    g_ret_req[slot].want = type;
+    g_ret_req[slot].st   = RQ_FADE;
+    g_ret_req[slot].ew   = atomic_load(&bb.epoch);
+    g_ret_req[slot].t0   = bb_now_us();
+    atomic_store_explicit(&bb.ret[slot].quiet, 0, memory_order_relaxed);
+    atomic_store_explicit(&bb.ret[slot].arm,   0, memory_order_relaxed);
+    return 0;
+}
+
+int bb_engine_ret_destroy(int slot)
+{
+    return bb_engine_ret_create(slot, RET_NONE);
+}
+
+int bb_engine_ret_pending(int slot)
+{
+    return ret_slot_ok(slot) && g_ret_req[slot].st != RQ_IDLE;
+}
+
+/* ---- the bulk-edit bracket ------------------------------------------------
+ * There is no bb.ret_hold flag: the quiesce IS the hold, and unlike a flag it
+ * has no stale-forever failure mode. Both calls are UI thread only. */
+void bb_engine_ret_quiesce_all(void)
+{
+    for (int r = 0; r < BB_NRET; r++) {
+        atomic_store_explicit(&bb.ret[r].arm,   0, memory_order_relaxed);
+        atomic_store_explicit(&bb.ret[r].quiet, 0, memory_order_relaxed);
+    }
+
+    /* The render thread has never run -- startup, before the audio device
+     * exists, and every offline caller including the regression suite. There
+     * is provably nothing inside ret_run(), so there is nothing to wait for. */
+    unsigned long long e0 = atomic_load(&bb.epoch);
+    if (e0 == 0) return;
+
+    unsigned long long t0 = bb_now_us(), last_t = t0, last_ep = e0;
+    for (;;) {
+        unsigned long long ep = atomic_load(&bb.epoch), now = bb_now_us();
+        int all = 1;
+        for (int r = 0; r < BB_NRET; r++)
+            if (!atomic_load_explicit(&bb.ret[r].quiet, memory_order_relaxed)) {
+                all = 0;
+                break;
+            }
+        if (all && ep >= e0 + 2) break;
+        if (ep != last_ep) { last_ep = ep; last_t = now; }
+        else if (now - last_t > ret_wait_budget_us()) break;  /* not running */
+        if (now - t0 > 2000000ull) break;   /* hard ceiling; never hang a load */
+    }
+}
+
+void bb_engine_ret_release_all(void)
+{
+    for (int r = 0; r < BB_NRET; r++)
+        if (g_ret_req[r].st == RQ_IDLE)   /* a pending create owns its own arm */
+            atomic_store_explicit(&bb.ret[r].arm, 1, memory_order_release);
+}
+
+/* ======================================================================== */
 /*  Startup wiring                                                           */
 /* ======================================================================== */
 
@@ -1003,6 +1494,46 @@ void bb_engine_init(int rate)
         g_seq_rng[L]   = 0xA341316Cu + (uint32_t)L * 0x9E3779B9u;
         g_hit_age[L]   = INT32_MAX;
         g_hit_vel[L]   = 256;
+
+        /* THE LEVEL RAMP IS SETTLED, NOT ZEROED, AND THE DIFFERENCE IS THE
+         * WHOLE POINT.
+         *
+         * g_lvl[] and the master gain ramp used to be the only two pieces of
+         * render state that survived bb_engine_init() untouched. That made
+         * bb_engine_init() a reset that did not reset, and it showed up as the
+         * thing a reset is supposed to prevent: two runs of an identical
+         * scenario, both starting with bb_engine_init(), rendering DIFFERENT
+         * samples -- because whatever ran before left the ramp at a different
+         * point and the ramp then took a different path into the reverb, whose
+         * tail at 8 kHz is far longer than any settle worth rendering.
+         *
+         * Zeroing them instead would be wrong in the other direction: a ramp
+         * forced to 0 and then allowed to walk back up at 32 per frame is a
+         * 46 ms fade-in that the engine never used to have, and the CHAMBER's
+         * golden hash would move. SNAPPING each ramp to the target its own
+         * controls already ask for is the reset that changes nothing about a
+         * settled engine and everything about an unsettled one: the golden
+         * test settles both ramps before it calls this, so the value it finds
+         * here is the value it already had, and the hash does not move.
+         *
+         * The target is spelled exactly as the render loop spells it, because
+         * two expressions for one target is how they drift apart. */
+        {
+            int on  = atomic_load(&bb.layer[L].on);
+            int lvl = bb_clampi(atomic_load(&bb.layer[L].ctl[LCTL_LEVEL]), 0, 256);
+            g_lvl[L] = on ? (int32_t)((uint32_t)lvl << 8) : 0;
+        }
+    }
+
+    /* The master gain ramp, snapped for the same reason and against the same
+     * two mutes the render loop honours. The clamp is belt and braces the
+     * render loop does not bother with -- bb.gain is published 0..256 by
+     * everything that writes it -- and is identical for every value the fader
+     * can actually hold. */
+    {
+        int silent = atomic_load(&bb.mute) || atomic_load(&bb.panic);
+        int gtgt   = bb_clampi(atomic_load(&bb.gain), 0, 256);
+        g_gain_cur = silent ? 0 : (int32_t)((uint32_t)gtgt << 8);
     }
 
     g_loop_len = g_loop_write = g_loop_target = 0;
@@ -1036,7 +1567,42 @@ void bb_engine_init(int rate)
     g_cap_run = 0;
     g_cap_pos = 0;
 
-    verb_reset();
+    /* --- the return bus ---------------------------------------------------
+     * ret_reset() clears only the arena the slot's CURRENT type actually
+     * touches, which is why this is affordable: the regression suite calls
+     * bb_engine_init() seven times, and clearing the 9.25 MiB of pools each
+     * time would fault in every page of a session that uses one return. See
+     * ret.h's pool comment -- ret_init() deliberately clears nothing.
+     *
+     * g_ret_fade MUST START AT 65536, not ramp up from 0. If it starts at 0
+     * the first ~46 ms of every session differ from the pre-return-bus
+     * engine, the chamber's golden hash fails, and it fails for a reason that
+     * looks exactly like a DSP bug. */
+    ret_init();
+    for (int r = 0; r < BB_NRET; r++) {
+        int t = atomic_load(&bb.ret[r].type);
+        ret_reset(r, t);
+        atomic_store(&bb.ret[r].type, r == 0 ? RET_CHAMBER : RET_NONE);
+        atomic_store(&bb.ret[r].arm,   1);
+        atomic_store(&bb.ret[r].quiet, 0);
+        atomic_store(&bb.ret[r].gr,    256);
+        g_ret_fade[r]   = 65536;
+        g_ret_prev[r]   = 0;
+        g_ret_cur[r]    = 0;
+        g_ret_pk[r]     = 0;
+        g_ret_lg[r]     = BB_RET_GAIN_UNITY;
+        g_ret_sticky[r] = 0;
+        g_ret_dc[r].x1  = 0;
+        g_ret_dc[r].y1  = 0;
+        g_ret_req[r].st = RQ_IDLE;
+    }
+    g_ret_wprev = 0;
+    g_ret_buslg = BB_RET_GAIN_UNITY;
+    g_ret_busdc.x1 = 0;
+    g_ret_busdc.y1 = 0;
+    atomic_store(&bb.ret_active, 0);
+
+    verb_reset();               /* == the old chamber reset, on slot 0 */
 }
 
 void bb_engine_reset_t(void)      { atomic_store(&bb.reset_t, 1); }
@@ -1077,33 +1643,6 @@ void bb_engine_render(int16_t *out, int frames, int channels)
     int lp_slice= atomic_load_explicit(&bb.loop_slice, memory_order_relaxed);
     loop_command();
 
-    /* --- snapshot the CHAMBER --------------------------------------------
-     * verb_level 0 is a bit-exact bypass: nothing is processed and the mix
-     * is untouched, so sessions that never open the return sound exactly
-     * as they did before the bus existed. */
-    int v_level = bb_clampi(atomic_load_explicit(&bb.verb_level,
-                                                 memory_order_relaxed), 0, 256);
-    int v_size  = bb_clampi(atomic_load_explicit(&bb.verb_size,
-                                                 memory_order_relaxed), 0, 255);
-    int v_tone  = bb_clampi(atomic_load_explicit(&bb.verb_tone,
-                                                 memory_order_relaxed), 0, 255);
-    int sm_send = bb_clampi(atomic_load_explicit(&bb.smp_send,
-                                                 memory_order_relaxed), 0, 255);
-    int32_t v_fb   = 22000 + v_size * 40;    /* comb feedback, Q15: .67...98 */
-    int32_t v_damp = 4096  + v_tone * 112;   /* loop lowpass: dark..bright   */
-    int vclen[VERB_NCOMB], valen[VERB_NAP];
-    {
-        int r44 = atomic_load_explicit(&bb.rate, memory_order_relaxed);
-        if (r44 < BB_RATE_MIN) r44 = 44100;
-        for (int c = 0; c < VERB_NCOMB; c++)
-            vclen[c] = bb_clampi((int)(((int64_t)VERB_CTUNE[c] * r44) / 44100),
-                                 8, VERB_CSIZE);
-        for (int a = 0; a < VERB_NAP; a++)
-            valen[a] = bb_clampi((int)(((int64_t)VERB_ATUNE[a] * r44) / 44100),
-                                 8, VERB_ASIZE);
-    }
-    int32_t verb_pk = 0;
-
     /* --- snapshot every layer --------------------------------------------
      * Plain static like every other piece of render state: the engine is
      * single-renderer by contract (exactly two threads, see bytebeat.h), and
@@ -1136,8 +1675,6 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         sn->spc_sync = atomic_load_explicit(&ly->ctl[LCTL_SPC_SYNC],
                                              memory_order_relaxed);
 
-        sn->send = bb_clampi(atomic_load_explicit(&ly->send,
-                                                  memory_order_relaxed), 0, 255);
         sn->seq_on = atomic_load_explicit(&ly->seq_on, memory_order_relaxed);
         sn->steps = bb_clampi(atomic_load_explicit(&ly->ctl[LCTL_STEPS],
                                                    memory_order_relaxed), 1, BB_STEPS);
@@ -1205,13 +1742,42 @@ void bb_engine_render(int16_t *out, int frames, int channels)
      * lazily allocates on Darwin. Resets are explicit user actions only
      * (bb_engine_reset_t / bb_engine_reset_loop). */
     static uint32_t t = 0, k = 0, beat_pos = 0, bar_pos = 0, bar_count = 0;
-    static int32_t gain_cur = 0;
 
     if (atomic_exchange_explicit(&bb.reset_t, 0, memory_order_relaxed)) {
         t = 0;
         for (int L = 0; L < BB_NLAYER; L++) {
             g_vt[L] = 0;
             g_hit_age[L] = INT32_MAX;
+
+            /* AND THE LEVEL RAMP LANDS ON ITS TARGET, for the same reason the
+             * phase accumulator lands on zero: this is the point where the
+             * instrument is told to start again from a defined state, and a
+             * ramp caught halfway through a fade is not one.
+             *
+             * It is not tidiness. g_lvl[] is smoothing state that survives
+             * bb_engine_init() -- deliberately, because the CHAMBER's golden
+             * hash was captured on a binary where it did -- so without this it
+             * is a channel from whatever ran BEFORE the restart into what the
+             * restart produces. And it does not fade out: a voice ramping in
+             * from wherever the last scene left the fader feeds the reverb a
+             * different envelope for the first fifty milliseconds, and a
+             * reverb tail at 8 kHz is still carrying that difference thousands
+             * of frames later. Two renders of an identical scenario, both
+             * started with a reset, came out different samples because of it.
+             *
+             * Snapping rather than zeroing is what keeps the golden hash where
+             * it is: the target is read from the controls that are already
+             * set, so an engine that was ALREADY settled -- which is what the
+             * hash's two-stage settle arranges -- finds the value it already
+             * had and nothing moves. */
+            {
+                int on  = atomic_load_explicit(&bb.layer[L].on,
+                                               memory_order_relaxed);
+                int lvl = bb_clampi(atomic_load_explicit(
+                              &bb.layer[L].ctl[LCTL_LEVEL],
+                              memory_order_relaxed), 0, 256);
+                g_lvl[L] = on ? (int32_t)((uint32_t)lvl << 8) : 0;
+            }
         }
     }
     if (atomic_exchange_explicit(&bb.reset_loop, 0, memory_order_relaxed)) {
@@ -1310,13 +1876,28 @@ void bb_engine_render(int16_t *out, int frames, int channels)
     int clipped = 0;
     int32_t layer_pk[BB_NLAYER] = { 0 };   /* per-voice abs peak (meters) */
 
+    /* --- snapshot the RETURN BUS -----------------------------------------
+     * Plain static, not __thread, for the same Darwin TLV reason as LSnap: a
+     * __thread variable's first touch mallocs its block on the audio thread.
+     *
+     * This is where the CHAMBER's per-period block used to be, and slot 0 is
+     * still the CHAMBER: with no other returns enabled and an empty matrix,
+     * rb.live[] is {0}, rb.nv[L] is 1 exactly when bb.layer[L].send is
+     * nonzero, and every other edge list is empty -- so the frame loop below
+     * reduces term for term and branch for branch to the code it replaced.
+     * verb_level 0 still means slot 0 is not live, is not visited, and its
+     * reverb state does not advance: a bit-exact bypass, not a silent one. */
+    static RetBus rb;
+    ret_snapshot(&rb, rate, beat_len, bar_len, pan);
+
     /* bb_now_us() is a user-mode counter read on every platform: no syscall,
      * no allocation, no lock. Safe here; see bb_platform.h. */
     uint64_t c0 = bb_now_us();
 
     for (int i = 0; i < frames; i++) {
         int32_t mix = 0;
-        int32_t verb_in = 0;
+        int32_t rin[BB_NRET];     /* this frame's input to each live return */
+        for (int j = 0; j < rb.nlive; j++) rin[rb.live[j]] = 0;
         int32_t cap_smp = 0;      /* armed lane's post-fader contribution */
         int32_t clip_sum = 0;     /* this frame's arrangement playback, kept
                                    * apart so REC can leave it out (BB_REC_LIVE) */
@@ -1468,8 +2049,12 @@ void bb_engine_render(int16_t *out, int frames, int channels)
             mix += con;
             if (cap_on && g_cap_lane == L)
                 cap_smp += con;   /* voice-lane capture tap, pre-abs */
-            if (sn->send)
-                verb_in += (int32_t)(((int64_t)con * sn->send) >> 8);
+            /* Post-fader sends, exactly where the single CHAMBER send tapped.
+             * With one return and one nonzero send this is the identical
+             * multiply-shift-add on the identical value, in the identical L
+             * order -- rb.va[L][0] IS bb.layer[L].send, read once. */
+            for (int e = 0; e < rb.nv[L]; e++)
+                rin[rb.vr[L][e]] += (int32_t)(((int64_t)con * rb.va[L][e]) >> 8);
             if (con < 0) con = -con;
             if (con > layer_pk[L]) layer_pk[L] = con;
         }
@@ -1477,18 +2062,148 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         {
             int32_t premix = mix;
             sampler_process(&mix, tick, rate, atk_inc);
-            if (sm_send)
-                verb_in += (int32_t)(((int64_t)(mix - premix) * sm_send) >> 8);
+            int32_t sbus = mix - premix;
+            for (int e = 0; e < rb.nl; e++)
+                rin[rb.lr[e]] += (int32_t)(((int64_t)sbus * rb.la[e]) >> 8);
             if (cap_on && g_cap_lane == 8)
                 cap_smp += mix - premix;   /* LICKS-bus capture tap */
         }
 
-        if (v_level > 0) {
-            int32_t wet = verb_process(verb_in, v_fb, v_damp, vclen, valen);
-            wet = (int32_t)(((int64_t)wet * v_level) >> 8);
-            mix += wet;
-            if (wet < 0) wet = -wet;
-            if (wet > verb_pk) verb_pk = wet;
+        /* --- THE RETURN BUS -------------------------------------------------
+         * Sits exactly where the single chamber sat: after the sampler bus,
+         * BEFORE the arrangement clips, the master clamp, the phrase looper
+         * and the sink. Clips are still summed after this, so no clip ever
+         * feeds a return and the BB_REC_LIVE guarantee (bytebeat.h) survives
+         * intact.
+         *
+         * Every return->return edge is one frame old, so the loop below may be
+         * walked in any order; ascending index is chosen only so the peak and
+         * limiter bookkeeping is deterministic. */
+        if (rb.nlive) {
+            for (int e = 0; e < rb.nd; e++)
+                rin[rb.dr[e]] += (int32_t)(((int64_t)mix * rb.da[e]) >> 8);
+            for (int e = 0; e < rb.nw; e++)
+                rin[rb.wr[e]] += (int32_t)(((int64_t)g_ret_wprev * rb.wa[e]) >> 8);
+            for (int e = 0; e < rb.nk; e++)
+                rin[rb.kt[e]] += (int32_t)(((int64_t)g_ret_prev[rb.kf[e]]
+                                            * rb.ka[e]) >> 8);
+
+            int32_t wsum = 0;
+            for (int j = 0; j < rb.nlive; j++) {
+                int r = rb.live[j];
+                int32_t y = ret_run(r, &rb.s[r], rin[r]);
+
+                /* Safety, armed only where a feedback edge exists. A chamber
+                 * fed by voices alone runs raw -- that is what keeps a legacy
+                 * session bit-identical, and it is safe because a return with
+                 * no incoming edge cannot be part of a cycle.
+                 *
+                 * The DC blocker matters more than the limiter here and is the
+                 * less obvious of the two: a delayed loop with gain g is a
+                 * one-pole at DC with gain 1/(1-g), so at g = 0.99 that is
+                 * 100x at DC -- inaudible, rail-eating and speaker-damaging.
+                 * A feedback patch's first symptom is an offset, not a howl.
+                 *
+                 * The limiter runs BEFORE the value that feeds back is stored,
+                 * or the bound does not hold on the state. */
+                /* THE LOOP GETS THE BOUNDED COPY; THE EARS GET THE FILTERED
+                 * ONE. `loop` is what the link matrix carries back round a
+                 * frame later; `y` is what reaches the wet sum.
+                 *
+                 * They part company because the two jobs want opposite things.
+                 * What closes the loop must be BOUNDED, and nothing else --
+                 * the limiter's hard ceiling is the entire stability proof for
+                 * the graph, and it holds for any matrix the user can build
+                 * because it is a clamp and not an argument. What reaches the
+                 * ears must be DC-FREE. Trying to do both to one value is what
+                 * put a highpass inside the user's feedback path, and a
+                 * highpass in a loop whose gain has been ridden to unity is a
+                 * negative feedback path with an 1,800-sample lag: it
+                 * oscillates, at a few Hertz, at full amplitude, silently.
+                 * Measured on a self-linked DELAY, the audible 50 Hz repeat
+                 * disappeared completely and what was left was a full-scale
+                 * ramp under a Hertz -- limiter pinned, meters lit, nothing to
+                 * hear, and a speaker cone being walked off centre and held
+                 * there. Every peak assertion in the suite stayed green
+                 * through it, which is why the check that caught it measures
+                 * the MEAN.
+                 *
+                 * So the filter comes out of the loop and stays on the output.
+                 * The clamp after it is still unconditional: dsp_dc has unity
+                 * passband gain but its transient response can overshoot, and
+                 * it is not allowed to be the last word on amplitude. */
+                int32_t loop = y;
+                if (rb.s[r].hot) {
+                    loop = ret_limit(&g_ret_lg[r], y, BB_RET_CEIL);
+                    y    = dsp_dc(&g_ret_dc[r], loop);
+                    if (y >  BB_RET_CEIL) y =  BB_RET_CEIL;
+                    if (y < -BB_RET_CEIL) y = -BB_RET_CEIL;
+                }
+
+                /* Create/destroy fade. Same +/-32 ramp idiom and same Q16
+                 * scale as g_lvl above: ~2048 frames, ~46 ms. It sits at
+                 * exactly 65536 for a slot armed since bb_engine_init(), so
+                 * the multiply is skipped and the arithmetic is the one it
+                 * replaced. Both copies ride it, or a slot being faded out
+                 * would go quiet while still driving the graph at full. */
+                int32_t f = g_ret_fade[r], tg = rb.s[r].fade_tgt;
+                if      (f < tg) { f += 32; if (f > tg) f = tg; }
+                else if (f > tg) { f -= 32; if (f < tg) f = tg; }
+                g_ret_fade[r] = f;
+                if (f != 65536) {
+                    y    = (int32_t)(((int64_t)y    * f) >> 16);
+                    loop = (int32_t)(((int64_t)loop * f) >> 16);
+                }
+
+                g_ret_cur[r] = loop;
+                int32_t w = (int32_t)(((int64_t)y * rb.s[r].level) >> 8);
+                wsum += w;
+                int32_t aw = w < 0 ? -w : w;
+                if (aw > g_ret_pk[r]) g_ret_pk[r] = aw;
+            }
+
+            /* THE WET-BUS LIMITER. Eight returns each individually bounded at
+             * -2.5 dBFS still sum to 8x unity, and the master's only
+             * protection is dsp_clip16 below -- a pinned master clipper is the
+             * same square-wave-into-headphones problem one stage later. Armed
+             * ONLY when the graph contains feedback at all, so a legacy
+             * session never executes it. */
+            int32_t wloop = wsum;
+            if (rb.bus_hot) {
+                wloop = ret_limit(&g_ret_buslg, wsum, BB_RET_BUS_CEIL);
+
+                /* And then the offset every clamp upstream of here left
+                 * behind -- the per-return ceilings' as much as this one's. A
+                 * clamp on an asymmetric waveform manufactures DC, a pinned
+                 * loop is the case where the clamps fire on every sample, and
+                 * the per-slot blockers all ran before those clamps did. This
+                 * is the last stage that can clean up after them, so it is
+                 * where the cleaning happens. See g_ret_busdc.
+                 *
+                 * Split from `wloop` for exactly the reason the per-return
+                 * stage above is split: the WET row hands this sum back to the
+                 * returns a frame later, so it is a feedback path, and a
+                 * highpass in a feedback path is an oscillator rather than a
+                 * filter. What goes back round is the BOUNDED sum; what goes
+                 * to the master is the blocked one.
+                 *
+                 * The re-clamp keeps the ceiling a guarantee rather than an
+                 * expectation. It fires far more rarely than the ones it is
+                 * cleaning up after, because what reaches it is centred. */
+                wsum = dsp_dc(&g_ret_busdc, wloop);
+                if (wsum >  BB_RET_BUS_CEIL) wsum =  BB_RET_BUS_CEIL;
+                if (wsum < -BB_RET_BUS_CEIL) wsum = -BB_RET_BUS_CEIL;
+            }
+
+            mix += wsum;
+            g_ret_wprev = wloop;
+            for (int j = 0; j < rb.nlive; j++)
+                { int r = rb.live[j]; g_ret_prev[r] = g_ret_cur[r]; }
+        } else {
+            /* No live returns means no wet bus. Clearing it here stops a
+             * stale sum from a graph that has since been closed sitting in
+             * the WET row as a DC offset when one is next opened. */
+            g_ret_wprev = 0;
         }
 
         /* --- R2 song playback --------------------------------------------
@@ -1600,12 +2315,12 @@ void bb_engine_render(int16_t *out, int frames, int channels)
 
         scope_push((int16_t)mix);
 
-        if (gain_cur < target_gain) {
-            gain_cur += 32; if (gain_cur > target_gain) gain_cur = target_gain;
-        } else if (gain_cur > target_gain) {
-            gain_cur -= 32; if (gain_cur < target_gain) gain_cur = target_gain;
+        if (g_gain_cur < target_gain) {
+            g_gain_cur += 32; if (g_gain_cur > target_gain) g_gain_cur = target_gain;
+        } else if (g_gain_cur > target_gain) {
+            g_gain_cur -= 32; if (g_gain_cur < target_gain) g_gain_cur = target_gain;
         }
-        int16_t o16 = (int16_t)dsp_clip16((int32_t)(((int64_t)mix * gain_cur) >> 16));
+        int16_t o16 = (int16_t)dsp_clip16((int32_t)(((int64_t)mix * g_gain_cur) >> 16));
 
         /* What goes to the recorder is not always what goes to the speakers.
          * Under BB_REC_LIVE the arrangement is heard but not printed, so you
@@ -1614,7 +2329,7 @@ void bb_engine_render(int16_t *out, int frames, int channels)
          * pass. `dry` was forked off above, before the master clamp. */
         int16_t rec16 = (rec_src == BB_REC_LIVE)
                       ? (int16_t)dsp_clip16(
-                            (int32_t)(((int64_t)dry * gain_cur) >> 16))
+                            (int32_t)(((int64_t)dry * g_gain_cur) >> 16))
                       : o16;
 
         sink_push(rec16);
@@ -1677,9 +2392,31 @@ void bb_engine_render(int16_t *out, int frames, int channels)
                                   memory_order_relaxed);
         g_smp_pk[s] = 0;
     }
-    if (verb_pk > 32767) verb_pk = 32767;
-    if (verb_pk > atomic_load_explicit(&bb.verb_peak, memory_order_relaxed))
-        atomic_store_explicit(&bb.verb_peak, verb_pk, memory_order_relaxed);
+    /* Return-bus telemetry. Slot 0 additionally publishes to bb.verb_peak so
+     * the existing RETURN A strip keeps its meter with no migration, and
+     * bb.ret_active lets STATUS render "CPU 34% - RET 5/8" so a rising meter
+     * has a legible cause. There is deliberately no per-bus microsecond
+     * number: timing inside the frame loop would mean a timer read per frame,
+     * and the bus is interleaved with the voice sum so it cannot be bracketed.
+     * The whole bus already sits inside the cpu_us region measured above. */
+    for (int r = 0; r < BB_NRET; r++) {
+        int32_t pk = g_ret_pk[r]; if (pk > 32767) pk = 32767;
+        if (pk > atomic_load_explicit(&bb.ret[r].peak, memory_order_relaxed))
+            atomic_store_explicit(&bb.ret[r].peak, pk, memory_order_relaxed);
+        g_ret_pk[r] = 0;
+        atomic_store_explicit(&bb.ret[r].gr,
+            (int)(((int64_t)g_ret_lg[r] * 256) >> 16), memory_order_relaxed);
+        if (r == 0) {
+            if (pk > atomic_load_explicit(&bb.verb_peak, memory_order_relaxed))
+                atomic_store_explicit(&bb.verb_peak, pk, memory_order_relaxed);
+        }
+        /* The quiesce handshake's only signal: this slot faded to zero AND
+         * was not run for a whole period, so the render thread is provably
+         * out of its effect. */
+        atomic_store_explicit(&bb.ret[r].quiet,
+            (g_ret_fade[r] == 0 && !rb.ran[r]) ? 1 : 0, memory_order_relaxed);
+    }
+    atomic_store_explicit(&bb.ret_active, rb.nlive, memory_order_relaxed);
 }
 
 /* Read-only view of the master phrase-loop buffer for the SURVIVOR waveform
@@ -2158,6 +2895,58 @@ int bb_config_save(void)
     for (int i = 0; i < GCTL_COUNT; i++) fprintf(f, " %d", atomic_load(&bb.gctl[i]));
     fprintf(f, "\n");
 
+    /* ---- the return bus, and still NOT a format-version bump ------------
+     * The reasoning above applies unchanged and more strongly here: a session
+     * now carries a routing GRAPH, and an old binary that rejected a bumped
+     * version would still autosave on quit and write the graph away. The
+     * unknown-key fallthrough in the loader makes both directions safe.
+     *
+     *   ret   <i> <type> <level> <mute> <sync> <p0>..<p7>
+     *   rsend <src> <slot> <amount>
+     *   rlink <from> <to> <amount>
+     *   rname <slot> <len>:<name>
+     *
+     * `ret` is eight lines, always, fixed arity, and TYPE IS WRITTEN VERBATIM
+     * -- including an id from a newer build that this one renders as silence.
+     * Clamping it would silently rewrite someone's session on a downgrade.
+     *
+     * `rsend`/`rlink` carry nonzero entries only; a full matrix would be 152
+     * lines of zeros. Sends from a voice or the sampler INTO SLOT 0 are never
+     * emitted here -- those cells are the aliased storage the existing `send`
+     * lines and the `verb` line's 4th field already own -- but they are
+     * ACCEPTED on read, so a hand edit does the obvious thing.
+     *
+     * `verb` is unchanged and still written, but MOVED to after this block.
+     * It and `ret 0` write the same storage so they always agree; emitting it
+     * last means a hand-edit to the familiar key wins, which is what someone
+     * editing the file expects, and an old binary that reads only `verb` is
+     * still correct. */
+    for (int r = 0; r < BB_NRET; r++) {
+        fprintf(f, "ret %d %d %d %d %d", r,
+                atomic_load(&bb.ret[r].type), ret_level_load(r),
+                atomic_load(&bb.ret[r].mute), atomic_load(&bb.ret[r].sync));
+        for (int p = 0; p < BB_RET_NPARAM; p++)
+            fprintf(f, " %d", ret_param_load(r, p));
+        fprintf(f, "\n");
+    }
+    for (int s = 0; s < BB_RET_NSRC; s++)
+        for (int r = 0; r < BB_NRET; r++) {
+            if (r == 0 && s < BB_RET_SRC_DRY) continue;   /* aliased cells */
+            int amt = atomic_load(&bb.ret_send[s][r]);
+            if (amt) fprintf(f, "rsend %d %d %d\n", s, r, amt);
+        }
+    for (int a = 0; a < BB_NRET; a++)
+        for (int b = 0; b < BB_NRET; b++) {
+            int amt = atomic_load(&bb.ret_link[a][b]);
+            if (amt) fprintf(f, "rlink %d %d %d\n", a, b, amt);
+        }
+    /* Length-prefixed exactly like an aclip name, so names may contain
+     * spaces: <len> decimal bytes follow the ':' verbatim to end of line. */
+    for (int r = 0; r < BB_NRET; r++)
+        if (bb_ret_name[r][0])
+            fprintf(f, "rname %d %d:%s\n", r,
+                    (int)strlen(bb_ret_name[r]), bb_ret_name[r]);
+
     fprintf(f, "verb %d %d %d %d\n",
             atomic_load(&bb.verb_size), atomic_load(&bb.verb_tone),
             atomic_load(&bb.verb_level), atomic_load(&bb.smp_send));
@@ -2268,6 +3057,49 @@ int bb_config_save(void)
 static ArrClip cfg_clips[ARR_MAX_CLIPS];
 static int     cfg_nclips;
 
+/* Reset the return bus to what a session that says nothing about it means:
+ * slot 0 is the CHAMBER, slots 1-7 are empty, the matrix is zero.
+ *
+ * This has to happen BEFORE the parse loop, because `rsend`/`rlink` emit
+ * nonzero entries only -- an omitted zero cannot clear a stale nonzero, and
+ * without this a second load would inherit the first session's links.
+ *
+ * It deliberately does NOT touch the ALIASED cells: bb.layer[s].send,
+ * bb.smp_send, bb.verb_level, bb.verb_size and bb.verb_tone are owned by the
+ * `send` and `verb` lines and by bb_engine_set_defaults(), and v4 and v6
+ * sessions round-trip through exactly those keys. Clearing them here would
+ * quietly delete the sends out of every session written before the bus
+ * existed. */
+static void ret_config_reset(void)
+{
+    for (int s = 0; s < BB_RET_NSRC; s++)
+        for (int r = 0; r < BB_NRET; r++) {
+            if (r == 0 && s < BB_RET_SRC_DRY) continue;   /* aliased */
+            atomic_store(&bb.ret_send[s][r], 0);
+        }
+    for (int a = 0; a < BB_NRET; a++)
+        for (int b = 0; b < BB_NRET; b++)
+            atomic_store(&bb.ret_link[a][b], 0);
+
+    for (int r = 0; r < BB_NRET; r++) {
+        int t = (r == 0) ? RET_CHAMBER : RET_NONE;
+        atomic_store(&bb.ret[r].type, t);
+        atomic_store(&bb.ret[r].mute, 0);
+        atomic_store(&bb.ret[r].sync, 0);
+        /* `arm` is NOT touched. This runs INSIDE bb_config_load's quiesce
+         * bracket, and re-arming here would let the render thread back into
+         * an effect whose type the parse is about to change underneath it --
+         * defeating the one thing the bracket exists to guarantee.
+         * bb_engine_ret_release_all() re-arms, once, at the end. */
+        for (int p = 0; p < BB_RET_NPARAM; p++) {
+            if (r == 0 && p < 2) continue;             /* aliased */
+            ret_param_store(r, p, ret_param_def[t][p]);
+        }
+        if (r != 0) ret_level_store(r, 0);             /* slot 0's is aliased */
+        bb_ret_name[r][0] = '\0';
+    }
+}
+
 static void read_ints(const char *p, atomic_int *dst, int n, int lo, int hi)
 {
     for (int i = 0; i < n; i++) {
@@ -2287,6 +3119,19 @@ int bb_config_load(void)
 
     /* Big enough for the longest legal line: an aclip carrying a full
      * ARR_NAME_MAX name and ARR_PATH_MAX path on top of its numbers. */
+    /* Quiesce every return slot for the whole parse. A type change is a
+     * direct atomic store below, which is safe ONLY because of this: the
+     * render thread is provably out of every effect, so nothing can be inside
+     * a call that saw the old type when its arena is cleared. Released
+     * immediately before the single remaining return, which is why this
+     * function must keep exactly two exits -- the `return 0` above (before
+     * this call) and the one at the bottom. */
+    bb_engine_ret_quiesce_all();
+    ret_config_reset();
+    int ret_base_type[BB_NRET];
+    for (int r = 0; r < BB_NRET; r++)
+        ret_base_type[r] = atomic_load(&bb.ret[r].type);
+
     char line[BB_EXPR_MAX + ARR_NAME_MAX + ARR_PATH_MAX + 96];
     int  version = 1;
 
@@ -2353,6 +3198,72 @@ int bb_config_load(void)
                 atomic_store(&bb.verb_tone,  bb_clampi(tn, 0, 255));
                 atomic_store(&bb.verb_level, bb_clampi(lv, 0, 256));
                 atomic_store(&bb.smp_send,   bb_clampi(ss, 0, 255));
+            }
+        } else if (!strncmp(line, "ret ", 4)) {
+            /* ret <i> <type> <level> <mute> <sync> <p0>..<p7> -- fixed arity,
+             * thirteen numbers. A short line is skipped whole rather than
+             * half-applied. */
+            const char *p = line + 4;
+            char *end;
+            int i = (int)strtol(p, &end, 10);
+            if (end != p && i >= 0 && i < BB_NRET) {
+                int fld[12], n = 0;
+                p = end;
+                for (; n < 12; n++) {
+                    long fv = strtol(p, &end, 10);
+                    if (end == p) break;
+                    fld[n] = (int)fv;
+                    p = end;
+                }
+                if (n == 12) {
+                    /* TYPE IS NOT CLAMPED. An id this build does not know is a
+                     * slot written by a newer one: it renders as silence and
+                     * is written back out unchanged, so a downgrade does not
+                     * silently rewrite someone's session. Only nonsense is
+                     * rejected. Safe because ret_run() dispatches on a switch
+                     * with `default: return 0;` and never a pointer table. */
+                    atomic_store(&bb.ret[i].type,
+                                 (fld[0] < 0 || fld[0] > 4096) ? RET_NONE : fld[0]);
+                    ret_level_store(i, bb_clampi(fld[1], 0, 256));
+                    atomic_store(&bb.ret[i].mute, fld[2] ? 1 : 0);
+                    atomic_store(&bb.ret[i].sync, bb_clampi(fld[3], 0, 10));
+                    for (int q = 0; q < BB_RET_NPARAM; q++)
+                        ret_param_store(i, q, bb_clampi(fld[4 + q], 0, 255));
+                }
+            }
+        } else if (!strncmp(line, "rsend ", 6)) {
+            int src, slot, amt;
+            if (sscanf(line, "rsend %d %d %d", &src, &slot, &amt) == 3 &&
+                src >= 0 && src < BB_RET_NSRC && slot >= 0 && slot < BB_NRET)
+                ret_send_store(src, slot, bb_clampi(amt, 0, 255));
+        } else if (!strncmp(line, "rlink ", 6)) {
+            int from, to, amt;
+            if (sscanf(line, "rlink %d %d %d", &from, &to, &amt) == 3 &&
+                from >= 0 && from < BB_NRET && to >= 0 && to < BB_NRET)
+                atomic_store(&bb.ret_link[from][to], bb_clampi(amt, 0, 256));
+        } else if (!strncmp(line, "rname ", 6)) {
+            /* rname <slot> <len>:<name>
+             *
+             * Length-prefixed like an aclip name so that names may contain
+             * spaces, and the CR has already been stripped at the top of the
+             * loop, so a session copied off a Windows machine does not grow an
+             * invisible control character on the end of every name.
+             *
+             * The name runs to END OF LINE and the prefix is a bound, not a
+             * cut. Nothing follows the name on this line -- unlike an aclip,
+             * where a path comes after it and the count is the only way to
+             * find the boundary -- so honouring a hand-written count that
+             * disagrees with the text would truncate a name for no reader's
+             * benefit. The count is still written, so the field stays
+             * self-describing if anything is ever appended after it. */
+            int slot, nlen, pos = -1;
+            if (sscanf(line, "rname %d %d:%n", &slot, &nlen, &pos) == 2 &&
+                pos > 0 && slot >= 0 && slot < BB_NRET && nlen >= 0) {
+                const char *nm = line + pos;
+                size_t nl2 = strlen(nm);
+                if (nl2 >= BB_RET_NAME) nl2 = BB_RET_NAME - 1;
+                memcpy(bb_ret_name[slot], nm, nl2);
+                bb_ret_name[slot][nl2] = '\0';
             }
         } else if (!strncmp(line, "send ", 5)) {
             int sv;
@@ -2501,6 +3412,20 @@ int bb_config_load(void)
      * clip's path and republishes. */
     bb_engine_song_publish(cfg_clips, cfg_nclips);
 
+    /* Any slot whose type actually changed gets its arena and its bus state
+     * cleared, so a loaded session never starts with the previous session's
+     * tail ringing inside a different effect. A slot whose type did NOT change
+     * is left alone -- which is why loading a session over a running CHAMBER
+     * keeps its reverb tail, exactly as it always has. */
+    for (int r = 0; r < BB_NRET; r++) {
+        int t = atomic_load(&bb.ret[r].type);
+        if (t != ret_base_type[r]) {
+            ret_reset(r, t);
+            ret_bus_clear(r);
+        }
+    }
+    bb_engine_ret_release_all();
+
     return version >= 2;
 }
 
@@ -2558,6 +3483,24 @@ void bb_engine_set_defaults(void)
     atomic_store(&bb.verb_level,   0);
     atomic_store(&bb.smp_send,     0);
     atomic_store(&bb.verb_peak,    0);
+
+    /* The rest of the return bus: slot 0 stays the CHAMBER, slots 1-7 are
+     * empty and the matrix is zero, which is exactly the graph that renders
+     * bit-identically to the engine that had no return bus. Runs AFTER the
+     * verb_* stores above and skips the aliased cells, so the two agree
+     * instead of racing to write the same three atomics. */
+    ret_config_reset();
+    for (int r = 0; r < BB_NRET; r++) {
+        atomic_store(&bb.ret[r].peak,  0);
+        atomic_store(&bb.ret[r].gr,    256);
+        atomic_store(&bb.ret[r].quiet, 0);
+        /* Unlike the loader, this IS the place to re-arm: a default session
+         * has no pending create to respect, and any request still in flight
+         * refers to a graph that no longer exists. */
+        atomic_store(&bb.ret[r].arm,   1);
+        g_ret_req[r].st = RQ_IDLE;
+    }
+    atomic_store(&bb.ret_active, 0);
 
     for (int L = 0; L < BB_NLAYER; L++) {
         Layer *ly = &bb.layer[L];

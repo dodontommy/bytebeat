@@ -117,9 +117,19 @@ void MorgueLookAndFeel::drawPopupMenuItem (juce::Graphics& g, const Rectangle<in
         g.setColour (C::PLATE_HOVER);
         g.fillRect (area);
     }
+
+    /* The tick used to be BLOOD_HOT text and nothing else: the one accent
+     * spent on "this menu item is the current choice", and a state carried by
+     * colour alone. It is a 5px mark in the indent the text already leaves,
+     * so the checked item is legible as checked in greyscale. */
+    if (isTicked && isActive)
+    {
+        g.setColour (C::INK);
+        g.fillRect (area.getX() + 3, area.getCentreY() - 2, 5, 5);
+    }
+
     g.setColour (! isActive ? C::INK_GHOST
-                : isTicked  ? C::BLOOD_HOT
-                : isHighlighted ? C::INK : C::INK_DIM);
+                : (isTicked || isHighlighted) ? C::INK : C::INK_DIM);
     g.setFont (Type::mono (10.0f));
     g.drawText (text, area.reduced (10, 0), Justification::centredLeft);
 }
@@ -168,7 +178,10 @@ juce::Rectangle<int> MorgueLookAndFeel::getTooltipBounds (const juce::String& te
     const juce::Font f = Type::mono (10.0f);
     int w = juce::jmin (360, (int) std::ceil (juce::GlyphArrangement::getStringWidth (f, text)) + 18);
     int lines = juce::jmax (1, (int) std::ceil (juce::GlyphArrangement::getStringWidth (f, text) / (float) (w - 18)));
-    int h = 8 + lines * 13;
+    /* Type::rowH(10) = 16. The box used to allow 13px per line for a 10px
+     * face, so a wrapped tooltip -- and every tooltip in this app wraps -- was
+     * clipped at the bottom by its own container. */
+    int h = 8 + lines * Type::rowH (10.0f);
     return Rectangle<int> (screenPos.x + 12, screenPos.y + 18, w, h)
              .constrainedWithin (parentArea);
 }
@@ -223,23 +236,29 @@ void EngravedKnob::setDefaultValue (int v)              { defaultVal = v; }
 void EngravedKnob::setDiameter (int px)                 { dia = px; repaint(); }
 void EngravedKnob::setShowText (bool b)                 { showText = b; repaint(); }
 
+/* Row heights come from Type::rowH() for the face they carry, so a knob is
+ * never a glyph in a box shorter than the glyph. Growth over the old stack is
+ * 2px (small) and 2px (76px variant); every layout that asks for idealHeight()
+ * takes it out of a flexible run. */
 int EngravedKnob::idealHeight() const
 {
     if (! showText) return dia;
     const bool big = dia >= 76;
-    int h = dia + 4 + (big ? 13 : 11);                       // label row
-    h += big ? 15 : 13;                                       // value row
-    if (subLabel.isNotEmpty()) h += 10;                       // sub-note row
+    int h = dia + 4 + (big ? 14 : 11);                        // label row
+    h += big ? 17 : 15;                                       // value row
+    if (subLabel.isNotEmpty()) h += 12;                       // sub-note row
     return h;
 }
 
 void EngravedKnob::mouseDown (const juce::MouseEvent& e)
 {
+    /* A right-click does nothing on a knob and must not start a drag either.
+     * This used to fire onLearnRequest, which no panel in the application ever
+     * subscribed to -- so right-drag was a value change disguised as a feature
+     * that did not exist. */
     if (e.mods.isPopupMenu())
-    {
-        if (onLearnRequest) onLearnRequest();
         return;
-    }
+
     dragging = true;
     dragStartVal = value();
 }
@@ -303,29 +322,40 @@ void EngravedKnob::paint (juce::Graphics& g)
 
     if (! showText) return;
 
-    // text stack under the face
+    /* ---- text stack under the face ---------------------------------------
+     * Three rows, in descending importance: role, VALUE, identity. The value
+     * is the largest of the three because it is the one that changes and the
+     * one being read; it is set in the medium weight for the same reason.
+     *
+     * UNUSED drops the whole stack one ink rung (INK_FAINT, 5.19:1) instead of
+     * dropping it to lamp and ghost inks. "This expression does not reference
+     * p5" is a fact about the patch, not a broken control -- and the knob
+     * still writes to the engine when you turn it. */
     int y = face.getBottom() + 4;
-    const juce::Colour labelFg = unused ? C::LAMP_SOUNDING : C::INK_DIM;
-    const juce::Colour valueFg = unused ? C::INK_GHOST : C::INK;
+    const juce::Colour labelFg = unused ? C::INK_FAINT : C::INK_DIM;
+    const juce::Colour valueFg = unused ? C::INK_FAINT : C::INK;
+
+    const int labelH = big ? 14 : 11;
+    const int valueH = big ? 17 : 15;
 
     g.setColour (labelFg);
     g.setFont (big ? Type::monoMedium (10.0f, 0.16f) : Type::mono (8.0f, 0.10f));
-    g.drawText (labelText, full.withY (y).withHeight (big ? 13 : 11), Justification::centred);
-    y += big ? 13 : 11;
+    g.drawText (labelText, full.withY (y).withHeight (labelH), Justification::centred);
+    y += labelH;
 
     g.setColour (valueFg);
-    g.setFont (big ? Type::mono (12.0f, 0.04f) : Type::mono (10.0f, 0.04f));
+    g.setFont (big ? Type::monoMedium (15.0f, 0.04f) : Type::monoMedium (12.0f, 0.02f));
     juce::String vs = valueText.isNotEmpty()
                         ? valueText
                         : juce::String (value()).paddedLeft ('0', 3);
-    g.drawText (vs, full.withY (y).withHeight (big ? 15 : 13), Justification::centred);
-    y += big ? 15 : 13;
+    g.drawText (vs, full.withY (y).withHeight (valueH), Justification::centred);
+    y += valueH;
 
     if (subLabel.isNotEmpty())
     {
-        g.setColour (C::INK_GHOST);
-        g.setFont (Type::nano (7.0f));
-        g.drawText (subLabel, full.withY (y).withHeight (10), Justification::centred);
+        g.setColour (unused ? C::INK_GHOST : C::INK_FAINT);
+        g.setFont (Type::nano());
+        g.drawText (subLabel, full.withY (y).withHeight (12), Justification::centred, true);
     }
 }
 
@@ -365,7 +395,14 @@ void PlateButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
     juce::Colour bg, bd, fg, dot;
     if (! isEnabled())
     {
-        bg = C::DISABLED_BG; bd = C::HAIRLINE_DIM; fg = C::INK_GHOST; dot = C::HAIRLINE_FAINT;
+        /* A disabled plate is a RECESS with an outline you can still find, not
+         * an absence. DISABLED_BG now sits below PANEL, so the fill carries
+         * the state; the border is the full HAIRLINE so the control keeps its
+         * shape, and the lamp is LAMP_DEAD -- the token that means an unlit
+         * lamp everywhere else in the app. It used to be a hairline at 1.13:1
+         * around a lamp at 1.05:1, which is why PLATE's legitimately disabled
+         * RUN button read as a rendering fault rather than as "not yet". */
+        bg = C::DISABLED_BG; bd = C::HAIRLINE; fg = C::INK_GHOST; dot = C::LAMP_DEAD;
     }
     else if (on && engagedStyle)                               // CUT engaged
     {
@@ -392,14 +429,16 @@ void PlateButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
         bg = C::PLATE; bd = C::EDGE; fg = C::INK_DIM; dot = C::LAMP_DEAD;
     }
 
-    /* SURVIVOR 150x74 stencil plates (HTML frame 05, spec section 9):
-     * idle plate is the #161513 literal, the stencil word sits on top and
-     * the 8px status sub-line below carries the 6px lamp. */
+    /* SURVIVOR 150x74 stencil plates (HTML frame 05, spec section 9): the
+     * stencil word sits on the idle plate and the status sub-line below it
+     * carries the 6px lamp. The idle fill used to be a bare #161513 literal
+     * from the mockup, which after the surface ramp was re-cut sat between two
+     * tokens and belonged to neither; PLATE_LOW is the token for exactly this
+     * -- a plate that is a toggle currently off. */
     if (stencil)
     {
-        static const juce::Colour STENCIL_IDLE_BG { 0xff161513 };
         if (isEnabled() && ! on && ! (highlighted || down))
-            bg = STENCIL_IDLE_BG;
+            bg = C::PLATE_LOW;
         if (isEnabled() && ! on)
             bd = C::EDGE;
 
@@ -413,8 +452,8 @@ void PlateButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
                                 : on            ? C::INK_BRIGHT
                                 : getClickingTogglesState() ? C::INK
                                                             : C::INK_DIM;
-        /* column: word block + gap 6 + 8px sub row, centred */
-        const int blockH = 24 + 6 + 8;
+        /* column: word block + gap 4 + 12px sub row, centred */
+        const int blockH = 24 + 4 + 12;
         const int top = r.getY() + (r.getHeight() - blockH) / 2;
         g.setColour (word);
         g.setFont (Type::stencil (stencilSize, 0.20f));
@@ -423,24 +462,24 @@ void PlateButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
 
         if (subLine.isNotEmpty())
         {
-            const juce::Font sf = Type::mono (8.0f, 0.14f);
+            const juce::Font sf = Type::micro();
             const juce::Colour subFg = on   ? C::BLOOD_HOT
-                                     : lamp ? C::TAB_INACTIVE_FG
+                                     : lamp ? C::INK_DIM
                                             : C::INK_FAINT;
             const int tw = (int) std::ceil (
                 juce::GlyphArrangement::getStringWidth (sf, subLine));
             const int lampW = lamp ? 6 + 6 : 0;       // 6px lamp + gap 6
             int x = r.getX() + (r.getWidth() - lampW - tw) / 2;
-            const int subY = top + 24 + 6;
+            const int subY = top + 24 + 4;            // the row is 12 now, not 8
             if (lamp)
             {
                 g.setColour (on ? C::BLOOD_HOT : C::LAMP_DEAD);
-                g.fillRect (x, subY + 1, 6, 6);
+                g.fillRect (x, subY + 3, 6, 6);
                 x += 12;
             }
             g.setColour (subFg);
             g.setFont (sf);
-            g.drawText (subLine, x, subY, tw + 2, 8, Justification::centredLeft);
+            g.drawText (subLine, x, subY, tw + 2, 12, Justification::centredLeft);
         }
         return;
     }
@@ -484,9 +523,9 @@ void PlateButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
     if (subLine.isNotEmpty())
     {
         g.setColour (on ? C::BLOOD_HOT : C::INK_FAINT);
-        g.setFont (Type::mono (8.0f, 0.10f));
-        g.drawText (subLine, r.withTop (r.getBottom() - 14).reduced (0, 2),
-                    Justification::centred);
+        g.setFont (Type::micro());
+        g.drawText (subLine, r.withTop (r.getBottom() - 15).reduced (2, 1),
+                    Justification::centred, true);
     }
 }
 
@@ -549,6 +588,28 @@ void TroughFader::paint (juce::Graphics& g)
     g.drawRect (trough, 1);
 
     const int innerH = trough.getHeight() - 2;
+    const int innerTop = trough.getY() + 1;
+
+    /* The scale, drawn before the fill so the fill covers what has been
+     * travelled: 3px ticks in from both walls at the quarters, and a rule all
+     * the way across at the half. Without these the cap has nothing to be read
+     * against and the fader states only "somewhere between nothing and all". */
+    for (int q = 1; q <= 3; ++q)
+    {
+        const int ty = innerTop + innerH - innerH * q / 4;
+        if (q == 2)
+        {
+            g.setColour (C::HAIRLINE);
+            g.fillRect (trough.getX() + 1, ty, 14, 1);
+        }
+        else
+        {
+            g.setColour (C::HAIRLINE_DIM);
+            g.fillRect (trough.getX() + 1,  ty, 3, 1);
+            g.fillRect (trough.getRight() - 4, ty, 3, 1);
+        }
+    }
+
     const int fillH = juce::roundToInt (innerH * value() / 256.0f);
     g.setColour (muted ? C::LAMP_DEAD : C::BLOOD);
     g.fillRect (trough.getX() + 1, trough.getBottom() - 1 - fillH, 14, fillH);
@@ -589,9 +650,22 @@ void MeterComponent::paint (juce::Graphics& g)
     g.setColour (C::HAIRLINE);
     g.drawRect (b, 1);
 
+    constexpr float minus6dB = 0.501187f;
+
+    /* The -6 dB mark, always drawn. It is the meter's only landmark and it
+     * used to be nothing but the point where BLOOD became AMBER, which is no
+     * landmark at all on an idle meter and a hue judgement on a lit one. */
+    g.setColour (C::HAIRLINE);
+    if (horizontal)
+        g.fillRect (b.getX() + 1 + juce::roundToInt ((b.getWidth() - 2) * minus6dB),
+                    b.getY() + 1, 1, b.getHeight() - 2);
+    else
+        g.fillRect (b.getX() + 1,
+                    b.getBottom() - 1 - juce::roundToInt ((b.getHeight() - 2) * minus6dB),
+                    b.getWidth() - 2, 1);
+
     if (level <= 0.0f) return;
 
-    constexpr float minus6dB = 0.501187f;
     const bool rails = level >= 0.995f;
 
     if (horizontal)
@@ -644,7 +718,7 @@ void StatusBadge::set (Badge::Kind k, const juce::String& text)
 int StatusBadge::idealWidth (const juce::String& text)
 {
     return (int) std::ceil (juce::GlyphArrangement::getStringWidth (
-               Type::mono (8.0f, 0.14f), text)) + 14;
+               Type::micro(), text)) + 14;
 }
 
 void StatusBadge::paintBadge (juce::Graphics& g, Rectangle<int> r,
@@ -653,7 +727,7 @@ void StatusBadge::paintBadge (juce::Graphics& g, Rectangle<int> r,
     g.setColour (Badge::border (k));
     g.drawRect (r, 1);
     g.setColour (Badge::text (k));
-    g.setFont (Type::mono (8.0f, 0.14f));
+    g.setFont (Type::micro());
     g.drawText (text, r, Justification::centred);
 }
 
@@ -672,8 +746,8 @@ void SerialTag::setText (const juce::String& t) { text = t; repaint(); }
 void SerialTag::paint (juce::Graphics& g)
 {
     g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f, 0.10f));
-    g.drawText (text, getLocalBounds(), Justification::centredRight);
+    g.setFont (Type::micro());
+    g.drawText (text, getLocalBounds(), Justification::centredRight, true);
 }
 
 /* ======================================================================== */
@@ -747,7 +821,7 @@ void StepCell::paint (juce::Graphics& g)
     if (showIndex)
     {
         g.setColour (num);
-        g.setFont (Type::nano (6.0f));
+        g.setFont (Type::nano());
         g.drawText (juce::String (idx + 1).paddedLeft ('0', 2),
                     b.reduced (2, 1), Justification::bottomRight);
     }
@@ -785,10 +859,11 @@ void paintHeaderBand (juce::Graphics& g, Rectangle<int> band,
     }
     if (serial.isNotEmpty())
     {
+        const juce::Font sf = Type::micro();
         g.setColour (C::INK_FAINT);
-        g.setFont (Type::mono (8.0f, 0.10f));
-        int sw = (int) std::ceil (juce::GlyphArrangement::getStringWidth (
-                     Type::mono (8.0f, 0.10f), serial)) + 4;
+        g.setFont (sf);
+        int sw = (int) std::ceil (
+            juce::GlyphArrangement::getStringWidth (sf, serial)) + 4;
         g.drawText (serial, r.removeFromRight (sw), Justification::centredRight);
         r.removeFromRight (8);
     }
@@ -803,8 +878,8 @@ void paintHeaderBand (juce::Graphics& g, Rectangle<int> band,
     {
         r.removeFromLeft (8);
         g.setColour (C::INK_DIM);
-        g.setFont (Type::mono (8.0f, 0.10f));
-        g.drawText (subtitle, r, Justification::centredLeft);
+        g.setFont (Type::micro());
+        g.drawText (subtitle, r, Justification::centredLeft, true);
     }
 }
 
@@ -831,11 +906,11 @@ void paintHeaderBand (juce::Graphics& g, Rectangle<int> band,
          * whole remaining band, which was invisible while it said "~/MORGUE"
          * but runs straight under the title the moment it says
          * "C:\Users\somebody\MORGUE" instead. */
-        const juce::Font rf = Type::mono (8.0f, 0.10f);
+        const juce::Font rf = Type::micro();
         const int want = (int) std::ceil (
             juce::GlyphArrangement::getStringWidth (rf, rightText)) + 2;
         Rectangle<int> rr = r.removeFromRight (
-            juce::jmin (want, juce::jmax (0, r.getWidth() / 2)));
+            juce::jmin (want, juce::jmax (0, r.getWidth() * 3 / 5)));
         g.setColour (C::INK_FAINT);
         g.setFont (rf);
         g.drawText (rightText, rr, Justification::centredRight, true);
@@ -850,23 +925,35 @@ void paintHeaderBand (juce::Graphics& g, Rectangle<int> band,
     {
         r.removeFromLeft (8);
         g.setColour (C::INK_DIM);
-        g.setFont (Type::mono (8.0f, 0.10f));
-        g.drawText (subtitle, r, Justification::centredLeft);
+        g.setFont (Type::micro());
+        g.drawText (subtitle, r, Justification::centredLeft, true);
     }
 }
 
 void paintLabelRow (juce::Graphics& g, Rectangle<int> row,
                     const juce::String& left, const juce::String& right)
 {
-    g.setColour (C::INK_DIM);
-    g.setFont (Type::label());
-    g.drawText (left, row.reduced (10, 0), Justification::centredLeft);
+    Rectangle<int> r = row.reduced (10, 0);
+
+    /* The hint's width comes out of the row FIRST, capped at 60% and
+     * ellipsised, so it can never be painted underneath the label. Both
+     * strings used to be drawn into this same rectangle from opposite ends. */
     if (right.isNotEmpty())
     {
+        const juce::Font rf = Type::micro();
+        const int want = (int) std::ceil (
+            juce::GlyphArrangement::getStringWidth (rf, right)) + 2;
+        Rectangle<int> rr = r.removeFromRight (
+            juce::jmin (want, juce::jmax (0, r.getWidth() * 3 / 5)));
         g.setColour (C::INK_FAINT);
-        g.setFont (Type::mono (8.0f, 0.10f));
-        g.drawText (right, row.reduced (10, 0), Justification::centredRight);
+        g.setFont (rf);
+        g.drawText (right, rr, Justification::centredRight, true);
+        r.removeFromRight (8);
     }
+
+    g.setColour (C::INK_DIM);
+    g.setFont (Type::label());
+    g.drawText (left, r, Justification::centredLeft, true);
 }
 
 

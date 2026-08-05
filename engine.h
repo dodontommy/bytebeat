@@ -175,6 +175,77 @@ int  bb_engine_arr_arm(int lane, int bars, int16_t *dst, unsigned cap);
 /* Abandon an armed or running capture; status returns to ARR_REC_IDLE. */
 void bb_engine_arr_cancel(void);
 
+/* ---- THE RETURN BUS -------------------------------------------------------
+ * Eight pre-allocated return slots (bb.ret[], bytebeat.h), an 11 x 8 send
+ * matrix and an 8 x 8 return->return link matrix. bb_engine_render() may not
+ * allocate, so "create" and "destroy" are a TYPE CHANGE over the fixed array,
+ * not an allocation: the DSP arenas exist from load and never move.
+ *
+ * Every return->return edge is delayed by exactly one sample, including the
+ * diagonal. Slot index is therefore acoustically invisible, the processing
+ * order cannot affect one output sample, and the stability proof is one line:
+ * every cycle passes through ret_limit()'s hard ceiling, so the state is
+ * bounded for every matrix and every patch with no graph analysis at all.
+ *
+ * SLOT 0 IS THE CHAMBER. Its LEVEL / P0 / P1 and its send column have no
+ * storage of their own -- they ARE bb.verb_level / verb_size / verb_tone and
+ * bb.layer[s].send / bb.smp_send. Everything below redirects, so every
+ * existing caller of those atomics keeps working unchanged, and a session with
+ * one CHAMBER and an empty matrix renders bit-identically to the engine that
+ * had no return bus. See the comment on `Return` in bytebeat.h. */
+
+/* Lifecycle. ASYNCHRONOUS by necessity: the slot's output is faded out over
+ * ~46 ms, then two render epochs must pass (the same proof bb_reclaim() uses)
+ * before its arena may be cleared and the new type armed. Drive it by calling
+ * bb_engine_ret_service() once per UI frame -- bb_engine_reclaim() already
+ * does. bb_engine_ret_pending() is 1 until it lands, roughly 80-110 ms.
+ * Returns 0, or -1 on a bad slot or type. UI THREAD ONLY. */
+int  bb_engine_ret_create (int slot, int type);
+int  bb_engine_ret_destroy(int slot);
+int  bb_engine_ret_pending(int slot);
+void bb_engine_ret_service(void);
+
+/* Bulk-edit bracket for a session load or a preset recall: quiesce every slot,
+ * write whatever you like, release. The quiesce IS the hold -- there is no
+ * flag with a stale-forever failure mode. The wait is bounded: if the render
+ * thread is not running (startup, before the audio device exists) both calls
+ * return promptly. UI THREAD ONLY. */
+void bb_engine_ret_quiesce_all(void);
+void bb_engine_ret_release_all(void);
+
+/* Knobs. One atomic store each, effective next period, safe from any thread.
+ * Slot 0 redirects LEVEL / P0 / P1 to bb.verb_level / verb_size / verb_tone.
+ * Values are clamped here AND again in the render snapshot. */
+void bb_engine_ret_level(int slot, int v);          /* 0..256           */
+int  bb_engine_ret_level_get(int slot);
+void bb_engine_ret_param(int slot, int p, int v);   /* p 0..7, v 0..255 */
+int  bb_engine_ret_param_get(int slot, int p);
+void bb_engine_ret_sync(int slot, int v);           /* 0..10            */
+int  bb_engine_ret_sync_get(int slot);
+void bb_engine_ret_mute(int slot, int on);
+int  bb_engine_ret_mute_get(int slot);
+int  bb_engine_ret_type_get(int slot);
+
+/* The matrix. src 0..BB_RET_NSRC-1 (0-7 voices, 8 LICKS, 9 DRY master, 10 the
+ * previous frame's summed wet -- the no-input-mixer row). Sends into slot 0
+ * from src 0..8 redirect to bb.layer[src].send / bb.smp_send. Sends are
+ * 0..255, links 0..256. `from == to` is legal and is the freeze /
+ * regeneration cell: one frame of the effect wrapped around itself. */
+void bb_engine_ret_send(int src, int slot, int amt);
+int  bb_engine_ret_send_get(int src, int slot);
+void bb_engine_ret_link(int from, int to, int amt);
+int  bb_engine_ret_link_get(int from, int to);
+
+/* Kill the feedback, keep the voices: zero every link and every return level
+ * in one call, for a bindable panic that is narrower than bb.panic.
+ *
+ * Note that bb.panic ALREADY does something stronger for as long as it is
+ * held: while panicked the render thread reads the whole matrix as zero, so
+ * loops DECAY behind the mute instead of coming back saturated when you
+ * release it. That is a deliberate behaviour change -- PANIC used to leave the
+ * reverb tail ringing behind the mute and no longer does. */
+void bb_engine_ret_panic(void);
+
 /* Load the default session shape: all layers off except the floor, an honest
  * starting point for a blank slate rather than the groove. */
 void bb_engine_set_defaults(void);

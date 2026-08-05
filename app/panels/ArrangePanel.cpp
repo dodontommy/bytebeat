@@ -1,10 +1,10 @@
 /* ArrangePanel.cpp -- see ArrangePanel.h. Spec section 6 geometry:
  * toolbar 30, ruler 22 (120 gutter + 32 bar columns), ten 42px lanes,
- * automation lane 96. R2 v1: the timeline is LIVE -- the panel owns the
- * clip edit model and republishes it to the engine on every edit; the
- * engine's published song is what plays. Playhead, lane lamps and the
- * automation plot remain real engine state only. DRAW / SLIP /
- * CONSOLIDATE / automation ARM CAPTURE stay planned chrome (R3). */
+ * automation lane 96. The timeline is LIVE -- the panel owns the clip edit
+ * model and republishes it to the engine on every edit; the engine's
+ * published song is what plays. Playhead, lane lamps and the automation
+ * plot are real engine state only. Every control on the toolbar reaches
+ * the engine; nothing here is painted chrome. */
 
 #include "ArrangePanel.h"
 #include "Session.h"
@@ -76,12 +76,9 @@ void ClipComponent::paintClip (juce::Graphics& g, Rectangle<int> area,
     juce::Colour bg, bd, fg;
     switch (k)
     {
-        case RECORDED: bg = juce::Colour (0xff1d1210); bd = C::BLOOD;
-                       fg = C::ARMED_TEXT; break;
-        case PATTERN:  bg = C::CONTROL;                bd = C::OXIDE_DIM;
-                       fg = C::OXIDE_INK;  break;
-        default:       bg = C::PLATE;                  bd = C::EDGE;
-                       fg = C::INK_DIM;    break;
+        case RECORDED: bg = C::BLOOD_DEEP; bd = C::BLOOD;     fg = C::ARMED_TEXT; break;
+        case PATTERN:  bg = C::CONTROL;    bd = C::OXIDE_DIM; fg = C::OXIDE_INK; break;
+        default:       bg = C::PLATE;      bd = C::EDGE;      fg = C::INK_DIM;   break;
     }
 
     g.setColour (bg);
@@ -91,13 +88,22 @@ void ClipComponent::paintClip (juce::Graphics& g, Rectangle<int> area,
 
     Rectangle<int> inner = area.reduced (1);
 
-    // filled 8px title bar across the top
-    Rectangle<int> bar = inner.removeFromTop (8);
+    /* Filled title bar across the top. It is 13 tall, not 8: the title is
+     * set at the 8px floor and Type::rowH(8) = 13, and a glyph in a box
+     * shorter than that is clipped rather than merely tight.
+     * The title is INK_BRIGHT in every colourway, because the bar is filled
+     * with the BORDER colour -- the old fg-on-bd pairings ran as low as
+     * 2.2:1 (INK_DIM on EDGE). INK_BRIGHT clears 5:1 on all three. */
+    Rectangle<int> bar = inner.removeFromTop (juce::jmin (inner.getHeight(),
+                                                          Type::rowH (Type::kMinSize)));
     g.setColour (bd);
     g.fillRect (bar);
-    g.setColour (fg);
-    g.setFont (Type::nano (7.0f));
-    g.drawText (title, bar.withTrimmedLeft (3), Justification::centredLeft, false);
+    g.setColour (C::INK_BRIGHT);
+    g.setFont (Type::nano());
+    /* names run to ARR_NAME_MAX (48) and a clip can be one bar wide, so
+     * ellipsise rather than cutting a word in half without saying so */
+    g.drawText (title, bar.withTrimmedLeft (3).withTrimmedRight (2),
+                Justification::centredLeft, true);
 
     // 14px striped waveform strip at the bottom (1px stripes every 3px)
     Rectangle<int> wave = inner.removeFromBottom (14);
@@ -122,9 +128,22 @@ ArrangePanel::ArrangePanel()
 {
     formats.registerBasicFormats();
 
-    for (PlateButton* b : { &selectBtn, &trimBtn, &armBtn, &captureBtn,
-                            &barsBtn, &placeBtn, &loopBtn })
+    for (PlateButton* b : { &songBtn, &selectBtn, &trimBtn, &armBtn, &captureBtn,
+                            &barsBtn, &placeBtn, &loopBtn, &recSrcBtn })
         addAndMakeVisible (*b);
+
+    songBtn.setTooltip (U8 ("PLAY SONG / STOP SONG - the timeline's own transport, "
+                            "separate from the master RUN. Stopping is a MUTE, not a "
+                            "pause: the clips keep tracking the bar grid while "
+                            "stopped, so PLAY drops in wherever the song has got to "
+                            "rather than resuming from where you stopped it. Click "
+                            "the ruler to move the song to a bar."));
+    recSrcBtn.setTooltip (U8 ("WHAT REC PRINTS. WHOLE MIX prints everything you "
+                              "hear, arrangement included. OVERDUB prints everything "
+                              "EXCEPT the arranged clips - loop a section, play over "
+                              "it, and only the new layer is captured instead of the "
+                              "backing being printed again on every pass. Also "
+                              "applies to the network sink."));
 
     selectBtn.setTooltip (U8 ("SELECT - move clips. Drag a clip to another bar or "
                               "lane; snaps to whole bars."));
@@ -142,6 +161,19 @@ ArrangePanel::ArrangePanel()
                               "at the device rate; tempo stretches nothing."));
     loopBtn.setTooltip   (U8 ("LOOP CLIP - repeat the selected clip's audio "
                               "inside its window instead of going silent."));
+
+    songBtn.onToggle = [this] (bool on)
+    {
+        bb_engine_song_play (on ? 1 : 0);
+        refreshToolbarState();
+        repaint();
+    };
+
+    recSrcBtn.onToggle = [this] (bool on)
+    {
+        bb_engine_rec_src (on ? BB_REC_LIVE : BB_REC_MASTER);
+        refreshToolbarState();
+    };
 
     selectBtn.onToggle = [this] (bool) { mode = ModeSelect; refreshToolbarState(); };
     trimBtn.onToggle   = [this] (bool) { mode = ModeTrim;   refreshToolbarState(); };
@@ -240,38 +272,52 @@ ArrangePanel::Geom ArrangePanel::geom() const
     return G;
 }
 
+/* Three groups, in the order you use them: the song's transport, the edit
+ * tools, then capture. Every slot is sized at its WIDEST text so a plate
+ * whose label changes with state (PLAY/STOP SONG, n BARS, REC source) does
+ * not resize the row underneath the pointer. */
 ArrangePanel::ToolbarSlots ArrangePanel::toolbarSlots (Rectangle<int> bar) const
 {
-    const juce::Font liveF    = Type::mono (10.0f, 0.16f);   // PlateButton face
-    const juce::Font plannedF = Type::mono (9.0f, 0.14f);    // painted chrome
+    const juce::Font liveF = Type::mono (10.0f, 0.16f);   // PlateButton face
     const int chipH = 18;
     const int cy = bar.getY() + (bar.getHeight() - chipH) / 2;
     int x = bar.getX() + 8;
 
     ToolbarSlots s;
-    auto next = [&] (const juce::Font& f, const char* text)
+    /* pad 16; a lamp plate needs 7 + 5 + 5 on the left as well (see
+     * PlateButton::paintButton), so it gets pad 30 */
+    auto slot = [&] (const char* text, int pad)
     {
-        const int w = textW (f, text) + 16;
+        const int w = textW (liveF, text) + pad;
         Rectangle<int> r (x, cy, w, chipH);
         x += w + 3;
         return r;
     };
+    auto next     = [&] (const char* text) { return slot (text, 16); };
+    auto nextLamp = [&] (const char* text) { return slot (text, 30); };
+    auto divider = [&]
+    {
+        x += 3;                                          // group gap 6
+        Rectangle<int> r (x, bar.getY() + (bar.getHeight() - 18) / 2, 1, 18);
+        x += 1 + 6;
+        return r;
+    };
 
-    s.select = next (liveF,    "SELECT");
-    s.draw   = next (plannedF, "DRAW");
-    s.trim   = next (liveF,    "TRIM");
-    s.slip   = next (plannedF, "SLIP");
+    s.song     = nextLamp ("STOP SONG");                 // widest of the pair
+    s.dividerA = divider();
 
-    x += 3;                                              // group gap 6
-    s.divider = Rectangle<int> (x, bar.getY() + (bar.getHeight() - 18) / 2, 1, 18);
-    x += 1 + 6;
+    s.select   = next ("SELECT");
+    s.trim     = next ("TRIM");
+    s.dividerB = divider();
 
-    s.arm         = next (liveF,    "ARM LANE");
-    s.capture     = next (liveF,    "CAPTURE");
-    s.bars        = next (liveF,    "8 BARS");           // fixed at widest text
-    s.loopClip    = next (liveF,    "LOOP CLIP");
-    s.consolidate = next (plannedF, "CONSOLIDATE");
-    s.place       = next (liveF,    "PLACE");
+    s.arm      = next ("ARM LANE");
+    s.capture  = next ("CAPTURE");
+    s.bars     = next ("8 BARS");
+    s.loopClip = next ("LOOP CLIP");
+    s.place    = next ("PLACE");
+    s.dividerC = divider();
+
+    s.recSrc   = nextLamp ("REC: WHOLE MIX");
     s.rightOfChips = x;
     return s;
 }
@@ -279,6 +325,7 @@ ArrangePanel::ToolbarSlots ArrangePanel::toolbarSlots (Rectangle<int> bar) const
 void ArrangePanel::resized()
 {
     const ToolbarSlots s = toolbarSlots (geom().toolbar);
+    songBtn   .setBounds (s.song);
     selectBtn .setBounds (s.select);
     trimBtn   .setBounds (s.trim);
     armBtn    .setBounds (s.arm);
@@ -286,6 +333,7 @@ void ArrangePanel::resized()
     barsBtn   .setBounds (s.bars);
     loopBtn   .setBounds (s.loopClip);
     placeBtn  .setBounds (s.place);
+    recSrcBtn .setBounds (s.recSrc);
 }
 
 Rectangle<int> ArrangePanel::clipRect (const ArrClip& c, const Geom& G) const
@@ -626,6 +674,18 @@ void ArrangePanel::placeLockerFile()
 
 void ArrangePanel::refreshToolbarState()
 {
+    /* Both of these are engine truth (and both survive a session reload),
+     * so the plates are pulled from the engine, never from a local flag.
+     * The WORD changes with the state as well as the plate colour -- state
+     * carried by hue alone does not survive greyscale (Theme.h). */
+    const bool songOn = bb_engine_song_playing() != 0;
+    songBtn.setToggleStateQuiet (songOn);
+    songBtn.setButtonText (songOn ? "STOP SONG" : "PLAY SONG");
+
+    const bool overdub = bb_engine_rec_src_get() == BB_REC_LIVE;
+    recSrcBtn.setToggleStateQuiet (overdub);
+    recSrcBtn.setButtonText (overdub ? "REC: OVERDUB" : "REC: WHOLE MIX");
+
     selectBtn.setToggleStateQuiet (mode == ModeSelect);
     trimBtn  .setToggleStateQuiet (mode == ModeTrim);
     armBtn   .setToggleStateQuiet (armedLane >= 0 && armedLane == focusedLane);
@@ -812,11 +872,18 @@ void ArrangePanel::paint (juce::Graphics& g)
     g.setColour (C::PANEL);
     g.fillRect (b);
 
+    /* The right slot used to advertise a zoom that does not exist. It now
+     * prints the window the view is actually showing, which changes as the
+     * playhead pages, so it is a readout rather than a claim. */
     paintHeaderBand (g, b.removeFromTop (headerBandH),
                      "ARRANGE",
                      U8 ("MORGUE PLAYLIST \xc2\xb7 64 BARS"),
-                     U8 ("SNAP 1 BAR \xc2\xb7 ZOOM 2 BAR/IN"),
-                     Badge::PARTIAL, "PARTIAL");
+                     juce::String ("SNAP 1 BAR")
+                       + U8 (" \xc2\xb7 VIEW ")
+                       + juce::String (viewOffset + 1).paddedLeft ('0', 2)
+                       + U8 ("\xe2\x80\x93")
+                       + juce::String (viewOffset + kBars).paddedLeft ('0', 2),
+                     Badge::LIVE, "LIVE");
 
     paintToolbar (g, b.removeFromTop (kToolbarH));
 
@@ -853,29 +920,17 @@ void ArrangePanel::paintToolbar (juce::Graphics& g, Rectangle<int> bar)
 
     const ToolbarSlots s = toolbarSlots (bar);
 
-    /* planned chrome: DRAW / SLIP / CONSOLIDATE stay drawn idle (R3);
-     * the live plates are child PlateButtons on the same grid. */
-    const juce::Font chipFont = Type::mono (9.0f, 0.14f);
-    auto plannedChip = [&] (Rectangle<int> r, const char* text)
-    {
-        g.setColour (C::PLATE_LOW);
-        g.fillRect (r);
-        g.setColour (C::HAIRLINE);
-        g.drawRect (r, 1);
-        g.setColour (C::TAB_INACTIVE_FG);
-        g.setFont (chipFont);
-        g.drawText (text, r, Justification::centred);
-    };
-    plannedChip (s.draw, "DRAW");
-    plannedChip (s.slip, "SLIP");
-    plannedChip (s.consolidate, "CONSOLIDATE");
-
+    /* group rules only -- every plate on this bar is a child PlateButton */
     g.setColour (C::HAIRLINE);
-    g.fillRect (s.divider);
+    g.fillRect (s.dividerA);
+    g.fillRect (s.dividerB);
+    g.fillRect (s.dividerC);
 
+    /* the right slot carries a count of the model, not a promise */
     g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f, 0.14f));
-    g.drawText (U8 ("MULTITRACK REC ROUTES PER-VOICE OUT \xe2\x86\x92 LANE"),
+    g.setFont (Type::micro());
+    g.drawText (juce::String ((int) clips.size())
+                    + (clips.size() == 1 ? " CLIP" : " CLIPS"),
                 bar.withTrimmedRight (8)
                    .withTrimmedLeft (s.rightOfChips + 6 - bar.getX()),
                 Justification::centredRight, false);
@@ -889,10 +944,14 @@ void ArrangePanel::paintRuler (juce::Graphics& g, Rectangle<int> ruler)
     g.fillRect (ruler.getX(), ruler.getBottom() - 1, ruler.getWidth(), 1);
     g.fillRect (ruler.getX() + kGutterW - 1, ruler.getY(), 1, ruler.getHeight() - 1);
 
-    g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f, 0.12f));
+    g.setColour (C::INK_DIM);
+    g.setFont (Type::micro());
     g.drawText ("BAR", ruler.withWidth (kGutterW).reduced (8, 0),
                 Justification::centredLeft);
+    g.setColour (C::INK_FAINT);
+    g.drawText (U8 ("CLICK \xe2\x86\x92 SEEK"),
+                ruler.withWidth (kGutterW).reduced (8, 0),
+                Justification::centredRight);
 
     const int laneX = ruler.getX() + kGutterW;
     const int laneW = juce::jmax (1, ruler.getWidth() - kGutterW);
@@ -902,16 +961,28 @@ void ArrangePanel::paintRuler (juce::Graphics& g, Rectangle<int> ruler)
         if (i % 4 == 0)
         {
             const int x0 = laneX + i * laneW / kBars;
-            g.setColour (C::INK_FAINT);
-            g.setFont (Type::mono (8.0f));
+            g.setColour (C::INK_DIM);              // this is the axis, not metadata
+            g.setFont (Type::micro());
             g.drawText (juce::String (viewOffset + i + 1),
-                        Rectangle<int> (x0 + 3, ruler.getY(), 24, ruler.getHeight() - 1),
+                        Rectangle<int> (x0 + 3, ruler.getY(), 26, ruler.getHeight() - 1),
                         Justification::centredLeft, false);
         }
         // column rule at the right edge; heavier every 4th
         const int xr = laneX + (i + 1) * laneW / kBars - 1;
-        g.setColour ((i + 1) % 4 == 0 ? C::LAMP_DEAD : C::HAIRLINE_DIM);
+        g.setColour ((i + 1) % 4 == 0 ? C::HAIRLINE : C::HAIRLINE_DIM);
         g.fillRect (xr, ruler.getY(), 1, ruler.getHeight() - 1);
+    }
+
+    /* A 1px rule is the right weight down the lanes but it is not enough to
+     * FIND the playhead on a 32-bar ruler, so the ruler carries a 5px block
+     * at the same x. Same colour, same meaning, findable at a glance. */
+    const float ph = playheadBarF();
+    if (ph >= (float) viewOffset && ph < (float) (viewOffset + kBars))
+    {
+        const float frac = (ph - (float) viewOffset) / (float) kBars;
+        const int px = laneX + juce::jmin (laneW - 1, (int) (frac * (float) laneW));
+        g.setColour (C::BLOOD_HOT);
+        g.fillRect (px - 2, ruler.getY(), 5, 4);
     }
 }
 
@@ -964,11 +1035,19 @@ void ArrangePanel::paintLanes (juce::Graphics& g, Rectangle<int> area)
         g.fillRect (head.getX() + 6, head.getCentreY() - 2, 5, 5);
         g.setColour (L == focusedLane ? C::INK
                                       : on ? C::INK_DIM : C::INK_FAINT);
-        g.setFont (Type::mono (9.0f, 0.08f));
+        g.setFont (L == focusedLane ? Type::label() : Type::micro());
         g.drawText (name, head.withTrimmedLeft (17), Justification::centredLeft, false);
         g.setColour (C::INK_FAINT);
-        g.setFont (Type::nano (7.0f));
+        g.setFont (Type::nano());
         g.drawText (kindTag, head.withTrimmedRight (6), Justification::centredRight, false);
+
+        /* the focused lane is where PLACE and ARM LANE land, so it gets a
+         * mark you can find without comparing two greys */
+        if (L == focusedLane)
+        {
+            g.setColour (C::INK);
+            g.fillRect (head.getX(), head.getY(), 2, head.getHeight());
+        }
     }
 
     /* ---- clips (edit model; drawn in model order, later on top) --------- */
@@ -993,13 +1072,23 @@ void ArrangePanel::paintLanes (juce::Graphics& g, Rectangle<int> area)
         const juce::String title = juce::String::fromUTF8 (c.name);
         if (c.audio == nullptr)
         {
-            /* silent ghost: source file missing -- INK_GHOST body, name intact */
+            /* Silent ghost: the source file did not come back. Drawn as a
+             * recess (DISABLED_BG is below PANEL now) with the name still
+             * readable, and SAID in words -- a clip that makes no sound is
+             * not something to work out from a shade of grey. */
             g.setColour (C::DISABLED_BG);
             g.fillRect (r);
-            g.setColour (C::INK_GHOST);
+            g.setColour (C::HAIRLINE_DIM);
             g.drawRect (r, 1);
-            g.setFont (Type::nano (7.0f));
-            g.drawText (title, r.reduced (4, 0), Justification::centredLeft, false);
+            g.setFont (Type::nano());
+            g.setColour (C::INK_FAINT);
+            g.drawText (title, r.reduced (4, 0), Justification::centredLeft, true);
+            if (r.getWidth() > 90)
+            {
+                g.setColour (C::AMBER);
+                g.drawText ("FILE MISSING", r.reduced (4, 0),
+                            Justification::centredRight, false);
+            }
         }
         else
         {
@@ -1060,7 +1149,7 @@ void ArrangePanel::paintAutomation (juce::Graphics& g, Rectangle<int> a)
 {
     g.setColour (C::PANEL);
     g.fillRect (a);
-    g.setColour (C::LAMP_DEAD);                       // heavier separating rule
+    g.setColour (C::EDGE);                            // heavier separating rule
     g.fillRect (a.getX(), a.getY(), a.getWidth(), 1);
     a.removeFromTop (1);
 
@@ -1084,7 +1173,8 @@ void ArrangePanel::paintAutomation (juce::Graphics& g, Rectangle<int> a)
             paramLabel = "p" + juce::String (target);
             Program* pr = atomic_load (&l->prog);
             if (pr != nullptr && (pr->used_p & (1u << (unsigned) target)) != 0)
-                paramLabel << " " << expr_role_name (pr->role[target]);
+                paramLabel << " "
+                           << juce::String (expr_role_name (pr->role[target])).toUpperCase();
         }
         else
             paramLabel = kCtlName[target - BB_NPARAM];
@@ -1093,12 +1183,12 @@ void ArrangePanel::paintAutomation (juce::Graphics& g, Rectangle<int> a)
         modeLabel = smooth ? "MODE: SMOOTH" : "MODE: STEP";
     }
 
-    /* ---- header row: voice + parameter + mode + ARM CAPTURE ------------ */
+    /* ---- header row: voice + parameter + mode + where to edit it ------- */
     Rectangle<int> head = a.removeFromTop (kAutoHeadH - 1);
     g.setColour (C::HAIRLINE);
     g.fillRect (head.getX(), head.getBottom() - 1, head.getWidth(), 1);
 
-    const juce::Font f8 = Type::mono (8.0f, 0.14f);
+    const juce::Font f8 = Type::micro();
     int x = head.getX() + 8;
     auto seg = [&] (const juce::String& text, juce::Colour fg)
     {
@@ -1114,50 +1204,58 @@ void ArrangePanel::paintAutomation (juce::Graphics& g, Rectangle<int> a)
              + U8 (" \xc2\xb7 ") + paramLabel, C::INK);
     seg (modeLabel, C::INK_FAINT);
 
-    {   // ARM CAPTURE tag (R3 chrome, drawn as the mockup shows)
-        const juce::String tag ("ARM CAPTURE");
-        const int w = textW (f8, tag) + 10;
-        Rectangle<int> r (x, head.getY() + (head.getHeight() - 1 - 12) / 2, w, 12);
-        g.setColour (C::BLOOD);
-        g.drawRect (r, 1);
-        g.setColour (C::BLOOD_HOT);
-        g.setFont (f8);
-        g.drawText (tag, r, Justification::centred, false);
-        x += w + 10;
-    }
-
+    /* This lane is a DISPLAY. It plots the focused voice's lock lane, which
+     * is real engine state, but there is no edit gesture on it -- there was
+     * an ARM CAPTURE tag here, painted in the reserved accent, that was not
+     * hit-tested anywhere, and a "CLICK-DRAG TO DRAW" instruction for a
+     * gesture with no handler. Both are gone; what replaces them is where
+     * the edit actually lives. */
     g.setColour (C::INK_FAINT);
     g.setFont (f8);
-    g.drawText (U8 ("R3 \xc2\xb7 STEP | SMOOTH \xc2\xb7 CLICK-DRAG TO DRAW"),
+    g.drawText (U8 ("READ-ONLY \xc2\xb7 SET LOCKS ON THE RACK LOCK LANE"),
                 head.withTrimmedRight (8).withTrimmedLeft (x - head.getX()),
                 Justification::centredRight, false);
 
-    /* ---- body: 120 gutter with 255/128/000 scale, then the plot -------- */
+    /* ---- body: 120 gutter carrying the target's own scale, then plot --- */
     Rectangle<int> gutter = a.removeFromLeft (kGutterW);
     g.setColour (C::HAIRLINE);
     g.fillRect (gutter.getRight() - 1, gutter.getY(), 1, gutter.getHeight());
+    /* the scale is the TARGET's range, not a fixed 0-255: a ctl lock lane
+     * runs over its own CtlInfo lo..hi and the axis has to say so */
+    float lo = 0.0f, hi = 255.0f;
+    if (target >= BB_NPARAM && target < BB_LOCK_COUNT)
+    {
+        const CtlInfo& ci = bb_lctl_info[kCtlIdx[target - BB_NPARAM]];
+        lo = (float) ci.lo;
+        hi = (float) ci.hi;
+    }
     g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f));
+    g.setFont (Type::micro());
     Rectangle<int> gin = gutter.withTrimmedRight (1).reduced (6, 4);
-    g.drawText ("255", gin, Justification::topLeft,    false);
-    g.drawText ("128", gin, Justification::centredLeft, false);
-    g.drawText ("000", gin, Justification::bottomLeft, false);
+    auto axis = [] (float v) { return juce::String (juce::roundToInt (v)).paddedLeft ('0', 3); };
+    g.drawText (axis (hi),               gin, Justification::topLeft,     false);
+    g.drawText (axis ((lo + hi) * 0.5f), gin, Justification::centredLeft, false);
+    g.drawText (axis (lo),               gin, Justification::bottomLeft,  false);
 
     Rectangle<int> plot = a;
-    g.setColour (C::HAIRLINE_DIM);
+    g.setColour (C::HAIRLINE_FAINT);
     g.fillRect (plot.getX(), plot.getY() + plot.getHeight() / 2, plot.getWidth(), 1);
+
+    /* The pattern is one bar long and is repeated across all 32 visible
+     * bars, so without bar rules the curve reads as a texture rather than a
+     * shape. A rule every 4 bars, matching the ruler, gives the eye
+     * something to segment it against. */
+    for (int i = 4; i < kBars; i += 4)
+    {
+        const int bx = plot.getX() + i * plot.getWidth() / kBars;
+        g.setColour (C::HAIRLINE_FAINT);
+        g.fillRect (bx, plot.getY(), 1, plot.getHeight());
+    }
 
     if (target >= 0 && plot.getWidth() > 1 && plot.getHeight() > 9)
     {
         // one 16-step motion cycle per bar, tiled across the 32-bar window
         const int n = juce::jlimit (1, BB_STEPS, atomic_load (&l->ctl[LCTL_STEPS]));
-        float lo = 0.0f, hi = 255.0f;
-        if (target >= BB_NPARAM)
-        {
-            const CtlInfo& ci = bb_lctl_info[kCtlIdx[target - BB_NPARAM]];
-            lo = (float) ci.lo;
-            hi = (float) ci.hi;
-        }
         float sv[BB_STEPS];
         for (int s = 0; s < n; ++s)
         {
@@ -1197,8 +1295,19 @@ void ArrangePanel::paintAutomation (juce::Graphics& g, Rectangle<int> a)
                 curve.lineTo (X (gs + 1), y);
             }
         }
+        /* 1px, not 1.5: the same shape is drawn 32 times across this lane,
+         * and at 1.5px the repeats merge into a band. */
         g.setColour (C::OXIDE);
-        g.strokePath (curve, juce::PathStrokeType (1.5f));
+        g.strokePath (curve, juce::PathStrokeType (1.0f));
+    }
+    else if (target < 0)
+    {
+        /* nothing locked on this voice: say so where the curve would be,
+         * rather than leaving an empty framed box that looks broken */
+        g.setColour (C::INK_GHOST);
+        g.setFont (Type::micro());
+        g.drawText (U8 ("NO STEP LOCKS ON THIS VOICE"), plot,
+                    Justification::centred, false);
     }
 
     // playhead continues through the automation plot

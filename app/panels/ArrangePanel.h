@@ -8,12 +8,28 @@
  * engine's published snapshot is what actually plays, and clip audio
  * lifetime stays here via bb_engine_clip_create/release.
  *
- * Live in v1: SELECT / TRIM modes, ARM LANE, per-lane CAPTURE (N bars into
- * a CLIP-<LANE>-<NNNN>.wav plus a placed clip), BARS stepper, PLACE (drop
- * the LOCKER selection at the playhead), LOOP CLIP, ruler click = seek,
- * clip move / re-lane / trim / delete / loop, session rehydration.
- * Still planned chrome (drawn disabled, not wired): DRAW, SLIP,
- * CONSOLIDATE, automation ARM CAPTURE (R3).
+ * Everything on this panel is wired. SELECT / TRIM modes, ARM LANE,
+ * per-lane CAPTURE (N bars into a CLIP-<LANE>-<NNNN>.wav plus a placed
+ * clip), BARS stepper, PLACE (drop the LOCKER selection at the playhead),
+ * LOOP CLIP, ruler click = seek, clip move / re-lane / trim / delete /
+ * loop, session rehydration, plus the two transport plates below.
+ *
+ * PLAY SONG / STOP SONG  -- bb_engine_song_play/_playing: the timeline's
+ *   own transport, independent of master RUN. STOP is a MUTE, not a pause:
+ *   the clip windows keep tracking the bar grid while stopped, so PLAY
+ *   drops in wherever the song has got to. Use the ruler to move it.
+ * REC: WHOLE MIX / REC: OVERDUB -- bb_engine_rec_src with BB_REC_MASTER /
+ *   BB_REC_LIVE. OVERDUB prints everything EXCEPT the arrangement's clip
+ *   playback, so a loop of arranged material can be played over and only
+ *   the new layer is captured instead of the backing stacking up on every
+ *   pass. Applies to REC and to the network sink.
+ *
+ * The DRAW / SLIP / CONSOLIDATE chips and the automation lane's ARM
+ * CAPTURE tag are gone rather than drawn disabled: they sat on the same
+ * grid, in the same plate grammar, as the working plates and were not
+ * hit-tested anywhere. The automation lane itself stays -- it plots real
+ * lock-lane state -- but it is a READ-ONLY display and now says so; the
+ * locks are edited on the RACK lock lane.
  *
  * Tempo stretches nothing: clip audio always plays 1:1 at the device rate
  * from its window start; a BPM change moves the bar grid under the audio.
@@ -40,10 +56,13 @@ namespace morgue
 /*  ClipComponent -- the clip visual grammar (spec section 6).               */
 /*                                                                          */
 /*  Inset 2 vertically (the parent applies it when placing the clip),       */
-/*  1px border, a filled 8px title bar across the top, a 14px striped       */
-/*  waveform strip at the bottom. Colourways:                               */
-/*    AUDIO    #141312 / EDGE       · RECORDED #1d1210 / BLOOD              */
-/*    PATTERN  #171614 / OXIDE_DIM                                          */
+/*  1px border, a filled title bar across the top (Type::rowH of the 8px    */
+/*  floor, so the name is not clipped), a 14px striped waveform strip at    */
+/*  the bottom. Colourways -- fill / border:                                */
+/*    AUDIO    PLATE / EDGE   ·  RECORDED BLOOD_DEEP / BLOOD                */
+/*    PATTERN  CONTROL / OXIDE_DIM                                          */
+/*  The title itself is INK_BRIGHT in all three: it sits on the filled      */
+/*  title bar, i.e. on the BORDER colour, which is a mid tone.              */
 /*  ArrangePanel paints its clips through the static helper.                */
 /* ======================================================================== */
 class ClipComponent : public juce::Component
@@ -115,8 +134,9 @@ private:
 
     struct ToolbarSlots
     {
-        juce::Rectangle<int> select, draw, trim, slip, divider,
-                             arm, capture, bars, loopClip, consolidate, place;
+        juce::Rectangle<int> song, dividerA, select, trim, dividerB,
+                             arm, capture, bars, loopClip, place,
+                             dividerC, recSrc;
         int rightOfChips = 0;
     };
     ToolbarSlots toolbarSlots (juce::Rectangle<int> bar) const;
@@ -185,7 +205,8 @@ private:
     int      dragGrabOff = 0;                        /* bars into the clip  */
     unsigned dragOrigStart = 0, dragOrigLen = 1;
 
-    /* toolbar plates (live); DRAW/SLIP/CONSOLIDATE stay painted chrome */
+    /* toolbar plates -- every one of these reaches the engine */
+    PlateButton songBtn    { "PLAY SONG", true,  true  };
     PlateButton selectBtn  { "SELECT",    false, true  };
     PlateButton trimBtn    { "TRIM",      false, true  };
     PlateButton armBtn     { "ARM LANE",  false, true  };
@@ -193,6 +214,7 @@ private:
     PlateButton barsBtn    { "2 BARS",    false, false };
     PlateButton placeBtn   { "PLACE",     false, false };
     PlateButton loopBtn    { "LOOP CLIP", false, true  };
+    PlateButton recSrcBtn  { "REC: WHOLE MIX", true, true };
 
     juce::AudioFormatManager formats;
 

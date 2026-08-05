@@ -212,68 +212,101 @@ void SurvivorPanel::paint (juce::Graphics& g)
     g.setColour (C::HAIRLINE);
     g.fillRect (dx, row1.getCentreY() - 38, 1, 76);
 
-    /* LOOP OUT label above the meter (8px .12em INK_FAINT, right-aligned) */
+    /* LOOP OUT label above the meter, right-aligned */
     const int meterX = row1.getRight() - 16 - 140;
     g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f, 0.12f));
-    g.drawText ("LOOP OUT", Rectangle<int> (meterX, row1.getCentreY() - 11, 140, 10),
+    g.setFont (Type::micro());
+    g.drawText ("LOOP OUT",
+                Rectangle<int> (meterX, row1.getCentreY() - 11 - Type::rowH (9.0f),
+                                140, Type::rowH (9.0f)),
                 Justification::centredRight);
-
-    /* 3-line data block: label INK_FAINT + gap 10 + value (9px .10em) */
-    const int dataX = dx + 13;                  // divider + gap 12
-    const int dataW = juce::jmax (0, meterX - 12 - dataX);
-    const juce::Font dataFont = Type::mono (9.0f, 0.10f);
-
-    auto dataLine = [&] (int rowIdx, const juce::String& label,
-                         const juce::String& value, juce::Colour valueFg)
-    {
-        Rectangle<int> line (dataX, row1.getCentreY() - 24 + rowIdx * 18, dataW, 12);
-        g.setFont (dataFont);
-        g.setColour (C::INK_FAINT);
-        g.drawText (label, line, Justification::centredLeft);
-        const int lw = (int) std::ceil (juce::GlyphArrangement::getStringWidth (dataFont, label));
-        g.setColour (valueFg);
-        g.drawText (value, line.withTrimmedLeft (lw + 10), Justification::centredLeft);
-    };
 
     int rate = atomic_load (&bb.rate);
     if (rate < 1) rate = 44100;
+    const int bars = juce::jlimit (1, 4, atomic_load (&bb.loop_bars));
 
-    if (frames > 0)
+    /* ---- LOOP STATE, the one thing on this panel that has to read from the
+     * other side of the room. It was three 9px key/value lines in which the
+     * state was the third value on the third line; a looper is played by
+     * glance, so the state is now a stencil word the height of the buttons
+     * beside it, paired with a lamp so the signal survives greyscale (the
+     * lamp is not the state -- the WORD is; the lamp only confirms it). */
+    const int dataX = dx + 16;
+    const int dataW = juce::jmax (0, meterX - 16 - dataX);
+
+    juce::String stateWord, detail;
+    juce::Colour stateInk, lampCol;
+    switch (st)
     {
-        const int bars = juce::jlimit (1, 4, atomic_load (&bb.loop_bars));
-        dataLine (0, "BUFFER",
-                  juce::String (bars) + (bars == 1 ? " BAR" : " BARS")
-                      + U8 (" \xc2\xb7 ") + juce::String ((double) frames / rate, 3) + " s"
-                      + U8 (" \xc2\xb7 ") + groupedInt (frames) + " SMP",
-                  C::INK);
+        case LOOP_ARMED:
+        {
+            /* countdown to the capture bar, from the published loop clock */
+            int bpm   = atomic_load (&bb.gctl[GCTL_BPM]);   if (bpm   < 1) bpm   = 90;
+            int beats = atomic_load (&bb.gctl[GCTL_BEATS]); if (beats < 1) beats = 4;
+            unsigned beatLen = (unsigned) (((long) rate * 60L) / bpm);
+            if (beatLen < 1) beatLen = 1;
+            const unsigned barLen = beatLen * (unsigned) beats;
+            const unsigned remain = barLen - (atomic_load (&bb.k) % barLen);
+            stateWord = "ARMED";
+            detail = juce::String (bars) + (bars == 1 ? " BAR" : " BARS")
+                       + U8 (" \xc2\xb7 STARTS AT BAR ")
+                       + juce::String (atomic_load (&bb.bar) + 1u).paddedLeft ('0', 3)
+                       + U8 (" \xc2\xb7 IN ") + juce::String ((double) remain / rate, 1) + " s";
+            stateInk = C::AMBER;                 // warn/pending, above INK_DIM
+            lampCol  = C::AMBER;
+            break;
+        }
+        case LOOP_RECORDING:
+            stateWord = "RECORDING";
+            detail = "CAPTURING " + juce::String (bars) + (bars == 1 ? " BAR" : " BARS")
+                       + U8 (" \xc2\xb7 PRE-MASTER BUS + TAILS");
+            stateInk = C::BLOOD_HOT;             // live: the one accent, correctly spent
+            lampCol  = C::BLOOD_HOT;
+            break;
+        case LOOP_PLAYING:
+            stateWord = "PLAYING";
+            detail = juce::String (bars) + (bars == 1 ? " BAR" : " BARS")
+                       + U8 (" \xc2\xb7 ") + juce::String ((double) frames / rate, 3) + " s"
+                       + U8 (" \xc2\xb7 ") + groupedInt (frames) + " SMP";
+            stateInk = C::INK;
+            lampCol  = C::INK;
+            break;
+        default:
+            stateWord = "IDLE";
+            detail = frames > 0
+                ? juce::String ("BUFFER HOLDS ") + juce::String (bars)
+                      + (bars == 1 ? " BAR" : " BARS") + U8 (" \xc2\xb7 PRESS PLAY")
+                : juce::String (U8 ("BUFFER EMPTY \xc2\xb7 PRESS ARM TO CAPTURE"));
+            stateInk = C::INK_FAINT;
+            lampCol  = C::LAMP_DEAD;
+            break;
     }
-    else
-        dataLine (0, "BUFFER", U8 ("\xe2\x80\x94 EMPTY \xe2\x80\x94"), C::INK_FAINT);
 
-    dataLine (1, "SOURCE", U8 ("PRE-MASTER \xc2\xb7 8 LAYERS + SAMPLER + FX TAILS"),
-              C::INK_DIM);
-
-    if (st == LOOP_ARMED)
     {
-        /* countdown to the capture bar, from the published loop clock */
-        int bpm   = atomic_load (&bb.gctl[GCTL_BPM]);   if (bpm   < 1) bpm   = 90;
-        int beats = atomic_load (&bb.gctl[GCTL_BEATS]); if (beats < 1) beats = 4;
-        unsigned beatLen = (unsigned) (((long) rate * 60L) / bpm);
-        if (beatLen < 1) beatLen = 1;
-        const unsigned barLen = beatLen * (unsigned) beats;
-        const unsigned remain = barLen - (atomic_load (&bb.k) % barLen);
-        dataLine (2, "CAPTURE",
-                  "AT BAR " + juce::String (atomic_load (&bb.bar) + 1u).paddedLeft ('0', 3)
-                      + U8 (" \xc2\xb7 IN ") + juce::String ((double) remain / rate, 1) + " s",
-                  C::BLOOD_HOT);
+        /* The block is the full height of the divider beside it (76), and the
+         * word gets Type::rowH(26)=41 of that -- a 26px face in a 34px box
+         * would clip, which is the exact mistake this pass is undoing
+         * elsewhere. 41 + 14 + 13 = 68, inside 76. */
+        const juce::Font wordF = Type::stencil (26.0f, 0.14f);
+        Rectangle<int> block (dataX, row1.getCentreY() - 38, dataW, 76);
+
+        Rectangle<int> wordRow = block.removeFromTop (Type::rowH (26.0f));
+        g.setColour (lampCol);
+        g.fillRect (wordRow.getX(), wordRow.getCentreY() - 5, 10, 10);
+        g.setColour (stateInk);
+        g.setFont (wordF);
+        g.drawText (stateWord, wordRow.withTrimmedLeft (18), Justification::centredLeft);
+
+        g.setColour (C::INK_DIM);
+        g.setFont (Type::micro());
+        g.drawText (detail, block.removeFromTop (Type::rowH (9.0f)).withTrimmedLeft (18),
+                    Justification::centredLeft, true);
+        g.setColour (C::INK_FAINT);
+        g.setFont (Type::nano());
+        g.drawText (U8 ("SOURCE: PRE-MASTER \xc2\xb7 8 LAYERS + SAMPLER + FX TAILS"),
+                    block.removeFromTop (Type::rowH (8.0f)).withTrimmedLeft (18),
+                    Justification::centredLeft, true);
     }
-    else if (st == LOOP_RECORDING)
-        dataLine (2, "CAPTURE", "CAPTURING", C::BLOOD_HOT);
-    else if (st == LOOP_PLAYING)
-        dataLine (2, "CAPTURE", "PLAYING", C::INK_DIM);
-    else
-        dataLine (2, "CAPTURE", "IDLE", C::INK_FAINT);
 
     /* -------- row 2 (210): loop buffer waveform in a SOCKET box --------- */
     Rectangle<int> row2 = b.removeFromTop (210);
@@ -297,8 +330,9 @@ void SurvivorPanel::paint (juce::Graphics& g)
 
     Rectangle<int> inner = box.reduced (1);
 
-    /* waveform: the real loop buffer, one point per 2px (HTML stroke
-     * #c9c4b8, no token -- literal from the frame) */
+    /* waveform: the real loop buffer, one point per 2px. Stroked in INK --
+     * it was a hardcoded #c9c4b8 literal, which is now off the ink ramp and
+     * therefore unmeasurable; the token carries its own contrast figure. */
     if (frames > 0)
     {
         {
@@ -317,7 +351,7 @@ void SurvivorPanel::paint (juce::Graphics& g)
                 if (first) { p.startNewSubPath (px, py); first = false; }
                 else         p.lineTo (px, py);
             }
-            g.setColour (juce::Colour (0xffc9c4b8));
+            g.setColour (C::INK);
             g.strokePath (p, juce::PathStrokeType (1.0f));
         }
     }
@@ -335,6 +369,17 @@ void SurvivorPanel::paint (juce::Graphics& g)
         g.setColour (C::BLOOD_HOT);
         g.fillRect (inner.getX() + (int) ((juce::uint64) pos * (unsigned) inner.getWidth() / frames),
                     inner.getY(), 1, inner.getHeight());
+    }
+    else
+    {
+        /* An empty buffer used to be an empty box with a centre line, which
+         * is indistinguishable from a captured phrase of silence. Say it. */
+        Rectangle<int> mid = inner.withSizeKeepingCentre (inner.getWidth(),
+                                                          Type::rowH (10.0f));
+        g.setColour (C::INK_FAINT);
+        g.setFont (Type::label());
+        g.drawText (U8 ("NOTHING CAPTURED \xc2\xb7 ARM SNAPS TO THE NEXT BAR"),
+                    mid, Justification::centred);
     }
 
     /* -------- row 3 (flex): label row over the six 76px knobs ----------- */

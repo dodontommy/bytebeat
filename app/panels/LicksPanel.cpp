@@ -1,9 +1,18 @@
 /* LicksPanel.cpp -- see LicksPanel.h. All R1 engine wiring preserved:
  * bb_engine_sampler_set/clear/loaded, mute/solo/level/choke atomics, the
  * tri-state gate cycle, keys 1-8, and the quiet sync() with isUserDragging
- * guards. The geometry is spec section 7 / HTML frame "03 GRAIN LICKS":
- * toolbar 28, step header 22, 8 equal-flex slot rows (head 300, 16-column
- * StepCell grid with 3px padding, right gutter 140). */
+ * guards. Geometry: toolbar 28, step header 24, 8 equal-flex slot rows (head
+ * 300, 16-column StepCell grid with 3px padding, right gutter 140).
+ *
+ * LEGIBILITY PASS, the two things worth knowing:
+ *   SCANNING. A 16-column grid of identical cells behind 16 identical 1px
+ *   rules cannot be counted. Every fourth rule is now HAIRLINE against
+ *   HAIRLINE_DIM for the rest, so the bar reads as four beats, and the
+ *   playhead column is marked by fill + ink + a rule rather than by a tint
+ *   you have to look for.
+ *   TYPE. The PIT/VEL/LVL captions were 6px type set into a 6px box -- a face
+ *   that clipped its own descenders, naming the controls under it. Every box
+ *   in this file is now sized with Type::rowH(). */
 
 #include "LicksPanel.h"
 #include "AudioEngine.h"
@@ -27,7 +36,14 @@ using juce::Justification;
 static constexpr int kHeadW   = 300;   // row head / step-header left gutter
 static constexpr int kGutW    = 140;   // right gutter (CHOKE + meter)
 static constexpr int kToolbarH = 28;
-static constexpr int kStepHdrH = 22;
+static constexpr int kStepHdrH = 24;   // was 22: an 8px floor needs rowH(8)=13
+
+/* Beat emphasis. Sixteen identical 1px column rules is a picket fence, and
+ * counting to step 11 in it is the scanning problem the brief names. Every
+ * fourth rule (the downbeat) is drawn at HAIRLINE, the rest at HAIRLINE_DIM
+ * -- 2.48:1 against 1.84:1, so the bar divides into four readable groups
+ * without adding a single new colour or a second pixel of width. */
+static bool isBeatEdge (int stepIndexAfter) { return (stepIndexAfter % 4) == 0; }
 
 static int textW (const juce::Font& f, const juce::String& s)
 {
@@ -72,8 +88,10 @@ public:
         g.fillRect (getLocalBounds());
         g.setColour (grp ? C::OXIDE_DIM : C::HAIRLINE);
         g.drawRect (getLocalBounds(), 1);
-        g.setColour (grp ? C::OXIDE_INK : C::INK_GHOST);
-        g.setFont (Type::mono (8.0f));
+        /* PLATE_LOW is a control face, not a text ground: Theme.h says use
+         * INK_DIM there rather than the metadata inks. */
+        g.setColour (grp ? C::OXIDE_INK : C::INK_DIM);
+        g.setFont (Type::nano());
         g.drawText (grp ? "G" + juce::String (group) : U8 ("\xe2\x80\x94"),
                     getLocalBounds(), Justification::centred);
     }
@@ -84,18 +102,17 @@ private:
 } // namespace
 
 /* ======================================================================== */
-/*  ToolTag -- toolbar tag plate (HTML: padding 2 7, 9px .12em).             */
-/*  ACTIVE  = PATTERN A   (#1b1a17 / #3a3833 / INK)                          */
-/*  IDLE    = fill action (#131211 / #232220 / INK_DIM, hover PLATE_HOVER)   */
-/*  INERT   = pattern B-D (#131211 / #232220 / #6b6760; engine has one bank) */
+/*  ToolTag -- toolbar action plate. There is now exactly one style,         */
+/*  because there is now exactly one kind of tag: one that does something.   */
+/*  The INERT style existed solely for the PATTERN B/C/D tags, which could   */
+/*  not be clicked (mouseDown was guarded on the style) and named pattern    */
+/*  banks the engine does not have. Tag and style are both gone.            */
 /* ======================================================================== */
 class LicksPanel::ToolTag : public juce::Component,
                             public juce::SettableTooltipClient
 {
 public:
-    enum Style { ACTIVE, IDLE, INERT };
-
-    ToolTag (const juce::String& t, Style s) : text (t), style (s)
+    explicit ToolTag (const juce::String& t) : text (t)
     {
         setRepaintsOnMouseActivity (true);
     }
@@ -104,39 +121,29 @@ public:
 
     int idealWidth() const
     {
-        return textW (Type::mono (9.0f, 0.12f), text) + 16;   // padding 7 + 1px borders
+        return textW (Type::label(), text) + 18;   // padding 8 + 1px borders
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
-        if (style != INERT && ! e.mods.isPopupMenu() && onClick)
+        if (! e.mods.isPopupMenu() && onClick)
             onClick();
     }
 
     void paint (juce::Graphics& g) override
     {
-        juce::Colour bg, bd, fg;
-        const bool hov = style == IDLE && isMouseOver();
-        switch (style)
-        {
-            case ACTIVE: bg = C::PLATE_HOVER; bd = C::EDGE; fg = C::INK; break;
-            case IDLE:   bg = hov ? C::PLATE_HOVER : C::PLATE_LOW;
-                         bd = C::HAIRLINE;
-                         fg = hov ? C::INK : C::INK_DIM; break;
-            default:     bg = C::PLATE_LOW; bd = C::HAIRLINE; fg = C::TAB_INACTIVE_FG; break;
-        }
-        g.setColour (bg);
+        const bool hov = isMouseOver();
+        g.setColour (hov ? C::PLATE_HOVER : C::PLATE);
         g.fillRect (getLocalBounds());
-        g.setColour (bd);
+        g.setColour (hov ? C::EDGE : C::HAIRLINE);
         g.drawRect (getLocalBounds(), 1);
-        g.setColour (fg);
-        g.setFont (Type::mono (9.0f, 0.12f));
+        g.setColour (hov ? C::INK : C::INK_DIM);
+        g.setFont (Type::label());
         g.drawText (text, getLocalBounds(), Justification::centred);
     }
 
 private:
     juce::String text;
-    Style style;
 };
 
 /* ======================================================================== */
@@ -307,9 +314,13 @@ public:
     {
         const int W = getWidth(), H = getHeight();
 
-        /* head, right-anchored inside 300 with 8px padding (HTML gap 8) */
+        /* head, right-anchored inside 300 with 8px padding (HTML gap 8).
+         * The knob block is sized from Type::rowH() rather than a guessed
+         * leading: the captions used to be 6px type set into a 6px box, which
+         * clipped its own descenders, and the type floor is now 8px. */
+        const int capH = Type::rowH (8.0f);                 // 13
         const int kx = kHeadW - 8 - (26 * 3 + 6 * 2);       // knob block: 3 faces, gap 6
-        const int ky = (H - 33) / 2;                        // 26 face + 1 + 6 label
+        const int ky = (H - (26 + 2 + capH)) / 2;
         pit.setBounds (kx,      ky, 26, 26);
         vel.setBounds (kx + 32, ky, 26, 26);
         lvl.setBounds (kx + 64, ky, 26, 26);
@@ -317,9 +328,11 @@ public:
         const int sy = (H - 18) / 2;
         solo.setBounds (divX - 8 - 18, sy, 18, 18);
         mute.setBounds (divX - 8 - 38, sy, 18, 18);
-        idxR  = { 8, 0, 16, H };
-        nameR = { 32, (H - 22) / 2, mute.getX() - 8 - 32, 12 };
-        metaR = { 32, nameR.getBottom() + 2, nameR.getWidth(), 8 };
+        idxR  = { 8, 0, 18, H };
+        const int nameH = Type::rowH (10.0f);               // 16
+        const int metaH = Type::rowH (8.0f);                // 13
+        nameR = { 34, (H - (nameH + metaH)) / 2, mute.getX() - 8 - 34, nameH };
+        metaR = { 34, nameR.getBottom(), nameR.getWidth(), metaH };
 
         /* grid: 16 equal-flex columns, 1px HAIRLINE_DIM separator, 3px padding */
         const int gridW = W - kHeadW - kGutW;
@@ -332,9 +345,9 @@ public:
 
         /* right gutter: CHOKE label, group tag, 6x26 meter (padding 8) */
         const int gx = W - kGutW;
-        chokeLabW = textW (Type::mono (7.0f, 0.08f), "CHOKE");
+        chokeLabW = textW (Type::nano(), "CHOKE");
         chokeLabR = { gx + 8, 0, chokeLabW, H };
-        choke.setBounds (gx + 8 + chokeLabW + 6, (H - 14) / 2, 26, 14);
+        choke.setBounds (gx + 8 + chokeLabW + 6, (H - 16) / 2, 28, 16);
         meter.setBounds (W - 8 - 6, (H - 26) / 2, 6, 26);
     }
 
@@ -345,43 +358,59 @@ public:
         g.setColour (C::PANEL);
         g.fillRect (0, 0, W, H);
 
+        /* The focused row's head is lifted a surface step. Focus used to be
+         * carried by the index turning BLOOD_HOT and nothing else -- state by
+         * colour alone, which Theme.h calls a bug -- and at 8 rows the one
+         * red glyph was easy to lose. The fill is the primary cue now; the
+         * accent on the index is the confirmation. */
+        if (focused)
+        {
+            g.setColour (C::PANEL_ALT);
+            g.fillRect (0, 0, kHeadW - 1, H);
+        }
+
         /* rules: head border-right, gutter border-left, column separators,
          * row bottom (all 1px; spec rule 0.2) */
         g.setColour (C::HAIRLINE);
         g.fillRect (kHeadW - 1, 0, 1, H);
         g.fillRect (W - kGutW, 0, 1, H);
         g.fillRect (divX, (H - 24) / 2, 1, 24);
-        g.setColour (C::HAIRLINE_DIM);
         const int gridW = W - kHeadW - kGutW;
         for (int st = 0; st < BB_STEPS; ++st)
+        {
+            g.setColour (isBeatEdge (st + 1) ? C::HAIRLINE : C::HAIRLINE_DIM);
             g.fillRect (colEdge (kHeadW, gridW, st + 1) - 1, 0, 1, H);
+        }
+        g.setColour (C::HAIRLINE);
         g.fillRect (0, H - 1, W, 1);
 
-        /* index (locker rule: BLOOD_HOT when selected) */
-        g.setFont (Type::mono (9.0f));
+        /* index */
+        g.setFont (Type::monoMedium (10.0f, 0.04f));
         g.setColour (focused ? C::BLOOD_HOT : C::INK_FAINT);
         g.drawText (juce::String (idx + 1).paddedLeft ('0', 2), idxR,
                     Justification::centredLeft);
 
         /* name + meta stacked */
-        g.setFont (Type::mono (10.0f, 0.06f));
-        g.setColour (loaded ? C::INK : C::INK_GHOST);
+        g.setFont (Type::monoMedium (10.0f, 0.04f));
+        g.setColour (loaded ? C::INK : C::INK_FAINT);
         g.drawText (loaded ? name : U8 ("\xe2\x80\x94 EMPTY \xe2\x80\x94"),
                     nameR, Justification::centredLeft, true);
-        g.setFont (Type::mono (7.0f, 0.08f));
-        g.setColour (C::INK_FAINT);
+        g.setFont (Type::nano());
+        g.setColour (loaded ? C::INK_FAINT : C::INK_GHOST);
         g.drawText (loaded ? meta : "DOUBLE-CLICK OR DRAG TO LOAD",
                     metaR, Justification::centredLeft, true);
 
-        /* 6px knob sub-notes (spec section 2: knob sub-notes may be 6px) */
-        g.setFont (Type::nano (6.0f));
+        /* knob captions: 8px floor in a rowH(8) box (was 6px in a 6px box,
+         * the worst size/colour/box combination in the app) */
+        g.setFont (Type::nano());
         g.setColour (C::INK_FAINT);
-        g.drawText ("PIT", pit.getX(), pit.getBottom() + 1, 26, 6, Justification::centred);
-        g.drawText ("VEL", vel.getX(), vel.getBottom() + 1, 26, 6, Justification::centred);
-        g.drawText ("LVL", lvl.getX(), lvl.getBottom() + 1, 26, 6, Justification::centred);
+        const int capH = Type::rowH (8.0f);
+        g.drawText ("PIT", pit.getX(), pit.getBottom() + 2, 26, capH, Justification::centred);
+        g.drawText ("VEL", vel.getX(), vel.getBottom() + 2, 26, capH, Justification::centred);
+        g.drawText ("LVL", lvl.getX(), lvl.getBottom() + 2, 26, capH, Justification::centred);
 
         /* CHOKE label */
-        g.setFont (Type::mono (7.0f, 0.08f));
+        g.setFont (Type::nano());
         g.setColour (C::INK_FAINT);
         g.drawText ("CHOKE", chokeLabR, Justification::centredLeft);
     }
@@ -421,34 +450,23 @@ LicksPanel::LicksPanel (AudioEngine& a) : audio (a)
         metas.add ({});
     }
 
-    /* toolbar: PATTERN A live; B-D drawn only -- the engine holds a single
-     * pattern bank (do not fake more) */
-    static const char* patNames[] = { "A", "B", "C", "D" };
-    for (int i = 0; i < 4; ++i)
-    {
-        auto* t = patternTags.add (new ToolTag (patNames[i],
-                                                i == 0 ? ToolTag::ACTIVE : ToolTag::INERT));
-        t->setTooltip (i == 0
-            ? U8 ("PATTERN A \xe2\x80\x94 the live pattern. The engine holds one "
-                  "16-step pattern per slot.")
-            : "PATTERN " + juce::String (patNames[i])
-                + U8 (" \xe2\x80\x94 pattern bank. Planned; the engine plays bank A only."));
-        addAndMakeVisible (t);
-    }
-
-    auto* euc = fillTags.add (new ToolTag ("EUCLID", ToolTag::IDLE));
+    /* The toolbar carries the three FILL actions and nothing else. There is
+     * no PATTERN group: the engine holds one 16-step pattern per slot, so a
+     * bank selector would have been a one-item choice next to three tags that
+     * could not be clicked. */
+    auto* euc = fillTags.add (new ToolTag ("EUCLID"));
     euc->setTooltip (U8 ("FILL EUCLID \xe2\x80\x94 spreads pulses evenly over the focused "
                          "slot's 16 steps. Each press adds one pulse, 1\xe2\x80\x93""16."));
     euc->onClick = [this] { fillEuclid(); };
     addAndMakeVisible (euc);
 
-    auto* rnd = fillTags.add (new ToolTag ("RAND", ToolTag::IDLE));
+    auto* rnd = fillTags.add (new ToolTag ("RAND"));
     rnd->setTooltip (U8 ("FILL RAND \xe2\x80\x94 rolls a random gate pattern for the "
                          "focused slot. About 4 in 10 steps hit."));
     rnd->onClick = [this] { fillRand(); };
     addAndMakeVisible (rnd);
 
-    auto* clr = fillTags.add (new ToolTag ("CLEAR", ToolTag::IDLE));
+    auto* clr = fillTags.add (new ToolTag ("CLEAR"));
     clr->setTooltip (U8 ("FILL CLEAR \xe2\x80\x94 wipes all 16 gates of the focused slot."));
     clr->onClick = [this] { fillClear(); };
     addAndMakeVisible (clr);
@@ -507,26 +525,16 @@ void LicksPanel::resized()
 
 void LicksPanel::layoutToolbar()
 {
-    const juce::Font lab = Type::mono (9.0f, 0.12f);
-    const int tagY = toolbarRect.getY() + (kToolbarH - 17) / 2;
+    const int tagH = Type::rowH (10.0f) + 4;                // 20
+    const int tagY = toolbarRect.getY() + (kToolbarH - tagH) / 2;
 
     int x = toolbarRect.getX() + 10;
-    patLabelR = { x, toolbarRect.getY(), textW (lab, "PATTERN"), kToolbarH };
-    x = patLabelR.getRight() + 8;
-    for (auto* t : patternTags)
-    {
-        t->setBounds (x, tagY, t->idealWidth(), 17);
-        x += t->idealWidth() + 2;
-    }
-    x += 6;                                                 // group gap 8 (2 already)
-    tbDividerR = { x, toolbarRect.getY() + (kToolbarH - 16) / 2, 1, 16 };
-    x += 1 + 8;
-    fillLabelR = { x, toolbarRect.getY(), textW (lab, "FILL"), kToolbarH };
-    x = fillLabelR.getRight() + 8;
+    fillLabelR = { x, toolbarRect.getY(), textW (Type::label(), "FILL"), kToolbarH };
+    x = fillLabelR.getRight() + 10;
     for (auto* t : fillTags)
     {
-        t->setBounds (x, tagY, t->idealWidth(), 17);
-        x += t->idealWidth() + 2;
+        t->setBounds (x, tagY, t->idealWidth(), tagH);
+        x += t->idealWidth() + 4;
     }
 }
 
@@ -543,48 +551,55 @@ void LicksPanel::paint (juce::Graphics& g)
                          + U8 (" \xc2\xb7 CLOCK: bb.seq_pos \xc2\xb7 RENDERS TO MASTER BUS"),
                      Badge::LIVE, "LIVE");
 
-    /* toolbar 28: labels + tags (tags are children) + right hints */
+    /* toolbar 28: FILL label + the three action tags (children) + hints */
     g.setColour (C::PANEL_ALT);
     g.fillRect (toolbarRect);
     g.setColour (C::HAIRLINE);
     g.fillRect (toolbarRect.getX(), toolbarRect.getBottom() - 1,
                 toolbarRect.getWidth(), 1);
-    g.fillRect (tbDividerR);
 
-    const juce::Font lab = Type::mono (9.0f, 0.12f);
-    g.setFont (lab);
-    g.setColour (C::INK_FAINT);
-    g.drawText ("PATTERN", patLabelR, Justification::centredLeft);
-    g.drawText ("FILL",    fillLabelR, Justification::centredLeft);
+    g.setFont (Type::label());
+    g.setColour (C::INK_DIM);
+    g.drawText ("FILL", fillLabelR, Justification::centredLeft);
 
-    const juce::Font hintF = Type::mono (8.0f, 0.12f);
+    const juce::Font hintF = Type::micro();
     g.setFont (hintF);
-    const juce::String h1 ("ONE-SHOT RESETS pos=0");
+    g.setColour (C::INK_FAINT);
+    const juce::String h1 = U8 ("FILL ACTS ON THE FOCUSED SLOT");
     const juce::String h2 = U8 ("CHOKE GROUPS 1\xe2\x80\x93""4");
     const int w2 = textW (hintF, h2);
     const int w1 = textW (hintF, h1);
     const int x2 = toolbarRect.getRight() - 10 - w2;
     g.drawText (h2, x2, toolbarRect.getY(), w2, kToolbarH, Justification::centredLeft);
-    g.drawText (h1, x2 - 12 - w1, toolbarRect.getY(), w1, kToolbarH,
+    g.drawText (h1, x2 - 16 - w1, toolbarRect.getY(), w1, kToolbarH,
                 Justification::centredLeft);
 
-    /* step header 22: 300 gutter, 16 numbered columns (current tinted
-     * #1b1a17), 140 right gutter */
+    /* step header: 300 gutter, 16 numbered columns, 140 right gutter.
+     *
+     * The playhead column is the thing you track while playing, so it is
+     * marked three ways at once and none of them is hue alone: the header
+     * cell fills PLATE_HOVER (dL* 4.0 over PLATE), its number goes OXIDE_INK
+     * at 10.46:1, and a 1px OXIDE_DIM rule runs along the bottom of the cell
+     * pointing down the column. That matches the StepCell playhead tint
+     * exactly, so the header and the grid read as one moving marker. */
     const int hy = stepHeaderRect.getY();
     const int gridW = getWidth() - kHeadW - kGutW;
-    g.setFont (Type::mono (8.0f));
     for (int st = 0; st < BB_STEPS; ++st)
     {
         const int l = colEdge (kHeadW, gridW, st);
         const int r = colEdge (kHeadW, gridW, st + 1);
-        if (st == lastPlay)
+        const bool here = (st == lastPlay);
+        if (here)
         {
             g.setColour (C::PLATE_HOVER);
-            g.fillRect (l, hy, r - l - 1, kStepHdrH);
+            g.fillRect (l, hy, r - l - 1, kStepHdrH - 1);
+            g.setColour (C::OXIDE_DIM);
+            g.fillRect (l, hy + kStepHdrH - 2, r - l - 1, 1);
         }
-        g.setColour (C::HAIRLINE_DIM);
+        g.setColour (isBeatEdge (st + 1) ? C::HAIRLINE : C::HAIRLINE_DIM);
         g.fillRect (r - 1, hy, 1, kStepHdrH);
-        g.setColour (st == lastPlay ? C::INK_DIM : C::INK_FAINT);
+        g.setFont (here ? Type::monoMedium (9.0f, 0.05f) : Type::micro());
+        g.setColour (here ? C::OXIDE_INK : isBeatEdge (st) ? C::INK_DIM : C::INK_FAINT);
         g.drawText (juce::String (st + 1).paddedLeft ('0', 2),
                     l, hy, r - l - 1, kStepHdrH, Justification::centred);
     }

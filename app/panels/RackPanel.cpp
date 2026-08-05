@@ -33,9 +33,6 @@ using juce::Justification;
 
 namespace
 {
-    /* HTML supporting literal: expression text / sounding-voice number. */
-    const juce::Colour inkCode { 0xffc9c4b8 };
-
     juce::String mdot()  { return U8 (" \xc2\xb7 "); }   // " \xc2\xb7 "
 
     int textW (const juce::Font& f, const juce::String& s)
@@ -94,7 +91,9 @@ namespace
 /* ======================================================================== */
 /*  VoicePlate -- 30x26 numbered plate, 4px lamp under the number.          */
 /*  selected = BLOOD_DEEP/BLOOD/INK_BRIGHT + BLOOD_HOT lamp ·               */
-/*  sounding = PLATE/#2a2927/#c9c4b8 + #4a4842 lamp · silent = INK_FAINT.   */
+/*  on = PLATE/EDGE/INK + LAMP_SOUNDING · off = INK_FAINT + LAMP_DEAD.      */
+/*  The lamp triple is monotonic in luminance, so the state survives        */
+/*  greyscale and colour blindness (Theme.h, colour-blind rule).            */
 /* ======================================================================== */
 class RackPanel::VoicePlate : public juce::Component,
                               public juce::SettableTooltipClient
@@ -105,7 +104,7 @@ public:
         setMouseClickGrabsKeyboardFocus (false);
         setTooltip (juce::String::formatted ("VOICE %02d", idx + 1)
                     + U8 (" \xe2\x80\x94 focus this layer for editing and MIDI; the lamp "
-                          "shows it is sounding. SHIFT-click toggles it "
+                          "shows the layer is ON. SHIFT-click toggles it "
                           "on/off. Keys 1\xe2\x80\x93""8, SHIFT+1\xe2\x80\x93""8."));
     }
 
@@ -136,16 +135,16 @@ public:
     {
         Rectangle<int> b = getLocalBounds();
         const juce::Colour bg  = sel ? C::BLOOD_DEEP : C::PLATE;
-        const juce::Colour bd  = sel ? C::BLOOD      : C::LAMP_DEAD;
-        const juce::Colour fg  = sel ? C::INK_BRIGHT : (snd ? inkCode : C::INK_FAINT);
-        const juce::Colour dot = sel ? C::BLOOD_HOT  : (snd ? C::LAMP_SOUNDING : C::HAIRLINE);
+        const juce::Colour bd  = sel ? C::BLOOD      : C::EDGE;
+        const juce::Colour fg  = sel ? C::INK_BRIGHT : (snd ? C::INK : C::INK_FAINT);
+        const juce::Colour dot = sel ? C::BLOOD_HOT  : (snd ? C::LAMP_SOUNDING : C::LAMP_DEAD);
 
         g.setColour (bg);
         g.fillRect (b);
         frameRect (g, b, bd);
 
         g.setColour (fg);
-        g.setFont (Type::mono (10.0f, 0.04f));
+        g.setFont (Type::monoMedium (11.0f, 0.04f));
         g.drawText (juce::String::formatted ("%02d", idx + 1),
                     b.withTrimmedBottom (8), Justification::centred);
 
@@ -160,8 +159,11 @@ private:
 
 /* ======================================================================== */
 /*  SourceCell -- 22-tall "NN NAME" generator cell in the SOURCE grid.      */
-/*  idle #101010/#1c1b19, num INK_GHOST, name INK_DIM ·                     */
+/*  idle PLATE_LOW/HAIRLINE, num INK_FAINT, name INK_DIM ·                  */
 /*  selected BLOOD_DEEP/BLOOD, num BLOOD_HOT, name ARMED_TEXT.              */
+/*  Idle cells used to sit on DISABLED_BG, which in the new ramp is the     */
+/*  token for a dead control -- a whole grid of live buttons reading as     */
+/*  greyed out. They are plates now, because that is what they are.         */
 /* ======================================================================== */
 class RackPanel::SourceCell : public juce::Component,
                               public juce::SettableTooltipClient
@@ -192,18 +194,18 @@ public:
     void paint (juce::Graphics& g) override
     {
         Rectangle<int> b = getLocalBounds();
-        g.setColour (sel ? C::BLOOD_DEEP : C::DISABLED_BG);
+        g.setColour (sel ? C::BLOOD_DEEP : C::PLATE_LOW);
         g.fillRect (b);
-        frameRect (g, b, sel ? C::BLOOD : C::HAIRLINE_DIM);
+        frameRect (g, b, sel ? C::BLOOD : C::HAIRLINE);
 
         Rectangle<int> r = b.reduced (6, 0);
-        g.setColour (sel ? C::BLOOD_HOT : C::INK_GHOST);
-        g.setFont (Type::mono (8.0f, 0.10f));
+        g.setColour (sel ? C::BLOOD_HOT : C::INK_FAINT);
+        g.setFont (Type::micro());
         g.drawText (juce::String::formatted ("%02d", idx + 1),
-                    r.removeFromLeft (13), Justification::centredLeft);
-        r.removeFromLeft (5);
+                    r.removeFromLeft (15), Justification::centredLeft);
+        r.removeFromLeft (4);
         g.setColour (sel ? C::ARMED_TEXT : C::INK_DIM);
-        g.setFont (Type::mono (9.0f, 0.10f));
+        g.setFont (Type::micro());
         g.drawText (name, r, Justification::centredLeft);
     }
 
@@ -215,10 +217,18 @@ private:
 
 /* ======================================================================== */
 /*  ExpressionEditor -- the SOCKET code well (spec section 5).              */
-/*  12px mono, line-height 1.5, INK_FAINT line numbers, 8x15 BLOOD block    */
-/*  cursor, footer with byte count / compile age / VM op budget.            */
+/*  12px mono, line-height 1.5, INK_FAINT line numbers, 8x15 block cursor,  */
+/*  footer with byte count / compile age / VM op budget.                    */
 /*  RETURN compiles; shift-RETURN inserts a line. The buffer, caret and     */
 /*  focus are owned here so nothing else can steal or stomp them.           */
+/*                                                                         */
+/*  Two states are drawn rather than implied: the caret is a SOLID blood    */
+/*  block only while the well has keyboard focus and a hollow outline when  */
+/*  it does not (you can see where typing would go and whether it would go  */
+/*  there at all), and a rejected compile puts a 1px BLOOD frame round the  */
+/*  whole well to go with the deadpan line in the footer -- the accent      */
+/*  earns its use here because the program on screen is not the program     */
+/*  that is running.                                                       */
 /* ======================================================================== */
 class RackPanel::ExpressionEditor : public juce::Component,
                                     public juce::SettableTooltipClient
@@ -378,12 +388,13 @@ public:
             g.setColour (C::INK_FAINT);
             g.drawText (juce::String::formatted ("%02d", li + 1),
                         padX, y, gut, lineH, Justification::centredLeft);
-            g.setColour (inkCode);
+            g.setColour (C::INK);
             g.drawText (ls[li].substring (scrollCol, scrollCol + cols),
                         textX, y, availW, lineH, Justification::centredLeft);
         }
 
-        // 8x15 BLOOD block cursor (spec section 5)
+        // 8x15 block cursor: solid while focused, hollow while not
+        const bool focused = hasKeyboardFocus (true);
         int cl = 0, cc = 0;
         locate (caret, cl, cc);
         if (cl >= firstLine && cl < firstLine + rows && cc >= scrollCol)
@@ -392,11 +403,20 @@ public:
             const int ly = padY + (cl - firstLine) * lineH;
             if (bx + 8 <= getWidth() - 2)
             {
-                g.setColour (C::BLOOD);
-                g.fillRect (bx, ly + (lineH - 15) / 2, 8, 15);
+                const Rectangle<int> cur (bx, ly + (lineH - 15) / 2, 8, 15);
+                if (focused)
+                {
+                    g.setColour (C::BLOOD);
+                    g.fillRect (cur);
+                }
+                else
+                {
+                    g.setColour (C::HAIRLINE);
+                    g.drawRect (cur, 1);
+                }
                 if (cl < ls.size() && cc < ls[cl].length())
                 {
-                    g.setColour (C::INK_BRIGHT);
+                    g.setColour (focused ? C::INK_BRIGHT : C::INK);
                     g.setFont (f);
                     g.drawText (ls[cl].substring (cc, cc + 1),
                                 bx, ly, (int) std::ceil (cw), lineH,
@@ -407,7 +427,7 @@ public:
 
         // footer: byte count / compile age (or the deadpan reject) / op budget
         const int fy = getHeight() - padY - footH;
-        const juce::Font ff = Type::mono (9.0f, 0.08f);
+        const juce::Font ff = Type::micro();
         g.setFont (ff);
 
         const juce::String left = juce::String (ls.size()) + " LINES" + mdot()
@@ -446,10 +466,18 @@ public:
             g.drawText ("VM OPS " + juce::String (ops) + "/" + juce::String (budget),
                         0, fy, getWidth() - padX, footH, Justification::centredRight);
         }
+
+        /* the well itself carries the compile verdict: a rejected program
+         * means what is on screen is NOT what is playing. */
+        if (reject.isNotEmpty())
+        {
+            g.setColour (C::BLOOD);
+            g.drawRect (b, 1);
+        }
     }
 
 private:
-    static constexpr int padX = 10, padY = 8, lineH = 18, footH = 12;
+    static constexpr int padX = 10, padY = 8, lineH = 18, footH = 14;
 
     void tick()   // repaint only when the displayed AGE second rolls over
     {
@@ -551,8 +579,13 @@ private:
 
 /* ======================================================================== */
 /*  LockLane -- the 16-slot parameter-lock lane, 40 tall, OXIDE fill from   */
-/*  the bottom by value; a stored -1 (live knob) draws an empty slot.       */
+/*  the bottom by value; a stored -1 (live knob) draws an empty SOCKET      */
+/*  well, i.e. a hole rather than another shade of panel.                   */
 /*  Drag sets a step; right-click returns it to the live knob.              */
+/*  A locked slot gets a 1px OXIDE_INK cap on top of its fill so the level  */
+/*  can be read off the lane, and the playing step's border goes BLOOD_HOT  */
+/*  in the same column as the step cell above it -- the two rows are one    */
+/*  scan, so they must share a playhead.                                    */
 /* ======================================================================== */
 class RackPanel::LockLane : public juce::Component,
                             public juce::SettableTooltipClient
@@ -583,6 +616,14 @@ public:
             repaint();
     }
 
+    void setPlayhead (int step)                     // 30 Hz pull; quiet
+    {
+        if (step == play)
+            return;
+        play = step;
+        repaint();
+    }
+
     void mouseDown (const juce::MouseEvent& e) override { edit (e); }
     void mouseDrag (const juce::MouseEvent& e) override { edit (e); }
 
@@ -592,9 +633,8 @@ public:
         for (int i = 0; i < BB_STEPS; ++i)
         {
             Rectangle<int> slot = stepSlotRect (row, i);
-            g.setColour (C::PANEL);
+            g.setColour (C::SOCKET);
             g.fillRect (slot);
-            frameRect (g, slot, C::HAIRLINE_DIM);
             if (vals[i] >= 0)
             {
                 Rectangle<int> inner = slot.reduced (1);
@@ -603,7 +643,13 @@ public:
                 g.setColour (C::OXIDE);
                 g.fillRect (inner.getX(), inner.getBottom() - fh,
                             inner.getWidth(), fh);
+                // 1px cap: the readable edge of an otherwise flat fill
+                g.setColour (C::OXIDE_INK);
+                g.fillRect (inner.getX(),
+                            juce::jmax (inner.getY(), inner.getBottom() - fh - 1),
+                            inner.getWidth(), 1);
             }
+            frameRect (g, slot, i == play ? C::BLOOD_HOT : C::HAIRLINE);
         }
     }
 
@@ -634,6 +680,7 @@ private:
 
     int vals[BB_STEPS];
     int maxV = 255;
+    int play = -1;
 };
 
 /* ======================================================================== */
@@ -1287,20 +1334,29 @@ void RackPanel::sync()
     if (! spaceBtn.isUserDragging())
         spaceBtn.setToggleStateQuiet (bb_rack[layer].space != 0);
 
-    /* knobs; roles inferred from the compiled bytecode */
+    /* knobs; roles inferred from the compiled bytecode. A parameter the
+     * program never reads gets no knob at all -- paint() draws its slot as
+     * an empty recess instead (see the note in RackPanel.h). */
     Program* pr = atomic_load (&l->prog);
+    const unsigned used = pr != nullptr ? pr->used_p : 0u;
     for (int i = 0; i < BB_NPARAM; ++i)
     {
+        const bool isUsed = (used & (1u << (unsigned) i)) != 0;
         if (! paramKnobs[i]->isUserDragging())
             paramKnobs[i]->setValueQuiet (atomic_load (&l->param[i]));
-        juce::String role ("UNUSED");
-        if (pr != nullptr && (pr->used_p & (1u << (unsigned) i)) != 0)
+        if (isUsed)
         {
-            role = juce::String (expr_role_name (pr->role[i])).toUpperCase();
+            juce::String role (juce::String (expr_role_name (pr->role[i])).toUpperCase());
             if (role.isEmpty())
                 role = "MISC";
+            paramKnobs[i]->setRole (role);
         }
-        paramKnobs[i]->setRole (role);
+        paramKnobs[i]->setVisible (isUsed);
+    }
+    if (used != paramUsed)
+    {
+        paramUsed = used;
+        repaint (rcParamArea);
     }
 
     static const int chainCtl[6] = { LCTL_DRIVE, LCTL_TONE, LCTL_CRUSH,
@@ -1323,6 +1379,8 @@ void RackPanel::sync()
     }
 
     syncLockLane();
+    if (lockLane != nullptr)
+        lockLane->setPlayhead (play);
 
     /* the lock footer names program-dependent things; repaint on change */
     const juce::String foot = lockLaneName (lockView)
@@ -1447,7 +1505,8 @@ void RackPanel::resized()
         {
             const int x0 = prow.getX() + (i * prow.getWidth()) / 8;
             const int x1 = prow.getX() + ((i + 1) * prow.getWidth()) / 8;
-            paramKnobs[i]->setBounds (x0, prow.getY(), x1 - x0, ih);
+            rcParamSlot[i] = { x0, prow.getY(), x1 - x0, ih };
+            paramKnobs[i]->setBounds (rcParamSlot[i]);
         }
     }
     mid.removeFromTop (1);                       // block border-bottom
@@ -1478,7 +1537,7 @@ void RackPanel::resized()
     sa.removeFromTop (6);
     lockLane->setBounds (sa.removeFromTop (40));
     sa.removeFromTop (6);
-    rcLockFoot = sa.removeFromTop (12);
+    rcLockFoot = sa.removeFromTop (Type::rowH (9.0f));   // 9px micro needs 14
 }
 
 /* ======================================================================== */
@@ -1505,34 +1564,33 @@ void RackPanel::paint (juce::Graphics& g)
     g.fillRect (rcStripDivA);
     g.fillRect (rcStripDivB);
 
-    g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f, 0.14f));
+    g.setColour (C::INK_DIM);
+    g.setFont (Type::micro());
     g.drawText ("VOICE", rcStrip.getX() + 10, rcStrip.getY(), 34,
                 rcStrip.getHeight() - 1, Justification::centredLeft);
     {
-        const juce::Font hf = Type::mono (8.0f, 0.10f);
+        /* One hint, not three. The strip used to stack "GATE ENV ·
+         * DC-BLOCK ALWAYS ON" beside this: true, unchanging, and nothing
+         * you can act on -- density paid for with no information. */
+        const juce::Font hf = Type::micro();
         Rectangle<int> hr = rcStrip.reduced (10, 0).withTrimmedBottom (1);
-        const juce::String h2 = U8 ("FOCUS \xe2\x86\x92 MIDI NOTE / CC");
-        const juce::String h1 = U8 ("GATE ENV \xc2\xb7 DC-BLOCK ALWAYS ON");
         g.setFont (hf);
         g.setColour (C::INK_DIM);
-        g.drawText (h2, hr.removeFromRight (textW (hf, h2)), Justification::centredRight);
-        hr.removeFromRight (14);
-        g.setColour (C::INK_FAINT);
-        g.drawText (h1, hr, Justification::centredRight);
+        g.drawText (U8 ("FOCUSED VOICE TAKES MIDI NOTES + CC"),
+                    hr, Justification::centredRight);
     }
 
     /* ---- SOURCE column: patch morgue over the raw generators ----------- */
-    paintLabelRow (g, rcPatchHead,
-                   juce::String ("PATCH MORGUE") + mdot() + "KNOWN GOOD",
-                   juce::String (patchCells.size()) + " VOICES");
+    /* The 222px column cannot carry a long label AND a long right hint at
+     * the new type size; the counts go right, the names stay short. */
+    paintLabelRow (g, rcPatchHead, "PATCH MORGUE",
+                   juce::String (patchCells.size()) + " KNOWN GOOD");
     g.setColour (C::HAIRLINE);
     g.fillRect (rcPatchHead.getX(), rcPatchHead.getBottom() - 1,
                 rcPatchHead.getWidth(), 1);
 
-    paintLabelRow (g, rcSourceHead,
-                   juce::String ("SOURCE") + mdot()
-                   + juce::String (sourceCells.size()) + " GENERATORS");
+    paintLabelRow (g, rcSourceHead, "SOURCE",
+                   juce::String (sourceCells.size()) + " GENERATORS");
     g.setColour (C::HAIRLINE);
     g.fillRect (rcSourceHead.getX(), rcSourceHead.getBottom() - 1,
                 rcSourceHead.getWidth(), 1);
@@ -1540,7 +1598,7 @@ void RackPanel::paint (juce::Graphics& g)
                 1, rcSourceCol.getHeight());
     g.fillRect (rcSourceFoot.getX(), rcSourceFoot.getY(), rcSourceFoot.getWidth(), 1);
     g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f, 0.10f));
+    g.setFont (Type::micro());
     g.drawText (U8 ("AUDITION ON SELECT \xc2\xb7 NO-GLITCH SWAP"),
                 rcSourceFoot.reduced (8, 0), Justification::centredLeft);
 
@@ -1549,7 +1607,7 @@ void RackPanel::paint (juce::Graphics& g)
                    juce::String ("EXPRESSION") + mdot()
                    + juce::String::formatted ("VOICE %02d", layer + 1) + mdot()
                    + "BYTEBEAT VM",
-                   U8 ("RETURN = COMPILE \xc2\xb7 CURSOR HELD"));
+                   U8 ("RETURN COMPILES \xc2\xb7 SHIFT-RETURN = NEW LINE"));
     g.setColour (C::HAIRLINE);
     g.fillRect (rcExprHead.getX(), rcExprHead.getBottom() - 1, rcExprHead.getWidth(), 1);
     if (expr != nullptr)
@@ -1567,13 +1625,41 @@ void RackPanel::paint (juce::Graphics& g)
 
     /* ---- p0-p7 rows ----------------------------------------------------- */
     paintLabelRow (g, rcParamHead,
-                   U8 ("EXPRESSION PARAMETERS \xc2\xb7 p0\xe2\x80\x93p7 \xc2\xb7 "
-                       "ROLE INFERRED FROM BYTECODE"),
-                   U8 ("0\xe2\x80\x93""255 \xc2\xb7 DRAG SIDE-TO-SIDE \xc2\xb7 "
-                       "RIGHT-CLICK \xe2\x86\x92 LEARN (R8)"));
+                   U8 ("EXPRESSION PARAMETERS \xc2\xb7 ROLE READ FROM THE "
+                       "COMPILED PROGRAM"),
+                   U8 ("0\xe2\x80\x93""255 \xc2\xb7 DRAG \xc2\xb7 SCROLL \xc2\xb1""1"));
     g.setColour (C::HAIRLINE);
     g.fillRect (rcParamHead.getX(), rcParamHead.getBottom() - 1, rcParamHead.getWidth(), 1);
     g.fillRect (rcParamArea.getX(), rcParamArea.getBottom(), rcParamArea.getWidth(), 1);
+
+    /* Slots the compiled program does not read: no knob, an empty recess
+     * keeping the position and printing its own identifier. The grid never
+     * moves, so p3 is still the fourth slot whatever is loaded. */
+    for (int i = 0; i < paramKnobs.size() && i < BB_NPARAM; ++i)
+    {
+        if ((paramUsed & (1u << (unsigned) i)) != 0)
+            continue;
+
+        const Rectangle<int> slot = rcParamSlot[i];
+        if (slot.isEmpty())
+            continue;
+
+        const int dia = paramKnobs[i]->diameter();
+        Rectangle<int> well (slot.getCentreX() - dia / 2, slot.getY(), dia, dia);
+        g.setColour (C::SOCKET);
+        g.fillRect (well);
+        frameRect (g, well, C::HAIRLINE_FAINT);
+
+        g.setColour (C::INK_FAINT);
+        g.setFont (Type::label());
+        g.drawText ("p" + juce::String (i), well, Justification::centred);
+
+        g.setColour (C::INK_GHOST);
+        g.setFont (Type::nano());
+        g.drawText ("NOT IN PROGRAM",
+                    slot.getX(), well.getBottom() + 4, slot.getWidth(),
+                    Type::rowH (Type::kMinSize), Justification::centred);
+    }
 
     /* ---- post chain ------------------------------------------------------ */
     paintLabelRow (g, rcPostHead, U8 ("POST CHAIN \xc2\xb7 PER-VOICE DIRT"));
@@ -1583,21 +1669,9 @@ void RackPanel::paint (juce::Graphics& g)
     g.fillRect (rcPostFoot.getX(), rcPostFoot.getY(), rcPostFoot.getWidth(), 1);
 
     g.setColour (C::INK_FAINT);
-    g.setFont (Type::mono (8.0f, 0.10f));
+    g.setFont (Type::micro());
     g.drawText (U8 ("DRIVE \xe2\x86\x92 TONE \xe2\x86\x92 CRUSH \xe2\x86\x92 SPACE(T/FB/MIX)"),
                 rcPostFoot.reduced (10, 0), Justification::centredLeft);
-    {
-        const juce::String tag = "R4 INSERTS PLANNED";
-        const juce::Font tf = Type::mono (8.0f, 0.10f);
-        const int tw = textW (tf, tag) + 10;
-        Rectangle<int> tr = rcPostFoot.reduced (10, 0)
-                                .removeFromRight (tw)
-                                .withSizeKeepingCentre (tw, 14);
-        frameRect (g, tr, C::OXIDE_DIM);
-        g.setColour (C::OXIDE);
-        g.setFont (tf);
-        g.drawText (tag, tr, Justification::centred);
-    }
 
     /* ---- sequencer head -------------------------------------------------- */
     {
@@ -1608,11 +1682,9 @@ void RackPanel::paint (juce::Graphics& g)
         g.drawText (t1, hr, Justification::centredLeft);
         const int w1 = textW (Type::label(), t1);
         g.setColour (C::INK_FAINT);
-        g.setFont (Type::mono (8.0f, 0.10f));
-        g.drawText (U8 ("CLICK CELL \xe2\x86\x92 OFF / HIT / ACCENT"),
+        g.setFont (Type::micro());
+        g.drawText (U8 ("CLICK CELL \xe2\x86\x92 OFF / HIT / ACCENT \xc2\xb7 DRAG PAINTS"),
                     hr.withTrimmedLeft (w1 + 10), Justification::centredLeft);
-        g.drawText (U8 ("EUCLID \xc2\xb7 PROB \xc2\xb7 RATCHET"),
-                    hr, Justification::centredRight);
         g.setColour (C::HAIRLINE);
         g.fillRect (rcSeqHead.getX(), rcSeqHead.getBottom() - 1, rcSeqHead.getWidth(), 1);
     }
@@ -1624,12 +1696,13 @@ void RackPanel::paint (juce::Graphics& g)
         const juce::String left =
             juce::String::formatted ("LOCK LANE %02d/%02d", lockView + 1, BB_LOCK_COUNT)
             + mdot() + lockLaneName (lockView)
-            + mdot() + (smooth ? "MOTION: SMOOTH" : "MOTION: STEP");
+            + mdot() + (smooth ? "MOTION: SMOOTH" : "MOTION: STEP")
+            + mdot() + U8 ("0\xe2\x80\x93") + juce::String (lockLaneMax (lockView));
         g.setColour (C::INK_FAINT);
-        g.setFont (Type::mono (8.0f, 0.10f));
+        g.setFont (Type::micro());
         g.drawText (left, rcLockFoot, Justification::centredLeft);
-        g.setColour (C::INK_DIM);
-        g.drawText ("M = CAPTURE MOTION (R3)", rcLockFoot, Justification::centredRight);
+        g.drawText (U8 ("RIGHT-CLICK A SLOT \xe2\x86\x92 LIVE KNOB"),
+                    rcLockFoot, Justification::centredRight);
     }
 }
 

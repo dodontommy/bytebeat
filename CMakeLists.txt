@@ -184,6 +184,7 @@ set(MORGUE_ENGINE_SOURCES
     rack.c
     gen.c
     bb_platform.c
+    ret.c
 )
 
 add_library(bbengine STATIC ${MORGUE_ENGINE_SOURCES})
