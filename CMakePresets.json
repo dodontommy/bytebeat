@@ -1,0 +1,314 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "vendor": {
+    "morgue.dev/notes": {
+      "why-ninja": [
+        "Every preset here uses Ninja, including on Windows, and that is a considered choice rather than a taste.",
+        "The Visual Studio generator drives MSBuild, and MSBuild loads whatever is integrated user-wide on the machine.",
+        "On the Windows box this port was done on, vcpkg is integrated that way and is broken: a probe build failed with",
+        "'pwsh.exe' is not recognized, from a vcpkg MSBuild target, in a project that does not use vcpkg at all.",
+        "Ninja never loads that machinery, so the build depends on the compiler and on nothing else.",
+        "Ninja is also single-config, which is what makes the RelWithDebInfo default in CMakeLists.txt meaningful."
+      ],
+      "windows-prerequisites": [
+        "Configure from a 'x64 Native Tools Command Prompt for VS 2022' (or run VsDevCmd.bat first).",
+        "That is what puts cl.exe, the Windows SDK and the right LIB/INCLUDE on the environment.",
+        "Visual Studio ships a Ninja next to its CMake, at",
+        "C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe",
+        "and the developer prompt puts it on PATH. That path is deliberately NOT hardcoded here: it names one edition",
+        "(Community) and one install location, and a preset that only works on one machine is not a preset.",
+        "If 'cmake --preset windows-msvc-debug' cannot find ninja, you are not in a developer prompt."
+      ],
+      "toolchain-floor": [
+        "MSVC must be 19.35 or newer (Visual Studio 2022 17.5) for /experimental:c11atomics.",
+        "CMakeLists.txt checks this and fails with that message rather than letting it become a C1189 deep in a header."
+      ],
+      "engine-only-builds": [
+        "bbengine and morgue-tests do not need JUCE. With third_party/JUCE empty, configure still succeeds,",
+        "prints a warning, and gives you a buildable engine and a runnable test suite.",
+        "That is the fast loop: cmake --build --preset <p> --target morgue-tests && ctest --preset <p>"
+      ]
+    }
+  },
+
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+
+    {
+      "name": "windows-msvc",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe"
+      }
+    },
+    {
+      "name": "windows-msvc-debug",
+      "displayName": "Windows / MSVC / Debug",
+      "description": "Run from a VS 2022 x64 Native Tools prompt. Unoptimised; fine for the tests, expect the audio thread to glitch.",
+      "inherits": "windows-msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "windows-msvc-relwithdebinfo",
+      "displayName": "Windows / MSVC / RelWithDebInfo",
+      "description": "Run from a VS 2022 x64 Native Tools prompt. The default build: optimised, with symbols, so the render callback can be profiled.",
+      "inherits": "windows-msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+
+    {
+      "name": "linux-gcc",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "linux-gcc-debug",
+      "displayName": "Linux / GCC / Debug",
+      "description": "JUCE needs the usual X11/ALSA/freetype dev packages here; the engine and the test suite need none of them.",
+      "inherits": "linux-gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-gcc-relwithdebinfo",
+      "displayName": "Linux / GCC / RelWithDebInfo",
+      "description": "JUCE needs the usual X11/ALSA/freetype dev packages here; the engine and the test suite need none of them.",
+      "inherits": "linux-gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+
+    {
+      "name": "linux-clang",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "displayName": "Linux / Clang / Debug",
+      "description": "Worth keeping alongside GCC: the two disagree about which -Wextra warnings are worth having, and about atomics ABI on 32-bit.",
+      "inherits": "linux-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-clang-relwithdebinfo",
+      "displayName": "Linux / Clang / RelWithDebInfo",
+      "description": "Worth keeping alongside GCC: the two disagree about which -Wextra warnings are worth having, and about atomics ABI on 32-bit.",
+      "inherits": "linux-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+
+    {
+      "name": "macos-clang",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "macos-clang-debug",
+      "displayName": "macOS / AppleClang / Debug",
+      "description": "No compiler is named: CMake finds the active Xcode toolchain, which is the one whose SDK matches the headers JUCE expects.",
+      "inherits": "macos-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "macos-clang-relwithdebinfo",
+      "displayName": "macOS / AppleClang / RelWithDebInfo",
+      "description": "The build that produces MORGUE.app with its icon; see the PLIST_TO_MERGE note in CMakeLists.txt.",
+      "inherits": "macos-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    {
+      "name": "windows-msvc-debug",
+      "displayName": "Windows / MSVC / Debug",
+      "configurePreset": "windows-msvc-debug"
+    },
+    {
+      "name": "windows-msvc-relwithdebinfo",
+      "displayName": "Windows / MSVC / RelWithDebInfo",
+      "configurePreset": "windows-msvc-relwithdebinfo"
+    },
+    {
+      "name": "linux-gcc-debug",
+      "displayName": "Linux / GCC / Debug",
+      "configurePreset": "linux-gcc-debug"
+    },
+    {
+      "name": "linux-gcc-relwithdebinfo",
+      "displayName": "Linux / GCC / RelWithDebInfo",
+      "configurePreset": "linux-gcc-relwithdebinfo"
+    },
+    {
+      "name": "linux-clang-debug",
+      "displayName": "Linux / Clang / Debug",
+      "configurePreset": "linux-clang-debug"
+    },
+    {
+      "name": "linux-clang-relwithdebinfo",
+      "displayName": "Linux / Clang / RelWithDebInfo",
+      "configurePreset": "linux-clang-relwithdebinfo"
+    },
+    {
+      "name": "macos-clang-debug",
+      "displayName": "macOS / AppleClang / Debug",
+      "configurePreset": "macos-clang-debug"
+    },
+    {
+      "name": "macos-clang-relwithdebinfo",
+      "displayName": "macOS / AppleClang / RelWithDebInfo",
+      "configurePreset": "macos-clang-relwithdebinfo"
+    },
+
+    {
+      "name": "windows-msvc-relwithdebinfo-engine",
+      "displayName": "Windows / MSVC / RelWithDebInfo -- engine and tests only",
+      "description": "Skips JUCE entirely. This is the loop to use while working on the engine.",
+      "configurePreset": "windows-msvc-relwithdebinfo",
+      "targets": [
+        "bbengine",
+        "morgue-tests"
+      ]
+    },
+    {
+      "name": "linux-gcc-relwithdebinfo-engine",
+      "displayName": "Linux / GCC / RelWithDebInfo -- engine and tests only",
+      "description": "Skips JUCE entirely. This is the loop to use while working on the engine.",
+      "configurePreset": "linux-gcc-relwithdebinfo",
+      "targets": [
+        "bbengine",
+        "morgue-tests"
+      ]
+    },
+    {
+      "name": "macos-clang-relwithdebinfo-engine",
+      "displayName": "macOS / AppleClang / RelWithDebInfo -- engine and tests only",
+      "description": "Skips JUCE entirely. This is the loop to use while working on the engine.",
+      "configurePreset": "macos-clang-relwithdebinfo",
+      "targets": [
+        "bbengine",
+        "morgue-tests"
+      ]
+    }
+  ],
+
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": {
+        "outputOnFailure": true,
+        "verbosity": "default"
+      },
+      "execution": {
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "windows-msvc-debug",
+      "displayName": "Windows / MSVC / Debug",
+      "inherits": "test-base",
+      "configurePreset": "windows-msvc-debug"
+    },
+    {
+      "name": "windows-msvc-relwithdebinfo",
+      "displayName": "Windows / MSVC / RelWithDebInfo",
+      "inherits": "test-base",
+      "configurePreset": "windows-msvc-relwithdebinfo"
+    },
+    {
+      "name": "linux-gcc-debug",
+      "displayName": "Linux / GCC / Debug",
+      "inherits": "test-base",
+      "configurePreset": "linux-gcc-debug"
+    },
+    {
+      "name": "linux-gcc-relwithdebinfo",
+      "displayName": "Linux / GCC / RelWithDebInfo",
+      "inherits": "test-base",
+      "configurePreset": "linux-gcc-relwithdebinfo"
+    },
+    {
+      "name": "linux-clang-debug",
+      "displayName": "Linux / Clang / Debug",
+      "inherits": "test-base",
+      "configurePreset": "linux-clang-debug"
+    },
+    {
+      "name": "linux-clang-relwithdebinfo",
+      "displayName": "Linux / Clang / RelWithDebInfo",
+      "inherits": "test-base",
+      "configurePreset": "linux-clang-relwithdebinfo"
+    },
+    {
+      "name": "macos-clang-debug",
+      "displayName": "macOS / AppleClang / Debug",
+      "inherits": "test-base",
+      "configurePreset": "macos-clang-debug"
+    },
+    {
+      "name": "macos-clang-relwithdebinfo",
+      "displayName": "macOS / AppleClang / RelWithDebInfo",
+      "inherits": "test-base",
+      "configurePreset": "macos-clang-relwithdebinfo"
+    }
+  ]
+}
