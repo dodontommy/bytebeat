@@ -2364,11 +2364,32 @@ void bb_engine_render(int16_t *out, int frames, int channels)
 
     atomic_store_explicit(&bb.t,   t,         memory_order_relaxed);
     atomic_store_explicit(&bb.k,   k,         memory_order_relaxed);
+    /* Transport position, published THREE ways, and the third is the one to
+     * read.
+     *
+     * bb.bar and bb.seq_pos are two separate stores, so anything that loads
+     * them independently can catch a bar from one side of a boundary and a
+     * step from the other -- bar N+1 with step 15 of bar N is a position
+     * nearly a whole bar ahead, and the frame after it corrects. On screen
+     * that is a playhead lurching forward and snapping back every time a bar
+     * turns over, which is exactly what you stare at while overdubbing a loop.
+     * It was reported from playing the thing, not found by reading it.
+     *
+     * bb.pos packs both into one 64-bit word -- bar in the high 32, seq_pos in
+     * the low 32 as a signed value so the idle -1 survives -- so a single load
+     * is always coherent by construction. The two separate fields stay because
+     * plenty of callers legitimately want only one of them and cannot tear on
+     * a single value; the packed word is for anyone who needs the PAIR.
+     * Published last so a reader that samples bb.pos and then bb.bar can never
+     * see the packed word lead the separate ones. */
+    const int seq_now = (any_seq || sampler_clock)
+                          ? (int)((k / step_len) % BB_STEPS) : -1;
     atomic_store_explicit(&bb.bar, bar_count, memory_order_relaxed);
-    atomic_store_explicit(&bb.seq_pos,
-                          (any_seq || sampler_clock)
-                              ? (int)((k / step_len) % BB_STEPS) : -1,
-                          memory_order_relaxed);
+    atomic_store_explicit(&bb.seq_pos, seq_now, memory_order_relaxed);
+    atomic_store_explicit(&bb.pos,
+                          ((unsigned long long)bar_count << 32)
+                            | (unsigned long long)(unsigned)seq_now,
+                          memory_order_release);
     atomic_store_explicit(&bb.loop_pos, g_loop_pub_pos, memory_order_relaxed);
     atomic_store_explicit(&bb.loop_frames, g_loop_len, memory_order_relaxed);
     if (g_cap_run)
@@ -3459,6 +3480,10 @@ void bb_engine_set_defaults(void)
     atomic_store(&bb.reset_t,   0);
     atomic_store(&bb.reset_loop, 0);
     atomic_store(&bb.seq_pos,  -1);
+    /* Keep the packed word agreeing with the two fields it mirrors, or a UI
+     * that reads bb.pos would show the previous session's position until the
+     * first period lands. */
+    atomic_store(&bb.pos, (unsigned long long)(unsigned)(-1));
 
     atomic_store(&bb.arr_rec_status, ARR_REC_IDLE);
     atomic_store(&bb.arr_rec_frames, 0);

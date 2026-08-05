@@ -962,17 +962,17 @@ void paintLabelRow (juce::Graphics& g, Rectangle<int> row,
  * appeared to jump back a bar on every loop pass. */
 float transportPositionBars()
 {
-    unsigned bar0 = (unsigned) atomic_load (&bb.bar);
-    int      seq  =            atomic_load (&bb.seq_pos);
-    unsigned bar1 = (unsigned) atomic_load (&bb.bar);
-
-    if (bar0 != bar1)                 // a bar turned over between the loads
-        seq = atomic_load (&bb.seq_pos);
+    /* One load. The engine packs bar and step into a single word precisely so
+     * this cannot tear; the read-twice-and-retry dance that used to live here
+     * narrowed the window but could not close it. */
+    const unsigned long long p = atomic_load (&bb.pos);
+    const unsigned bar = (unsigned) (p >> 32);
+    const int      seq = (int) (unsigned) (p & 0xffffffffULL);
 
     if (seq < 0)
         return -1.0f;                 // step clock idle: nothing to show
 
-    return (float) bar1 + (float) seq / (float) BB_STEPS;
+    return (float) bar + (float) seq / (float) BB_STEPS;
 }
 
 } // namespace morgue

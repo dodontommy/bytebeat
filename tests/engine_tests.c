@@ -890,7 +890,9 @@ static void test_arrangement(void)
         bb_engine_clip_release(bb2);
     }
 
-    /* ---- session v7: song meta round-trips, older sessions still load */
+    
+
+/* ---- session v7: song meta round-trips, older sessions still load */
     char root[720];
     int made = tmp_dir_make(root, sizeof root, "arrtest") == 0;
     test_expect(made, "temporary arrangement session directory can be created");
@@ -987,6 +989,68 @@ static void test_arrangement(void)
 /* ======================================================================== */
 /*  New: the checks the Windows port made necessary                          */
 /* ======================================================================== */
+
+/* ------------------------------------------------------------------------
+ * bb.pos -- bar and step in one word.
+ *
+ * Reading bb.bar and bb.seq_pos as two loads is a torn read: the audio thread
+ * publishes them as separate stores, so a caller can catch a bar from one side
+ * of a boundary and a step from the other. It is a real defect that was
+ * reported from playing the instrument -- the ARRANGE playhead appeared to
+ * jump back a bar on every loop pass -- not a theoretical one.
+ *
+ * These checks pin the encoding and, more importantly, pin AGREEMENT: whatever
+ * the packed word says must be what the two separate fields say, at every
+ * point the engine publishes them.
+ * ------------------------------------------------------------------------ */
+static void test_packed_position(void)
+{
+    static int16_t out[2048];
+    const int rate = 8000;
+
+    bb_engine_set_defaults();
+    test_expect((int)(unsigned)(atomic_load(&bb.pos) & 0xffffffffu) == -1,
+                "defaults leave the packed position idle");
+
+    bb_engine_init(rate);
+    atomic_store(&bb.gctl[GCTL_BPM], 240);
+    bb_engine_reset_loop();
+    bb_engine_reset_t();
+    atomic_store(&bb.layer[0].on, 1);
+    atomic_store(&bb.layer[0].seq_on, 1);
+
+    /* Walk a few bars, checking after every period that the packed word and
+     * the two fields it mirrors have not drifted apart. 8000 frames at 240 BPM
+     * is one bar, so 37 frames per period crosses plenty of boundaries at an
+     * offset that does not divide evenly into anything. */
+    int agree = 1, saw_step = 0, saw_bar = 0;
+    unsigned last_bar = 0;
+    for (int i = 0; i < 700 && agree; i++) {
+        bb_engine_render(out, 37, 1);
+
+        const unsigned long long pk = atomic_load(&bb.pos);
+        const unsigned bar = (unsigned)(pk >> 32);
+        const int      seq = (int)(unsigned)(pk & 0xffffffffu);
+
+        if (bar != (unsigned)atomic_load(&bb.bar))  agree = 0;
+        if (seq != atomic_load(&bb.seq_pos))        agree = 0;
+
+        if (seq >= 0) saw_step = 1;
+        if (bar != last_bar) { saw_bar = 1; last_bar = bar; }
+    }
+    test_expect(agree,  "the packed position always agrees with bar and seq_pos");
+    test_expect(saw_step, "the packed position reported a live step");
+    test_expect(saw_bar,  "the packed position crossed a bar boundary");
+
+    /* The idle encoding must survive the round trip: -1 is not a step number,
+     * and packing it through an unsigned must not turn it into 4294967295. */
+    atomic_store(&bb.layer[0].on, 0);
+    atomic_store(&bb.layer[0].seq_on, 0);
+    for (int i = 0; i < 8; i++) bb_engine_render(out, 512, 1);
+    const int idle_seq = (int)(unsigned)(atomic_load(&bb.pos) & 0xffffffffu);
+    test_expect(idle_seq == atomic_load(&bb.seq_pos),
+                "an idle step clock round-trips through the packed word");
+}
 
 /* Everything above this point is the suite as it was. Everything below is
  * new, and exists because the port moved two assumptions that had never been
@@ -2484,6 +2548,7 @@ static int self_test_mode(void)
      * changed total never has to be guessed at. */
     int historical = test_checks;
     test_port_paths();
+    test_packed_position();
     test_arr_transport_and_rec_src();
 
     /* The return bus is counted separately again, and for the same reason:

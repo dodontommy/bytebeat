@@ -379,6 +379,17 @@ struct bb_state {
     BB_ATOMIC(unsigned) k;          /* published loop position               */
     BB_ATOMIC(unsigned) bar;
     BB_ATOMIC(int)   seq_pos;       /* published playhead step, -1 if off    */
+    /* bar and seq_pos, packed into ONE word so the pair can be read without
+     * tearing: bar in the high 32 bits, seq_pos in the low 32 as a signed
+     * value so the idle -1 survives the round trip.
+     *
+     * Reading the two fields above separately is a torn read -- the audio
+     * thread can have published the new bar but not yet the new step, and a
+     * caller that combines them gets a position nearly a whole bar out, once
+     * per bar, forever. That showed up as the ARRANGE playhead jumping
+     * backwards on every loop pass. Anything that needs BOTH numbers must
+     * read this; anything that needs only one can still read that one. */
+    BB_ATOMIC(unsigned long long) pos;
 
     /* --- master --------------------------------------------------------- */
     BB_ATOMIC(int)   gctl[GCTL_COUNT];
