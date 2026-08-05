@@ -8,25 +8,29 @@ expression; the panel just puts hands on it.
 
 ![RACK — the voice station](docs/morgue_rack.png)
 
-Two front ends drive **one realtime C engine**: this JUCE desktop app
-(macOS) and the original [ncurses terminal instrument](docs/TUI.md) (Linux).
-The engine renders the same samples for both, and a **2,966-check headless
-regression suite** exercises the whole thing — DSP, sequencer, looper,
-timeline, sessions — on any machine with a C compiler, no sound card
-required.
+A JUCE desktop app over **one realtime C engine**, building and running on
+**Windows, macOS and Linux**. A **3,233-check headless regression suite**
+exercises the whole thing — DSP, sequencer, loop bank, return bus, timeline,
+sessions — on any machine with a C compiler, no sound card and no submodule
+required, and CI runs it on four toolchains (MSVC, Apple Clang, gcc, clang).
+
+The [ncurses terminal instrument](docs/TUI.md) is retired. Its regression
+suite was the valuable part and now lives in `tests/` as its own target.
 
 ## The console
 
 | Workspace | What it does |
 |---|---|
 | **RACK** | The voice station. 16 curated patches, 22 expression generators, a live bytebeat editor, knobs with roles inferred from the compiled bytecode, per-voice post chain, 16-step sequencer with pitch/ratchet/probability/parameter-lock lanes. |
-| **ARRANGE** | The song timeline. Record any voice or the drum bus into bar-aligned clips, drag/trim/loop them across 64 bars, place WAVs from the locker, seek by clicking the ruler. |
+| **ARRANGE** | The song timeline. Record any voice or the drum bus into bar-aligned clips, drag/trim/loop them across 64 bars, place WAVs from the locker, seek by clicking the ruler. Its own PLAY/STOP, and a REC source that leaves the arrangement out of the take so you can overdub against it. |
 | **GRAIN LICKS** | The drum machine: 8 sample slots × 16 steps with per-step pitch and velocity, choke groups, mute/solo. A synthetic kit is preloaded so it grooves before you touch anything. |
 | **GRAIN MASS** | Four sample wells: load anything, pitch it ±24 semitones, reverse it, loop it. PLAY ALL starts every well together on the next bar. |
-| **SURVIVOR** | The master phrase looper, live: capture the finished bus at a bar boundary, then overdub, feed back, halve, reverse and stutter it. |
-| **MIXER** | Faders, mutes and meters for every voice, plus **RETURN A — the CHAMBER**: a master reverb bus with per-voice sends. |
+| **SURVIVOR** | The loop bank: six bar-synced loopers. Slot 0 is the master phrase looper; the other five record **LIVE** — voices, sampler and returns, but never another looper — so layers stack without recording each other. Commit any finished loop to an ARRANGE lane. |
+| **MIXER** | Faders, mutes and meters, plus the **return bus**: eight ad-hoc slots (CHAMBER, DELAY, DRIVE, CHOIR), an 11×8 send matrix, and a link grid so returns feed each other. Every link is one sample old, which is what makes any feedback patch bounded. |
 | **HW/SYNC** | MIDI in: notes trigger and re-pitch the focused voice, CC1 rides p0. |
-| **EXPORT** | Stem rendering (planned — the sheet is real, the render is not yet). |
+| **EXHUME** | archive.org acquisition: search, audition, and download into the locker, transcoded and carrying its licence and provenance. |
+| **PLATE** | The visual wing: a watched INTAKE folder for scans and captures, and generation loss as a seeded, reproducible operator chain. |
+| **EXPORT** | Stem rendering — **planned, and the sheet says so.** The engine has no stem renderer yet. |
 
 Press `?` anywhere for the field manual.
 
@@ -55,30 +59,50 @@ on RETURN with no glitch, and a failed compile keeps the old program running.
 
 ## Build
 
-macOS (the GUI):
+There are presets for every platform, so the build is the same three lines
+everywhere:
 
 ```sh
 git clone --recursive https://github.com/dodontommy/bytebeat.git
 cd bytebeat
-cmake -S . -B build -G Ninja
-cmake --build build --target MORGUE
-open build/MORGUE.app
+cmake --preset windows-msvc-relwithdebinfo     # or linux-gcc- / linux-clang- / macos-clang-
+cmake --build --preset windows-msvc-relwithdebinfo
+ctest  --preset windows-msvc-relwithdebinfo    # 3,233 checks
 ```
 
-Requires CMake ≥ 3.20 and a C11/C++17 toolchain (Xcode CLT). JUCE 8.0.15 is
+Requires CMake ≥ 3.22 (JUCE 8.0.15's floor) and a C11/C++17 toolchain. JUCE is
 pinned as a submodule; the IBM Plex fonts ship embedded (OFL). If you cloned
-without `--recursive`, run `git submodule update --init`.
+without `--recursive`, run `git submodule update --init --recursive`.
 
-Linux (the terminal instrument):
+- **Windows** — Visual Studio 2022 **17.5 or newer**, configured from a
+  Developer prompt. C11 atomics need `/experimental:c11atomics`, which the
+  build sets for you. Keep the build directory path SHORT: JUCE's own
+  intermediate paths are long enough that a deep one blows past `MAX_PATH`
+  and fails with an opaque `C1083`.
+- **macOS** — Xcode command line tools. Nothing else.
+- **Linux** — JUCE's system deps: `libasound2-dev libfreetype6-dev
+  libfontconfig1-dev libx11-dev libxcomposite-dev libxcursor-dev libxext-dev
+  libxinerama-dev libxrandr-dev libxrender-dev libglu1-mesa-dev
+  mesa-common-dev`. No webkit — `JUCE_WEB_BROWSER=0`.
+
+`morgue-tests` deliberately does not link JUCE, so the engine can be built and
+proven with the submodule completely absent.
+
+### Sourcing material without leaving the app
+
+`tools/exhume.py` is the same archive.org client the EXHUME panel uses, as a
+standalone CLI. Stdlib only; needs ffmpeg on PATH.
 
 ```sh
-sudo apt install build-essential libasound2-dev libncurses-dev
-make        # the TUI
-make test   # the regression suite
+export MORGUE_CONTACT="you@example.com"   # archive.org is a donation-funded nonprofit
+python tools/exhume.py search "civil defense" -c prelinger
+python tools/exhume.py item AboutFal1963
+python tools/exhume.py fetch AboutFal1963
 ```
 
-See [docs/TUI.md](docs/TUI.md) for the terminal instrument's full manual,
-including headless evaluation and streaming raw PCM over TCP.
+Results are marked `+` clear / `?` verify per item / `X` personal use only, so
+the licence question is answered while you browse rather than after a track is
+built on it.
 
 ## The engine
 
