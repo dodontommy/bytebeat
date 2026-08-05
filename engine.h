@@ -48,6 +48,48 @@ void bb_engine_loop_command(int cmd);
  * thread's writes; torn reads are cosmetic exactly like bb.scope. */
 const int16_t *bb_engine_loop_buffer(void);
 
+/* ---- THE LOOP BANK --------------------------------------------------------
+ * Six bar-synced loopers. SLOT 0 IS SURVIVOR: aliased controls, loop_process()
+ * unchanged, source pinned to the master. A session using only slot 0 renders
+ * BIT-IDENTICALLY to the engine that had no loop bank; CHAMBER_GOLDEN pins it.
+ *
+ * Slots 1..5 record BB_LOOP_SRC_LIVE by default -- the bus at the input of the
+ * loop stage, which contains no looper's playback because no looper has run
+ * when it is taken. Record L1, play it, arm L2: L2 hears only your hands.
+ *
+ * bb_engine_render() never allocates, so all six buffers exist from load.
+ * There is no create/destroy: a looper is empty or it is not.
+ *
+ * QUANTUM. ARM and CLEAR land on the CYCLE boundary (the length of the first
+ * loop recorded this session) so layers share a downbeat. STOP and PLAY land
+ * on the BAR -- waiting eight bars for a stop is unusable on stage. PLAY
+ * RE-PHASES the loop to the transport rather than restarting it at frame 0, so
+ * a layer brought back mid-cycle drops in where it belongs. OR in LBC_HARD to
+ * skip the quantum: HARD lands at the next PERIOD boundary, up to one audio
+ * buffer late, which is the price of not reading an atomic per frame. HARD is
+ * ignored on ARM. Safe from any thread. */
+void bb_engine_loop_cmd(int slot, int cmd);
+void bb_engine_loop_panic(void);              /* HARD STOP, all six          */
+
+int      bb_engine_loop_status (int slot);    /* LOOP_*                      */
+int      bb_engine_loop_pending(int slot);    /* latched cmd, 0 = none       */
+unsigned bb_engine_loop_frames (int slot);
+unsigned bb_engine_loop_pos    (int slot);
+int      bb_engine_loop_barlen (int slot);    /* bar_len at capture, frames  */
+int      bb_engine_loop_peak   (int slot);    /* max-hold; CLEARS on read    */
+int      bb_engine_loop_cycle_bars(void);     /* 0 = none established        */
+
+/* One atomic store each, effective next period. Slot 0 redirects; L2C_SRC and
+ * L2C_MUTE on slot 0 return -1 and store nothing. Clamped HERE and again in
+ * the render snapshot -- a hand-edited session must not reach the DSP raw
+ * (that is one of the five silent hash-breakers the golden test names). */
+void bb_engine_loop_ctl    (int slot, int ctl, int v);
+int  bb_engine_loop_ctl_get(int slot, int ctl);
+
+/* Read-only view for the waveform. Slot 0 returns g_loop_buf. UI-thread reads
+ * race the audio thread's writes; torn reads are cosmetic, like bb.scope. */
+const int16_t *bb_engine_loop_slot_buffer(int slot, unsigned *len);
+
 /* MIDI / hardware entry points. All UI-thread safe. */
 void bb_engine_note_on(int layer, int midi_note, int velocity);   /* fire a hit + set pitch */
 void bb_engine_note_off(int layer);                               /* release key / reset pitch */
@@ -174,6 +216,24 @@ int  bb_engine_arr_arm(int lane, int bars, int16_t *dst, unsigned cap);
 
 /* Abandon an armed or running capture; status returns to ARR_REC_IDLE. */
 void bb_engine_arr_cancel(void);
+
+/* ---- the loop bank -> ARRANGE handoff -------------------------------------
+ * Snapshot a finished loop into a fresh immutable clip buffer, with the bar
+ * count it was RECORDED at in *bars_out. Frame 0 is a downbeat by
+ * construction, so the caller places it with no offset and loop = 1.
+ *
+ * BLOCKING, BOUNDED, AND IT TURNS THE SLOT'S OVERDUB OFF. Overdub is the only
+ * audio-thread write into a PLAYING satellite's buffer; with it off the buffer
+ * is static and the copy is a plain memcpy. This stores overdub = 0, waits
+ * `epoch >= e0 + 2` -- the same two-epoch proof bb_reclaim() uses -- with the
+ * `epoch == 0 -> proceed immediately` early out so an offline caller never
+ * blocks, then copies. Committing a loop FREEZES it; that is stated on the
+ * button, not hidden.
+ *
+ * NULL with *bars_out = 0 if the slot is empty, ARMED, RECORDING, out of range
+ * or out of memory. Caller owns the buffer; bb_engine_clip_release() frees it.
+ * UI THREAD ONLY. */
+ArrClipBuf *bb_engine_loop_clip(int slot, unsigned *bars_out);
 
 /* ---- THE RETURN BUS -------------------------------------------------------
  * Eight pre-allocated return slots (bb.ret[], bytebeat.h), an 11 x 8 send

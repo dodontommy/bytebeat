@@ -1083,6 +1083,540 @@ static int32_t loop_process(int32_t live, uint32_t bar_pos, uint32_t bar_len,
 }
 
 /* ======================================================================== */
+/*  THE LOOP BANK -- five additive satellites around SURVIVOR                */
+/* ======================================================================== */
+
+/* THE SATELLITE BUFFERS. 5 x 2^20 int16 = 10,485,760 B = 10.00 MiB, BSS,
+ * demand-zero. Slot n uses g_sat_buf[n - 1]; slot 0 uses g_loop_buf.
+ *
+ * NOTHING MAY EVER memset THIS ARRAY. Not bb_engine_init() (the suite calls it
+ * seven times, so a memset here walks 70 MiB per run and makes every unopened
+ * looper resident), not CLEAR (which sets len = 0, exactly as loop_command()
+ * already does), not the session loader. An unopened looper must cost zero
+ * resident pages, which is the entire reason 10 MiB is affordable. The residue
+ * is unreachable by CONSTRUCTION and not by discipline: every read is
+ * `idx % g_sat_len[n]` and every index below len was written during that
+ * capture. This is ret.h's pool argument, and it dies the same way -- to a
+ * well-meaning "initialise everything" commit. */
+static int16_t  g_sat_buf[BB_NLOOP - 1][BB_LOOP_LEN];
+
+/* Every per-slot scalar below is indexed by the SLOT number n, 1..5, with
+ * index 0 unused -- slot 0's equivalents are the g_loop_* statics -- so every
+ * loop in this section is uniform and no reader has to remember which arrays
+ * are off by one. Six wasted words, bought deliberately. Only g_sat_buf is
+ * indexed n-1, because 10 MiB of unused row is not six words. */
+static uint32_t g_sat_len[BB_NLOOP], g_sat_write[BB_NLOOP], g_sat_target[BB_NLOOP];
+static uint32_t g_sat_slice0[BB_NLOOP], g_sat_pub[BB_NLOOP], g_sat_barlen[BB_NLOOP];
+static uint32_t g_sat_start[BB_NLOOP];      /* bar_count when capture began  */
+static uint64_t g_sat_phase[BB_NLOOP];
+static int32_t  g_sat_lvl[BB_NLOOP];        /* Q16 level ramp, +/-128/frame  */
+static int32_t  g_sat_pk[BB_NLOOP];
+static int      g_sat_state[BB_NLOOP], g_sat_last_slice[BB_NLOOP];
+static int      g_sat_pend[BB_NLOOP];       /* latched command word + HARD    */
+
+/* THE CYCLE. Render-thread owned; bb.loop_cycle_bars is a published mirror.
+ * g_sat_cyc_origin is the value of bar_count at which the cycle-defining
+ * capture BEGAN, so `(bar_count - origin) % cyc == 0` is the cycle boundary,
+ * exact under uint32 wrap and costing one modulo only at an ARM edge -- ZERO
+ * work in the golden path. Set by the first SATELLITE capture to complete
+ * (slot 0 is the bounce and does not define the cycle); cleared when every
+ * satellite is empty and OFF. */
+static uint32_t g_sat_cyc_bars, g_sat_cyc_origin;
+
+/* Gain staging for the summed satellites. NO feedback path exists in the loop
+ * bank -- there is deliberately no source that carries a looper's playback --
+ * so there is no cycle, so there is no DC blocker and no bounded/filtered
+ * split; both exist in the return bus only because its graph can close.
+ * ret_limit() is here so the MASTER clipper is never what limits five layers.
+ * Reset to unity whenever nlive == 0, or a gain ridden down by a previous take
+ * makes the next one quieter for ~123 ms in a way peak assertions cannot see. */
+static int32_t  g_sat_lg;
+
+typedef struct { int src, bars, level, feedback, overdub, rate, reverse,
+                     slice, mute; } SatSnap;
+typedef struct {
+    int nlive, live[BB_NLOOP];        /* live SATELLITES, ascending          */
+    int nwv,   wv[BB_NLAYER];         /* wanted VOICE source ids, packed     */
+    int want_v[BB_NLAYER];            /* 1 = some live satellite records V L */
+    int want_licks, want_dry, want_live;
+    SatSnap s[BB_NLOOP];
+} SatBus;
+
+static void sat_state(int n, int st)
+{
+    g_sat_state[n] = st;
+    atomic_store_explicit(&bb.loopn[n].status, st, memory_order_relaxed);
+}
+
+/* Apply one command NOW. Called from the bar/cycle edge in sat_process() and,
+ * for LBC_HARD on PLAY/STOP/CLEAR, from sat_hard() at the period boundary. */
+static void sat_apply(int n, int a, uint32_t bar_count, uint32_t bar_len,
+                      uint32_t bar_pos)
+{
+    switch (a) {
+    case LBC_ARM:
+        /* Destructive re-take. The level ramp fades the old loop out over 512
+         * frames (10.7 ms at 48 kHz) and the buffer is overwritten from the
+         * cycle edge. CLEAR is the eraser; ARM is the re-take. */
+        sat_state(n, LOOP_ARMED);
+        break;
+
+    case LBC_PLAY:
+        if (!g_sat_len[n]) { sat_state(n, LOOP_ARMED); break; }
+        /* RE-PHASE to the transport rather than restarting at frame 0. Without
+         * this, a layer brought back mid-cycle is offset for the rest of the
+         * session -- the same defect as arming on the bar, by the other door.
+         * One divide and one modulo at a state edge; zero per-frame cost.
+         *
+         * THE POSITION WITHIN THE BAR IS PART OF THE PHASE, not just the bar
+         * offset. A HARD PLAY lands mid-bar, and a one-bar loop has only one
+         * bar offset -- zero -- so dropping bar_pos would make "re-phase to
+         * the transport" mean "restart at frame 0" for exactly the loop length
+         * people use most. */
+        if (g_sat_barlen[n] && g_sat_barlen[n] == bar_len) {
+            uint32_t nb = g_sat_len[n] / g_sat_barlen[n];
+            if (nb < 1u) nb = 1u;
+            uint32_t off_bars = (bar_count - g_sat_cyc_origin) % nb;
+            uint32_t off = off_bars * g_sat_barlen[n] + bar_pos;
+            if (off >= g_sat_len[n]) off %= g_sat_len[n];
+            g_sat_phase[n] = (uint64_t)off << 32;
+        } else {
+            /* bar_len has moved since capture: the UI lights the tempo-drift
+             * chip and the loop simply starts at its own frame 0. */
+            g_sat_phase[n] = 0;
+        }
+        sat_state(n, LOOP_PLAYING);
+        break;
+
+    case LBC_STOP:
+        sat_state(n, LOOP_OFF);      /* buffer kept; the level ramps to zero */
+        break;
+
+    case LBC_CLEAR:
+        g_sat_len[n] = g_sat_write[n] = g_sat_target[n] = 0;
+        g_sat_phase[n] = 0;
+        g_sat_slice0[n] = g_sat_pub[n] = 0;
+        g_sat_barlen[n] = 0;
+        g_sat_last_slice[n] = 1;
+        sat_state(n, LOOP_OFF);
+        atomic_store_explicit(&bb.loopn[n].frames, 0, memory_order_relaxed);
+        atomic_store_explicit(&bb.loopn[n].pos,    0, memory_order_relaxed);
+        atomic_store_explicit(&bb.loopn[n].barlen, 0, memory_order_relaxed);
+        break;                       /* DOES NOT memset THE BUFFER */
+
+    default:
+        break;
+    }
+}
+
+/* Once per period, BEFORE loop_command(): drain every slot's command word.
+ * Satellites latch (the HARD bit rides along and sat_hard() consumes it);
+ * slot 0 is translated into the legacy three-command vocabulary against the
+ * true g_loop_state and handed to bb.loop_cmd, which loop_command() then
+ * consumes exactly as it always has. bb_engine_loop_command() still writes
+ * bb.loop_cmd directly and is untouched.
+ *
+ * SLOT 0 IS NOT BAR-LATCHED and keeps today's behaviour exactly: its ARM
+ * already waits for a bar inside loop_process(), and PLAY/STOP/CLEAR land at
+ * the period. */
+static void sat_command(void)
+{
+    for (int n = 1; n < BB_NLOOP; n++) {
+        int c = atomic_exchange_explicit(&bb.loopn[n].cmd, 0,
+                                         memory_order_relaxed);
+        int a = c & LBC_ACTION;
+        if (a == LBC_NONE || a > LBC_CLEAR) continue;
+        g_sat_pend[n] = c;
+        atomic_store_explicit(&bb.loopn[n].pend, a, memory_order_relaxed);
+    }
+
+    int c0 = atomic_exchange_explicit(&bb.loopn[0].cmd, 0, memory_order_relaxed);
+    int out = LOOP_CMD_NONE;
+    switch (c0 & LBC_ACTION) {
+    case LBC_ARM:   out = LOOP_CMD_ARM;   break;
+    case LBC_PLAY:  if (g_loop_state != LOOP_PLAYING) out = LOOP_CMD_PLAY; break;
+    case LBC_STOP:  if (g_loop_state == LOOP_PLAYING) out = LOOP_CMD_PLAY; break;
+    case LBC_CLEAR: out = LOOP_CMD_CLEAR; break;
+    default: break;
+    }
+    if (out != LOOP_CMD_NONE)
+        atomic_store_explicit(&bb.loop_cmd, out, memory_order_relaxed);
+}
+
+/* The HARD path, run once per period after the transport is resolved (it needs
+ * bar_len and bar_count for PLAY's re-phasing and sat_command() runs before
+ * they exist). HARD is honoured on PLAY/STOP/CLEAR and ignored on ARM: an ARM
+ * only sets state ARMED, and the ARMED->RECORDING edge must still land on a
+ * boundary or the loop is not a whole number of bars. */
+static void sat_hard(uint32_t bar_count, uint32_t bar_len, uint32_t bar_pos)
+{
+    for (int n = 1; n < BB_NLOOP; n++) {
+        int c = g_sat_pend[n];
+        int a = c & LBC_ACTION;
+        if (a == LBC_NONE || !(c & LBC_HARD) || a == LBC_ARM) continue;
+        sat_apply(n, a, bar_count, bar_len, bar_pos);
+        g_sat_pend[n] = LBC_NONE;
+        atomic_store_explicit(&bb.loopn[n].pend, 0, memory_order_relaxed);
+    }
+}
+
+/* Read every satellite control EXACTLY ONCE and clamp it here -- a hand-edited
+ * session must never reach the DSP raw, and one atomic read twice at different
+ * instants is one of the five silent ways a bus refactor breaks bit-exactness.
+ *
+ * LIVENESS mirrors ret_snapshot(): a dead slot is NOT VISITED, so its phase
+ * does not advance and its state does not move. Same property, same reason. */
+static void sat_snapshot(SatBus *sb)
+{
+    sb->nlive = 0;
+    sb->nwv   = 0;
+    sb->want_licks = sb->want_dry = sb->want_live = 0;
+    for (int L = 0; L < BB_NLAYER; L++) sb->want_v[L] = 0;
+
+    int any = 0;
+    for (int n = 1; n < BB_NLOOP; n++) {
+        if (g_sat_len[n] || g_sat_state[n] != LOOP_OFF) any = 1;
+
+        int live = g_sat_state[n] != LOOP_OFF ||
+                   g_sat_pend[n] != LBC_NONE ||
+                   g_sat_lvl[n]  != 0;
+        if (!live) continue;
+
+        SatSnap *s = &sb->s[n];
+        s->src      = bb_clampi(loop_ctl_load(n, L2C_SRC), 0, BB_LOOP_SRC_LIVE);
+        s->bars     = bb_clampi(loop_ctl_load(n, L2C_BARS), 0, 8);
+        s->level    = bb_clampi(loop_ctl_load(n, L2C_LEVEL), 0, 256);
+        s->feedback = bb_clampi(loop_ctl_load(n, L2C_FEEDBACK), 0, 256);
+        s->overdub  = loop_ctl_load(n, L2C_OVERDUB) ? 1 : 0;
+        s->rate     = bb_clampi(loop_ctl_load(n, L2C_RATE),
+                                LOOP_RATE_HALF, LOOP_RATE_DOUBLE);
+        s->reverse  = loop_ctl_load(n, L2C_REVERSE) ? 1 : 0;
+        s->slice    = loop_ctl_load(n, L2C_SLICE);
+        if (s->slice != 1 && s->slice != 2 && s->slice != 4 &&
+            s->slice != 8 && s->slice != 16) s->slice = 1;
+        s->mute     = loop_ctl_load(n, L2C_MUTE) ? 1 : 0;
+
+        sb->live[sb->nlive++] = n;
+
+        if (s->src < BB_NLAYER) {
+            if (!sb->want_v[s->src]) {
+                sb->want_v[s->src] = 1;
+                sb->wv[sb->nwv++]  = s->src;
+            }
+        } else if (s->src == BB_LOOP_SRC_LICKS) sb->want_licks = 1;
+        else if (s->src == BB_LOOP_SRC_DRY)     sb->want_dry   = 1;
+        else                                    sb->want_live  = 1;
+    }
+
+    if (!sb->nlive) g_sat_lg = BB_RET_GAIN_UNITY;
+
+    /* Cycle GC: a cycle describes material, and once every satellite is empty
+     * and OFF there is none left for it to describe. */
+    if (!any) g_sat_cyc_bars = g_sat_cyc_origin = 0;
+}
+
+/* One satellite, one frame. Returns its level-scaled playback contribution and
+ * writes its own buffer when recording or overdubbing.
+ *
+ * Identical arithmetic to loop_process() wherever it can be, so the two diff
+ * cleanly. Exactly three differences: it is ADDITIVE rather than crossfading,
+ * it RETURNS 0 WHILE RECORDING (it does not pass its source through -- the
+ * source is already in `mix`), and it carries a LEVEL ramp where slot 0
+ * carries a wet ramp. */
+static int32_t sat_process(int n, const SatBus *sb, int32_t src_in,
+                           uint32_t bar_pos, uint32_t bar_len,
+                           uint32_t bar_count)
+{
+    int16_t *buf = g_sat_buf[n - 1];
+    const SatSnap *s = &sb->s[n];
+
+    /* (a) the quantised command lands. ARM/CLEAR wait for the CYCLE; STOP and
+     *     PLAY wait for the BAR. Waiting eight bars to stop is unusable live;
+     *     NOT waiting for the cycle to arm is what makes every layer after the
+     *     first sit on the wrong downbeat forever. */
+    if (bar_pos == 0 && g_sat_pend[n] != LBC_NONE) {
+        int a = g_sat_pend[n] & LBC_ACTION;
+        int cyc_edge = (g_sat_cyc_bars == 0u) ||
+                       ((bar_count - g_sat_cyc_origin) % g_sat_cyc_bars) == 0u;
+        int ready = (a == LBC_ARM || a == LBC_CLEAR) ? cyc_edge : 1;
+        if (ready) {
+            sat_apply(n, a, bar_count, bar_len, bar_pos);   /* bar_pos == 0 */
+            g_sat_pend[n] = LBC_NONE;
+            atomic_store_explicit(&bb.loopn[n].pend, 0, memory_order_relaxed);
+        }
+    }
+
+    /* (b) ARMED -> RECORDING. WHOLE BARS OR NOTHING: a loop that is not a
+     *     whole number of bars is what makes a committed clip drift against
+     *     the grid, which is half of what was reported. FOLLOW resolves HERE,
+     *     against the render thread's own cycle, not in the snapshot -- a
+     *     capture completing earlier in the same period must be visible. */
+    if (g_sat_state[n] == LOOP_ARMED && bar_pos == 0) {
+        uint32_t cap = bar_len ? (BB_LOOP_LEN / bar_len) : 0u;
+        uint32_t nb  = s->bars ? (uint32_t)s->bars
+                     : (g_sat_cyc_bars ? g_sat_cyc_bars
+                                       : (uint32_t)BB_LOOP_DEF_BARS);
+        if (nb > cap) nb = cap;          /* clamp; the UI reads back frames
+                                          * and barlen, never `bars`        */
+        if (nb < 1u) {
+            /* bar_len > BB_LOOP_LEN: reachable at the minimum BPM with a long
+             * bar. REFUSE, visibly, rather than record a fractional bar. */
+            sat_state(n, LOOP_OFF);
+        } else {
+            g_sat_target[n] = bar_len * nb;   /* nb <= cap, so this cannot
+                                               * exceed BB_LOOP_LEN         */
+            g_sat_write[n]  = 0;
+            g_sat_barlen[n] = bar_len;
+            g_sat_start[n]  = bar_count;
+            sat_state(n, LOOP_RECORDING);
+        }
+    }
+
+    /* (c) RECORDING: write, contribute nothing. */
+    if (g_sat_state[n] == LOOP_RECORDING) {
+        buf[g_sat_write[n]++] = (int16_t)dsp_clip16(src_in);
+        if (g_sat_write[n] >= g_sat_target[n]) {
+            g_sat_len[n]   = g_sat_write[n];
+            g_sat_phase[n] = 0;
+            g_sat_slice0[n] = 0;
+            /* THE PUBLISHED HEAD IS THE LAST FRAME WRITTEN, not 0. Playback
+             * begins at index 0 on the NEXT frame, so publishing 0 here makes
+             * the playhead read 0 for two consecutive frames -- a one-frame
+             * stall exactly at the capture->playback seam. Two slots that
+             * finished capturing at different times would then disagree about
+             * where "one frame per frame" starts, which is the one thing the
+             * whole cycle mechanism exists to keep exact. */
+            g_sat_pub[n]   = g_sat_len[n] - 1u;
+            g_sat_last_slice[n] = 1;
+            sat_state(n, LOOP_PLAYING);
+            if (!g_sat_cyc_bars && g_sat_barlen[n]) {   /* first capture wins */
+                /* THE ORIGIN IS THE BAR THE CAPTURE BEGAN ON, taken from
+                 * g_sat_start[n] and NOT derived from bar_count here. This
+                 * line runs on the LAST FRAME of the capture, where bar_count
+                 * is still start + cyc - 1, so `bar_count - cyc` would put the
+                 * origin one bar early and every later ARM would land one bar
+                 * before the loop's downbeat -- permanently. That is the exact
+                 * defect the cycle exists to prevent, arriving by arithmetic
+                 * instead of by design. */
+                g_sat_cyc_bars   = g_sat_len[n] / g_sat_barlen[n];
+                g_sat_cyc_origin = g_sat_start[n];
+            }
+        }
+        return 0;
+    }
+
+    /* (d) level ramp. THE STATE TEST IS LOAD-BEARING AND IS COPIED VERBATIM
+     *     FROM loop_process(). A PLAYING slot ALWAYS advances its phase, even
+     *     at level 0 and even muted -- drop the state test and a muted layer
+     *     freezes its playhead and comes back permanently out of sync with
+     *     every other layer, which is the single most-used control on a
+     *     multitrack looper. The shift goes through uint32_t; MSVC has no
+     *     -fwrapv and this project no longer depends on it. */
+    int32_t tgt = (g_sat_state[n] == LOOP_PLAYING && !s->mute)
+                ? (int32_t)((uint32_t)s->level << 8) : 0;
+    if (g_sat_lvl[n] < tgt) {
+        g_sat_lvl[n] += 128; if (g_sat_lvl[n] > tgt) g_sat_lvl[n] = tgt;
+    } else if (g_sat_lvl[n] > tgt) {
+        g_sat_lvl[n] -= 128; if (g_sat_lvl[n] < tgt) g_sat_lvl[n] = tgt;
+    }
+    if (!g_sat_len[n] ||
+        (g_sat_state[n] != LOOP_PLAYING && g_sat_lvl[n] == 0))
+        return 0;
+
+    /* (e) slice / reverse / rate -- loop_process()'s block with [n] indices
+     *     substituted and NOTHING ELSE. Do not "clean up" the shifts. */
+    int slice = s->slice;
+    if (slice != g_sat_last_slice[n]) {
+        g_sat_slice0[n] = slice == 1 ? 0 : g_sat_pub[n];
+        g_sat_phase[n]  = 0;
+        g_sat_last_slice[n] = slice;
+    }
+    uint32_t slen = g_sat_len[n] / (uint32_t)slice;
+    if (slen < 1u) slen = 1u;
+    uint32_t off = (uint32_t)(g_sat_phase[n] >> 32) % slen;
+    uint32_t rel = s->reverse ? (slen - 1u - off) : off;
+    uint32_t idx = (g_sat_slice0[n] + rel) % g_sat_len[n];
+    int32_t played = buf[idx];
+    g_sat_pub[n] = idx;
+
+    if (s->overdub)                    /* PLAYING only; (c) already returned */
+        buf[idx] = (int16_t)dsp_clip16(src_in +
+                       (int32_t)(((int64_t)played * s->feedback) >> 8));
+
+    uint64_t inc = s->rate == LOOP_RATE_HALF   ? (1ULL << 31)
+                 : s->rate == LOOP_RATE_DOUBLE ? (1ULL << 33) : (1ULL << 32);
+    g_sat_phase[n] += inc;
+    uint64_t span = (uint64_t)slen << 32;
+    while (g_sat_phase[n] >= span) g_sat_phase[n] -= span;
+
+    /* 32767 * 65536 = 2,147,418,112 -- inside INT32_MAX by 65,535. The int64
+     * cast is not decoration. */
+    int32_t out = (int32_t)(((int64_t)played * g_sat_lvl[n]) >> 16);
+    int32_t a = out < 0 ? -out : out;
+    if (a > g_sat_pk[n]) g_sat_pk[n] = a;
+    return out;
+}
+
+/* Zero every scalar above -- and NOT g_sat_buf. Slot 0's reset is the
+ * g_loop_* block in bb_engine_init(), untouched. */
+static void sat_init(void)
+{
+    for (int n = 0; n < BB_NLOOP; n++) {
+        g_sat_len[n] = g_sat_write[n] = g_sat_target[n] = 0;
+        g_sat_slice0[n] = g_sat_pub[n] = g_sat_barlen[n] = 0;
+        g_sat_start[n] = 0;
+        g_sat_phase[n] = 0;
+        g_sat_lvl[n] = 0;
+        g_sat_pk[n]  = 0;
+        g_sat_state[n] = LOOP_OFF;
+        g_sat_last_slice[n] = 1;
+        g_sat_pend[n] = LBC_NONE;
+        if (n == 0) continue;      /* slot 0 publishes through bb.loop_*     */
+        atomic_store(&bb.loopn[n].status, LOOP_OFF);
+        atomic_store(&bb.loopn[n].pend,   0);
+        atomic_store(&bb.loopn[n].frames, 0u);
+        atomic_store(&bb.loopn[n].pos,    0u);
+        atomic_store(&bb.loopn[n].barlen, 0);
+        atomic_store(&bb.loopn[n].peak,   0);
+    }
+    g_sat_lg = BB_RET_GAIN_UNITY;
+    g_sat_cyc_bars = g_sat_cyc_origin = 0;
+    atomic_store(&bb.loop_cycle_bars, 0);
+    atomic_store(&bb.loop_active, 0);
+}
+
+/* The satellite half of bb_engine_set_defaults(), and the whole of the loop
+ * bank's session reset. It DOES NOT TOUCH SLOT 0'S ALIASED CELLS -- those
+ * belong to the `looper` line and to bb_engine_set_defaults(), exactly as
+ * ret_config_reset() refuses the chamber's.
+ *
+ * Feedback defaults to 160, not 192: unity overdub in a buffer with no DC
+ * blocker accretes offset, which is a real property of loop_process() today
+ * and not one to spread five-fold. */
+static void sat_defaults(void)
+{
+    /* Slot 0's NON-aliased cells only. */
+    atomic_store(&bb.loopn[0].cmd,  0);
+    atomic_store(&bb.loopn[0].pend, 0);
+    atomic_store(&bb.loopn[0].peak, 0);
+    atomic_store(&bb.loopn[0].lane, 0);
+
+    for (int n = 1; n < BB_NLOOP; n++) {
+        loop_ctl_store(n, L2C_SRC,      BB_LOOP_SRC_LIVE);
+        loop_ctl_store(n, L2C_BARS,     0);
+        loop_ctl_store(n, L2C_LEVEL,    200);
+        loop_ctl_store(n, L2C_FEEDBACK, 160);
+        loop_ctl_store(n, L2C_OVERDUB,  0);
+        loop_ctl_store(n, L2C_RATE,     LOOP_RATE_NORMAL);
+        loop_ctl_store(n, L2C_REVERSE,  0);
+        loop_ctl_store(n, L2C_SLICE,    1);
+        loop_ctl_store(n, L2C_MUTE,     0);
+        loop_ctl_store(n, L2C_LANE,     n);
+        atomic_store(&bb.loopn[n].cmd,    0);
+        atomic_store(&bb.loopn[n].pend,   0);
+        atomic_store(&bb.loopn[n].peak,   0);
+        atomic_store(&bb.loopn[n].status, LOOP_OFF);
+        atomic_store(&bb.loopn[n].frames, 0u);
+        atomic_store(&bb.loopn[n].pos,    0u);
+        atomic_store(&bb.loopn[n].barlen, 0);
+    }
+}
+
+/* ---- public API ---------------------------------------------------------- */
+
+static int sat_slot_ok(int n) { return n >= 0 && n < BB_NLOOP; }
+
+void bb_engine_loop_cmd(int slot, int cmd)
+{
+    if (!sat_slot_ok(slot)) return;
+    int a = cmd & LBC_ACTION;
+    if (a == LBC_NONE || a > LBC_CLEAR) return;
+    atomic_store(&bb.loopn[slot].cmd, a | (cmd & LBC_HARD));
+}
+
+void bb_engine_loop_panic(void)
+{
+    for (int n = 0; n < BB_NLOOP; n++)
+        atomic_store(&bb.loopn[n].cmd, LBC_STOP | LBC_HARD);
+}
+
+int bb_engine_loop_status(int slot)
+{
+    return sat_slot_ok(slot) ? loop_status_load(slot) : LOOP_OFF;
+}
+
+int bb_engine_loop_pending(int slot)
+{
+    return sat_slot_ok(slot)
+         ? atomic_load_explicit(&bb.loopn[slot].pend, memory_order_relaxed) : 0;
+}
+
+unsigned bb_engine_loop_frames(int slot)
+{
+    return sat_slot_ok(slot) ? loop_frames_load(slot) : 0u;
+}
+
+unsigned bb_engine_loop_pos(int slot)
+{
+    return sat_slot_ok(slot) ? loop_pos_load(slot) : 0u;
+}
+
+int bb_engine_loop_barlen(int slot)
+{
+    return sat_slot_ok(slot)
+         ? atomic_load_explicit(&bb.loopn[slot].barlen, memory_order_relaxed) : 0;
+}
+
+int bb_engine_loop_peak(int slot)
+{
+    if (!sat_slot_ok(slot)) return 0;
+    return atomic_exchange_explicit(&bb.loopn[slot].peak, 0,
+                                    memory_order_relaxed);
+}
+
+int bb_engine_loop_cycle_bars(void)
+{
+    return atomic_load_explicit(&bb.loop_cycle_bars, memory_order_relaxed);
+}
+
+void bb_engine_loop_ctl(int slot, int ctl, int v)
+{
+    if (!sat_slot_ok(slot) || ctl < 0 || ctl >= L2C_COUNT) return;
+    if (slot == 0 && (ctl == L2C_SRC || ctl == L2C_MUTE)) return;
+
+    switch (ctl) {
+    case L2C_SRC:      v = bb_clampi(v, 0, BB_LOOP_SRC_LIVE); break;
+    case L2C_BARS:     v = slot == 0 ? bb_clampi(v, 1, 4) : bb_clampi(v, 0, 8); break;
+    case L2C_LEVEL:    v = bb_clampi(v, 0, 256); break;
+    case L2C_FEEDBACK: v = bb_clampi(v, 0, 256); break;
+    case L2C_OVERDUB:  v = v ? 1 : 0; break;
+    case L2C_RATE:     v = bb_clampi(v, LOOP_RATE_HALF, LOOP_RATE_DOUBLE); break;
+    case L2C_REVERSE:  v = v ? 1 : 0; break;
+    case L2C_SLICE:
+        if (v != 1 && v != 2 && v != 4 && v != 8 && v != 16) v = 1;
+        break;
+    case L2C_MUTE:     v = v ? 1 : 0; break;
+    case L2C_LANE:     v = bb_clampi(v, 0, ARR_LANES - 1); break;
+    default: return;
+    }
+    loop_ctl_store(slot, ctl, v);
+}
+
+int bb_engine_loop_ctl_get(int slot, int ctl)
+{
+    if (!sat_slot_ok(slot) || ctl < 0 || ctl >= L2C_COUNT) return -1;
+    if (slot == 0 && (ctl == L2C_SRC || ctl == L2C_MUTE)) return -1;
+    return loop_ctl_load(slot, ctl);
+}
+
+const int16_t *bb_engine_loop_slot_buffer(int slot, unsigned *len)
+{
+    if (!sat_slot_ok(slot)) { if (len) *len = 0u; return NULL; }
+    if (len) *len = loop_frames_load(slot);
+    return slot == 0 ? g_loop_buf : g_sat_buf[slot - 1];
+}
+
+/* ======================================================================== */
 /*  Step sampler (R1)                                                        */
 /* ======================================================================== */
 
@@ -1546,6 +2080,10 @@ void bb_engine_init(int rate)
     atomic_store(&bb.loop_frames, 0);
     atomic_store(&bb.loop_pos, 0);
 
+    /* The satellites' scratch, and NOT their 10 MiB of buffers -- see the
+     * never-memset rule at g_sat_buf. */
+    sat_init();
+
     g_smp_tick = UINT32_MAX;
     for (int s = 0; s < BB_SAMPLER; s++) {
         g_smp_cur[s]  = NULL;
@@ -1641,6 +2179,10 @@ void bb_engine_render(int16_t *out, int frames, int channels)
     int lp_rate = atomic_load_explicit(&bb.loop_rate, memory_order_relaxed);
     int lp_rev  = atomic_load_explicit(&bb.loop_reverse, memory_order_relaxed);
     int lp_slice= atomic_load_explicit(&bb.loop_slice, memory_order_relaxed);
+    /* The loop bank drains its command words FIRST so slot 0's translation
+     * reaches bb.loop_cmd in the same period loop_command() consumes it.
+     * Neither call needs the transport. */
+    sat_command();
     loop_command();
 
     /* --- snapshot every layer --------------------------------------------
@@ -1783,6 +2325,17 @@ void bb_engine_render(int16_t *out, int frames, int channels)
     if (atomic_exchange_explicit(&bb.reset_loop, 0, memory_order_relaxed)) {
         k = beat_pos = bar_pos = bar_count = 0;
         g_loop_phase = 0;
+        /* The satellites restart with the transport, exactly as slot 0 does:
+         * a playhead left where the old bar grid put it is the phase-offset
+         * layer the cycle quantum exists to prevent. bar_count is about to
+         * become 0, so the cycle's origin has to follow it. */
+        for (int n = 1; n < BB_NLOOP; n++) {
+            g_sat_phase[n]  = 0;
+            g_sat_slice0[n] = 0;
+            g_sat_pub[n]    = 0;
+            g_sat_start[n]  = 0;
+        }
+        g_sat_cyc_origin = 0;
         for (int L = 0; L < BB_NLAYER; L++) {
             g_last_step[L] = -1;
             g_last_tick[L] = UINT32_MAX;
@@ -1890,6 +2443,22 @@ void bb_engine_render(int16_t *out, int frames, int channels)
     static RetBus rb;
     ret_snapshot(&rb, rate, beat_len, bar_len, pan);
 
+    /* --- snapshot THE LOOP BANK ------------------------------------------
+     * Plain static, same Darwin TLV reason as LSnap and RetBus. sat_hard()
+     * runs first because it is the half of the command path that needs the
+     * transport, and applying it before the snapshot means a HARD PLAY is
+     * live in the very period it was issued.
+     *
+     * WITH NO SATELLITE EVER USED sb.nlive is 0, sb.nwv is 0 and all three
+     * want flags are 0, so every line this bank adds to the frame loop below
+     * sits inside a false `if`. loop_process() is called with the same
+     * arguments, at the same place, with the same statics. Not one value
+     * reaching bb.sink moves. THAT is the bit-exactness argument, and it is
+     * inspectable rather than merely tested. */
+    static SatBus sb;
+    sat_hard(bar_count, bar_len, bar_pos);
+    sat_snapshot(&sb);
+
     /* bb_now_us() is a user-mode counter read on every platform: no syscall,
      * no allocation, no lock. Safe here; see bb_platform.h. */
     uint64_t c0 = bb_now_us();
@@ -1898,6 +2467,14 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         int32_t mix = 0;
         int32_t rin[BB_NRET];     /* this frame's input to each live return */
         for (int j = 0; j < rb.nlive; j++) rin[rb.live[j]] = 0;
+        /* This frame's value of every source a live satellite is recording.
+         * The zero pass covers VOICE taps only, and it is not tidiness: the
+         * voice loop below does `if (g_lvl[L] == 0 || !sn->prog) continue;`,
+         * so a silent voice never reaches its tap and a satellite recording it
+         * would read last frame's value forever, as DC. LICKS, DRY and LIVE
+         * are straight-line assignments and need no zeroing. */
+        int32_t lsrc[BB_LOOP_NSRC];
+        for (int j = 0; j < sb.nwv; j++) lsrc[sb.wv[j]] = 0;
         int32_t cap_smp = 0;      /* armed lane's post-fader contribution */
         int32_t clip_sum = 0;     /* this frame's arrangement playback, kept
                                    * apart so REC can leave it out (BB_REC_LIVE) */
@@ -2047,6 +2624,7 @@ void bb_engine_render(int16_t *out, int frames, int channels)
 
             int32_t con = (int32_t)(((int64_t)s * g_lvl[L]) >> 16);
             mix += con;
+            if (sb.want_v[L]) lsrc[BB_LOOP_SRC_V0 + L] = con;  /* looper tap */
             if (cap_on && g_cap_lane == L)
                 cap_smp += con;   /* voice-lane capture tap, pre-abs */
             /* Post-fader sends, exactly where the single CHAMBER send tapped.
@@ -2063,11 +2641,16 @@ void bb_engine_render(int16_t *out, int frames, int channels)
             int32_t premix = mix;
             sampler_process(&mix, tick, rate, atk_inc);
             int32_t sbus = mix - premix;
+            if (sb.want_licks) lsrc[BB_LOOP_SRC_LICKS] = sbus;
             for (int e = 0; e < rb.nl; e++)
                 rin[rb.lr[e]] += (int32_t)(((int64_t)sbus * rb.la[e]) >> 8);
             if (cap_on && g_cap_lane == 8)
                 cap_smp += mix - premix;   /* LICKS-bus capture tap */
         }
+
+        /* The DRY looper tap: voices + sampler, pre-return, pre-arrangement.
+         * The same point BB_RET_SRC_DRY taps. */
+        if (sb.want_dry) lsrc[BB_LOOP_SRC_DRY] = mix;
 
         /* --- THE RETURN BUS -------------------------------------------------
          * Sits exactly where the single chamber sat: after the sampler bus,
@@ -2288,6 +2871,36 @@ void bb_engine_render(int16_t *out, int frames, int channels)
             }
         }
 
+        /* --- THE SATELLITES -------------------------------------------------
+         * HERE, before the dry fork and before the master clamp, and the
+         * placement is the contract:
+         *   - `mix` at this point has no looper in it, so LIVE is exact;
+         *   - the sum passes through the ONE master clipper below instead of
+         *     being bolted on after it, so scope_push needs no clamp and o16
+         *     is not clipping twice;
+         *   - `pre_loop` therefore CONTAINS the satellites, so slot 0 bounces
+         *     the whole bank -- the RC-505 master track, and the bridge from
+         *     jamming to a take;
+         *   - `(mix - pre_loop)` below still means EXACTLY slot 0's crossfade
+         *     delta, unwidened;
+         *   - clip_sum is still the only thing subtracted at the dry fork, so
+         *     the BB_REC_LIVE guarantee (bytebeat.h) is untouched and the
+         *     satellites are printed, which is right: they are performance.
+         * ANYONE WHO MOVES THIS BLOCK BELOW THE CLAMP BREAKS ALL FIVE. */
+        if (sb.want_live) lsrc[BB_LOOP_SRC_LIVE] = mix - clip_sum;
+        if (sb.nlive) {
+            int32_t lsum = 0;
+            for (int j = 0; j < sb.nlive; j++) {
+                int n = sb.live[j];
+                lsum += sat_process(n, &sb, lsrc[sb.s[n].src],
+                                    bar_pos, bar_len, bar_count);
+            }
+            /* Gain staging, not stability: there is no feedback path in the
+             * loop bank, so there is nothing to prove -- this is here so the
+             * MASTER clipper is never what limits five layers. */
+            mix += ret_limit(&g_sat_lg, lsum, BB_LOOP_SUM_CEIL);
+        }
+
         /* The record path forks HERE, before the master clamp -- not later,
          * next to sink_push, where it would read more naturally.
          *
@@ -2392,6 +3005,27 @@ void bb_engine_render(int16_t *out, int frames, int channels)
                           memory_order_release);
     atomic_store_explicit(&bb.loop_pos, g_loop_pub_pos, memory_order_relaxed);
     atomic_store_explicit(&bb.loop_frames, g_loop_len, memory_order_relaxed);
+
+    /* The satellites' telemetry. `peak` is max-held and then CLEARED, exactly
+     * as g_ret_pk[] is: without the clear the meter latches at its lifetime
+     * maximum and never comes down. */
+    for (int n = 1; n < BB_NLOOP; n++) {
+        Looper *lp = &bb.loopn[n];
+        atomic_store_explicit(&lp->status, g_sat_state[n], memory_order_relaxed);
+        atomic_store_explicit(&lp->pend, g_sat_pend[n] & LBC_ACTION,
+                              memory_order_relaxed);
+        atomic_store_explicit(&lp->frames, g_sat_len[n], memory_order_relaxed);
+        atomic_store_explicit(&lp->pos,    g_sat_pub[n], memory_order_relaxed);
+        atomic_store_explicit(&lp->barlen, (int)g_sat_barlen[n],
+                              memory_order_relaxed);
+        int32_t pk = g_sat_pk[n]; if (pk > 32767) pk = 32767;
+        if (pk > atomic_load_explicit(&lp->peak, memory_order_relaxed))
+            atomic_store_explicit(&lp->peak, pk, memory_order_relaxed);
+        g_sat_pk[n] = 0;
+    }
+    atomic_store_explicit(&bb.loop_cycle_bars, (int)g_sat_cyc_bars,
+                          memory_order_relaxed);
+    atomic_store_explicit(&bb.loop_active, sb.nlive, memory_order_relaxed);
     if (g_cap_run)
         atomic_store_explicit(&bb.arr_rec_frames, g_cap_pos,
                               memory_order_relaxed);
@@ -2446,6 +3080,53 @@ void bb_engine_render(int16_t *out, int frames, int channels)
 const int16_t *bb_engine_loop_buffer(void)
 {
     return g_loop_buf;
+}
+
+/* ---- the loop bank -> ARRANGE handoff ------------------------------------
+ * Overdub is the ONLY audio-thread write into a PLAYING satellite's buffer.
+ * Turn it off, wait the same two render epochs bb_reclaim() and the return
+ * bus's create/destroy wait, and the buffer is static and the copy is a plain
+ * memcpy -- no hold flag with a stale-forever failure mode, no new protocol.
+ * Committing a loop therefore FREEZES it, which is stated on the button.
+ *
+ * The `epoch == 0` early out is the offline case (startup, the regression
+ * suite): the render thread has provably never run, so nothing can be inside
+ * a write and there is nothing to wait for. UI THREAD ONLY. */
+ArrClipBuf *bb_engine_loop_clip(int slot, unsigned *bars_out)
+{
+    if (bars_out) *bars_out = 0u;
+    if (slot < 1 || slot >= BB_NLOOP) return NULL;
+
+    int st = atomic_load_explicit(&bb.loopn[slot].status, memory_order_relaxed);
+    if (st == LOOP_ARMED || st == LOOP_RECORDING) return NULL;
+
+    unsigned len = atomic_load_explicit(&bb.loopn[slot].frames,
+                                        memory_order_relaxed);
+    if (!len || len > BB_LOOP_LEN) return NULL;
+
+    loop_ctl_store(slot, L2C_OVERDUB, 0);
+
+    unsigned long long e0 = atomic_load(&bb.epoch);
+    if (e0 != 0) {
+        unsigned long long t0 = bb_now_us(), last_t = t0, last_ep = e0;
+        for (;;) {
+            unsigned long long ep = atomic_load(&bb.epoch), now = bb_now_us();
+            if (ep >= e0 + 2) break;
+            if (ep != last_ep) { last_ep = ep; last_t = now; }
+            else if (now - last_t > ret_wait_budget_us()) break;  /* stalled */
+            if (now - t0 > 2000000ull) break;   /* never hang a commit */
+        }
+    }
+
+    int bl = atomic_load_explicit(&bb.loopn[slot].barlen, memory_order_relaxed);
+    ArrClipBuf *b = bb_engine_clip_create(g_sat_buf[slot - 1], len,
+                                          atomic_load(&bb.rate));
+    if (!b) return NULL;
+    /* Frame 0 is a downbeat BY CONSTRUCTION -- every capture begins at a bar
+     * boundary and is a whole number of bars -- so the caller places the clip
+     * with no offset. */
+    if (bars_out) *bars_out = bl > 0 ? (len / (unsigned)bl) : 0u;
+    return b;
 }
 
 /* ======================================================================== */
@@ -2906,6 +3587,24 @@ int bb_config_save(void)
      * and write the whole song back out without them. */
     fprintf(f, "arrplay %d\n", atomic_load(&bb.arr_play));
     fprintf(f, "recsrc %d\n",  atomic_load(&bb.rec_src));
+    /* ---- THE LOOP BANK, and still NOT a format-version bump -------------
+     *   loopn <n> <src> <bars> <level> <feedback> <overdub> <rate> <reverse>
+     *         <slice> <mute> <lane>
+     *
+     * Six lines, always, fixed arity, n 0..5 -- like `ret`. Slot 0's fields
+     * are written through loop_ctl_load(), so `loopn 0` and `looper` can never
+     * disagree; `looper` is emitted AFTER and therefore wins a hand edit, for
+     * the same reason `verb` is emitted after `ret`. NO LOOP AUDIO IS
+     * PERSISTED, and neither is the cycle -- a persisted cycle length would
+     * describe material that no longer exists. */
+    for (int n = 0; n < BB_NLOOP; n++)
+        fprintf(f, "loopn %d %d %d %d %d %d %d %d %d %d %d\n", n,
+                loop_ctl_load(n, L2C_SRC),      loop_ctl_load(n, L2C_BARS),
+                loop_ctl_load(n, L2C_LEVEL),    loop_ctl_load(n, L2C_FEEDBACK),
+                loop_ctl_load(n, L2C_OVERDUB),  loop_ctl_load(n, L2C_RATE),
+                loop_ctl_load(n, L2C_REVERSE),  loop_ctl_load(n, L2C_SLICE),
+                loop_ctl_load(n, L2C_MUTE),     loop_ctl_load(n, L2C_LANE));
+
     fprintf(f, "looper %d %d %d %d %d %d %d\n",
             atomic_load(&bb.loop_bars), atomic_load(&bb.loop_mix),
             atomic_load(&bb.loop_feedback), atomic_load(&bb.loop_overdub),
@@ -3149,6 +3848,21 @@ int bb_config_load(void)
      * this call) and the one at the bottom. */
     bb_engine_ret_quiesce_all();
     ret_config_reset();
+
+    /* THE LOOP BANK. Loading a session replaces the instrument, and inheriting
+     * the previous song's loop audio is the arrangement-residue bug wearing a
+     * different hat -- so every satellite is HARD CLEARed first, then the
+     * controls go back to their defaults so an omitted `loopn` line cannot
+     * leave the previous session's routing behind.
+     *
+     * NO QUIESCE BRACKET: unlike a return type change nothing here
+     * reinterprets an arena, and CLEAR only sets len = 0 on the audio thread.
+     * sat_defaults() deliberately does not touch slot 0's ALIASED cells --
+     * those belong to the `looper` line and to bb_engine_set_defaults(), so a
+     * v7 session carrying only a `looper` line round-trips unchanged. */
+    sat_defaults();
+    for (int n = 1; n < BB_NLOOP; n++)   /* after: sat_defaults() zeroes cmd */
+        bb_engine_loop_cmd(n, LBC_CLEAR | LBC_HARD);
     int ret_base_type[BB_NRET];
     for (int r = 0; r < BB_NRET; r++)
         ret_base_type[r] = atomic_load(&bb.ret[r].type);
@@ -3193,6 +3907,20 @@ int bb_config_load(void)
             atomic_store(&bb.arr_play, v ? 1 : 0);
         } else if (sscanf(line, "recsrc %d", &v) == 1) {
             atomic_store(&bb.rec_src, bb_clampi(v, BB_REC_MASTER, BB_REC_LIVE));
+        } else if (!strncmp(line, "loopn ", 6)) {
+            /* Fixed arity, eleven numbers. A short line is skipped whole
+             * rather than half-applied. Every field goes through
+             * bb_engine_loop_ctl() so it is clamped -- a hand-edited session
+             * must never reach the DSP raw. Slot 0's SRC and MUTE are refused
+             * there, which is how `loopn 0 11 ...` round-trips harmlessly. */
+            int n, fld[10];
+            if (sscanf(line, "loopn %d %d %d %d %d %d %d %d %d %d %d",
+                       &n, &fld[0], &fld[1], &fld[2], &fld[3], &fld[4],
+                       &fld[5], &fld[6], &fld[7], &fld[8], &fld[9]) == 11 &&
+                n >= 0 && n < BB_NLOOP) {
+                for (int q = 0; q < 10; q++)
+                    bb_engine_loop_ctl(n, q, fld[q]);
+            }
         } else if (!strncmp(line, "looper ", 7)) {
             int bars, mix, fb, od, rt, rev, slice;
             if (sscanf(line, "looper %d %d %d %d %d %d %d",
@@ -3473,6 +4201,14 @@ void bb_engine_set_defaults(void)
     atomic_store(&bb.loop_slice,    1);
     atomic_store(&bb.loop_pos,      0);
     atomic_store(&bb.loop_frames,   0);
+
+    /* The satellite half of the loop bank. Runs AFTER the eleven loop_* stores
+     * above and skips slot 0's aliased cells, so the two agree instead of
+     * racing to write the same atomics -- exactly as ret_config_reset() sits
+     * after the verb_* stores. */
+    sat_defaults();
+    atomic_store(&bb.loop_cycle_bars, 0);
+    atomic_store(&bb.loop_active,     0);
 
     atomic_store(&bb.mute,      0);
     atomic_store(&bb.panic,     0);

@@ -107,6 +107,85 @@ enum { LOOP_OFF = 0, LOOP_ARMED, LOOP_RECORDING, LOOP_PLAYING };
 enum { LOOP_CMD_NONE = 0, LOOP_CMD_ARM, LOOP_CMD_PLAY, LOOP_CMD_CLEAR };
 enum { LOOP_RATE_HALF = 0, LOOP_RATE_NORMAL, LOOP_RATE_DOUBLE };
 
+/* ---- THE LOOP BANK --------------------------------------------------------
+ * Six loopers. SLOT 0 IS THE MASTER PHRASE LOOPER (SURVIVOR): its seven knobs
+ * and its status/frames/pos have NO storage in bb.loopn[0] -- they ARE
+ * bb.loop_bars / loop_mix / loop_feedback / loop_overdub / loop_rate /
+ * loop_reverse / loop_slice / loop_status / loop_frames / loop_pos. The alias
+ * is unconditional; go through loop_ctl_load/store (C) or bb_engine_loop_ctl
+ * (C++). NO shadow copies -- see the comment on `Return`.
+ *
+ * bb.loopn[0].cmd is the ONE field that is real rather than aliased, because
+ * slot 0's legacy PLAY is a TOGGLE and the bank's is not. sat_command()
+ * translates it into bb.loop_cmd on the audio thread, where the true
+ * g_loop_state is visible; bb_engine_loop_command() still writes bb.loop_cmd
+ * directly and is untouched.
+ *
+ * Slot 0's DSP is loop_process(), unchanged, at the same call site, with the
+ * same 10-argument signature. THAT IS THE BIT-EXACTNESS ARGUMENT.
+ *
+ * Satellites 1..5 are ADDITIVE and share one 10 MiB BSS array. NOTHING may
+ * ever memset it: not bb_engine_init() (the suite calls it seven times), not
+ * CLEAR, not the loader. Every buffer read is `idx % g_sat_len[n]` and every
+ * index below len was written during that capture, so residue is unreachable
+ * by construction -- unlike the return pools, which had to learn it. */
+#define BB_NLOOP          6
+#define BB_LOOP_DEF_BARS  4        /* FOLLOW with no cycle yet established   */
+#define BB_LOOP_SUM_CEIL  24576    /* -2.5 dBFS on the summed satellite bus  */
+
+/* What a looper records. 0..9 mirror BB_RET_SRC_* exactly.
+ *   LIVE -- the bus at the INPUT of the loop stage MINUS the arrangement:
+ *           voices + sampler + returns and their tails, and NO looper, EVER.
+ *           Exact, not a subtraction: no looper has run when it is taken.
+ *           This is the default and it IS the feature.
+ *   MASTER -- read-only sentinel reported by slot 0. Not selectable.
+ * There is deliberately NO source that contains another looper's playback.
+ * That is the trap: with one, looper 2 records looper 1, looper 1 is in the
+ * mix twice, and that is the bug this feature exists to close. Sound-on-sound
+ * within a layer is `overdub`; a bounce of everything is slot 0. */
+enum {
+    BB_LOOP_SRC_V0     = 0,
+    BB_LOOP_SRC_LICKS  = BB_NLAYER,  /*  8 sampler bus (mix - premix)        */
+    BB_LOOP_SRC_DRY,                 /*  9 voices+sampler, pre-return        */
+    BB_LOOP_SRC_LIVE,                /* 10 DEFAULT for satellites            */
+    BB_LOOP_SRC_MASTER,              /* 11 slot 0 only; read-only sentinel   */
+    BB_LOOP_NSRC                     /* 12                                   */
+};
+
+/* Action in the low byte; LBC_HARD skips the quantum. HARD is honoured on
+ * PLAY/STOP/CLEAR and IGNORED on ARM -- ARM only sets state ARMED and the
+ * ARMED->RECORDING edge must land on a boundary or the loop is not a whole
+ * number of bars. */
+enum { LBC_NONE = 0, LBC_ARM, LBC_PLAY, LBC_STOP, LBC_CLEAR, LBC_ACTION = 0xff };
+#define LBC_HARD 0x100
+
+enum { L2C_SRC = 0, L2C_BARS, L2C_LEVEL, L2C_FEEDBACK, L2C_OVERDUB,
+       L2C_RATE, L2C_REVERSE, L2C_SLICE, L2C_MUTE, L2C_LANE, L2C_COUNT };
+
+typedef struct {
+    BB_ATOMIC(int) cmd;         /* REAL for every slot incl. 0; see above     */
+    BB_ATOMIC(int) pend;        /* audio->UI: latched cmd awaiting a boundary */
+    BB_ATOMIC(int) status;      /* LOOP_*; slot 0 ALIASES bb.loop_status      */
+    BB_ATOMIC(int) src;         /* BB_LOOP_SRC_*; slot 0 reads MASTER, w/o    */
+    BB_ATOMIC(int) bars;        /* 0 = FOLLOW; slot 0 ALIASES bb.loop_bars    */
+    BB_ATOMIC(int) level;       /* 0..256; slot 0 ALIASES bb.loop_mix         */
+    BB_ATOMIC(int) feedback;    /* 0..256; slot 0 ALIASES bb.loop_feedback    */
+    BB_ATOMIC(int) overdub;     /*         slot 0 ALIASES bb.loop_overdub     */
+    BB_ATOMIC(int) rate;        /*         slot 0 ALIASES bb.loop_rate        */
+    BB_ATOMIC(int) reverse;     /*         slot 0 ALIASES bb.loop_reverse     */
+    BB_ATOMIC(int) slice;       /* 1,2,4,8,16; slot 0 ALIASES bb.loop_slice   */
+    BB_ATOMIC(int) mute;        /* satellites only; slot 0 reads 0, w/o       */
+    BB_ATOMIC(int) lane;        /* ARRANGE commit target. THE ENGINE NEVER
+                                 * READS THIS -- it is UI state that rides
+                                 * the session line, like bb_ret_name[].      */
+    BB_ATOMIC(unsigned) frames; /* recorded length; slot 0 ALIASES loop_frames */
+    BB_ATOMIC(unsigned) pos;    /* play position;   slot 0 ALIASES loop_pos    */
+    BB_ATOMIC(int) barlen;      /* bar_len IN FRAMES AT CAPTURE. Drives the
+                                 * ARRANGE handoff, PLAY re-phasing, and the
+                                 * tempo-drift chip. 0 for slot 0.            */
+    BB_ATOMIC(int) peak;        /* max-hold 0..32767; UI clears by exchange    */
+} Looper;
+
 /* ---- R2 arrangement timeline (the song) ---------------------------------
  * The song is scheduled in ABSOLUTE BARS against the same monotonic bar
  * counter the transport already publishes (bb.bar). Ten lanes: 0-7 mirror
@@ -438,6 +517,13 @@ struct bb_state {
     BB_ATOMIC(unsigned) loop_pos;
     BB_ATOMIC(unsigned) loop_frames;
 
+    /* --- the loop bank (slot 0 IS the phrase looper above; see `Looper`) - */
+    Looper loopn[BB_NLOOP];
+    BB_ATOMIC(int) loop_cycle_bars; /* published mirror of g_sat_cyc_bars;
+                                     * 0 = none. NOT PERSISTED -- no loop
+                                     * audio is persisted either.            */
+    BB_ATOMIC(int) loop_active;     /* live satellite count, published/period */
+
     /* --- R2 arrangement timeline ---------------------------------------
      * Command/status traffic for the song. The song itself (clip list +
      * audio) is published through bb_engine_song_publish() as one atomic
@@ -579,6 +665,96 @@ static inline void ret_param_store(int r, int p, int v)
         atomic_store_explicit(&bb.verb_tone, v, memory_order_relaxed);
     else
         atomic_store_explicit(&bb.ret[r].param[p], v, memory_order_relaxed);
+}
+
+/* ---- the loop bank's slot-0 alias, in ONE indexed switch ------------------
+ * Slot 0's nine aliased controls and its status/frames/pos have no storage in
+ * bb.loopn[0]; they ARE the legacy bb.loop_* atomics. Nine named accessor
+ * pairs is where the return bus's idiom stops paying, so this is one switch
+ * and nothing else may touch the aliased cells. Every read and write -- the
+ * render snapshot, the session writer, the session loader, the public API --
+ * goes through here.
+ *
+ * SRC on slot 0 reads the read-only MASTER sentinel and drops stores; MUTE on
+ * slot 0 reads 0 and drops stores; LANE has real storage on every slot. */
+static inline int loop_ctl_load(int n, int c)
+{
+    if (n == 0) {
+        switch (c) {
+        case L2C_SRC:      return BB_LOOP_SRC_MASTER;
+        case L2C_BARS:     return atomic_load_explicit(&bb.loop_bars, memory_order_relaxed);
+        case L2C_LEVEL:    return atomic_load_explicit(&bb.loop_mix, memory_order_relaxed);
+        case L2C_FEEDBACK: return atomic_load_explicit(&bb.loop_feedback, memory_order_relaxed);
+        case L2C_OVERDUB:  return atomic_load_explicit(&bb.loop_overdub, memory_order_relaxed);
+        case L2C_RATE:     return atomic_load_explicit(&bb.loop_rate, memory_order_relaxed);
+        case L2C_REVERSE:  return atomic_load_explicit(&bb.loop_reverse, memory_order_relaxed);
+        case L2C_SLICE:    return atomic_load_explicit(&bb.loop_slice, memory_order_relaxed);
+        case L2C_MUTE:     return 0;
+        default:           break;                       /* LANE: real storage */
+        }
+    }
+    switch (c) {
+    case L2C_SRC:      return atomic_load_explicit(&bb.loopn[n].src, memory_order_relaxed);
+    case L2C_BARS:     return atomic_load_explicit(&bb.loopn[n].bars, memory_order_relaxed);
+    case L2C_LEVEL:    return atomic_load_explicit(&bb.loopn[n].level, memory_order_relaxed);
+    case L2C_FEEDBACK: return atomic_load_explicit(&bb.loopn[n].feedback, memory_order_relaxed);
+    case L2C_OVERDUB:  return atomic_load_explicit(&bb.loopn[n].overdub, memory_order_relaxed);
+    case L2C_RATE:     return atomic_load_explicit(&bb.loopn[n].rate, memory_order_relaxed);
+    case L2C_REVERSE:  return atomic_load_explicit(&bb.loopn[n].reverse, memory_order_relaxed);
+    case L2C_SLICE:    return atomic_load_explicit(&bb.loopn[n].slice, memory_order_relaxed);
+    case L2C_MUTE:     return atomic_load_explicit(&bb.loopn[n].mute, memory_order_relaxed);
+    case L2C_LANE:     return atomic_load_explicit(&bb.loopn[n].lane, memory_order_relaxed);
+    default:           return 0;
+    }
+}
+
+static inline void loop_ctl_store(int n, int c, int v)
+{
+    if (n == 0) {
+        switch (c) {
+        case L2C_SRC:      return;                       /* pinned to MASTER  */
+        case L2C_MUTE:     return;                       /* slot 0 has none   */
+        case L2C_BARS:     atomic_store_explicit(&bb.loop_bars, v, memory_order_relaxed); return;
+        case L2C_LEVEL:    atomic_store_explicit(&bb.loop_mix, v, memory_order_relaxed); return;
+        case L2C_FEEDBACK: atomic_store_explicit(&bb.loop_feedback, v, memory_order_relaxed); return;
+        case L2C_OVERDUB:  atomic_store_explicit(&bb.loop_overdub, v, memory_order_relaxed); return;
+        case L2C_RATE:     atomic_store_explicit(&bb.loop_rate, v, memory_order_relaxed); return;
+        case L2C_REVERSE:  atomic_store_explicit(&bb.loop_reverse, v, memory_order_relaxed); return;
+        case L2C_SLICE:    atomic_store_explicit(&bb.loop_slice, v, memory_order_relaxed); return;
+        default:           break;                        /* LANE: real storage */
+        }
+    }
+    switch (c) {
+    case L2C_SRC:      atomic_store_explicit(&bb.loopn[n].src, v, memory_order_relaxed); break;
+    case L2C_BARS:     atomic_store_explicit(&bb.loopn[n].bars, v, memory_order_relaxed); break;
+    case L2C_LEVEL:    atomic_store_explicit(&bb.loopn[n].level, v, memory_order_relaxed); break;
+    case L2C_FEEDBACK: atomic_store_explicit(&bb.loopn[n].feedback, v, memory_order_relaxed); break;
+    case L2C_OVERDUB:  atomic_store_explicit(&bb.loopn[n].overdub, v, memory_order_relaxed); break;
+    case L2C_RATE:     atomic_store_explicit(&bb.loopn[n].rate, v, memory_order_relaxed); break;
+    case L2C_REVERSE:  atomic_store_explicit(&bb.loopn[n].reverse, v, memory_order_relaxed); break;
+    case L2C_SLICE:    atomic_store_explicit(&bb.loopn[n].slice, v, memory_order_relaxed); break;
+    case L2C_MUTE:     atomic_store_explicit(&bb.loopn[n].mute, v, memory_order_relaxed); break;
+    case L2C_LANE:     atomic_store_explicit(&bb.loopn[n].lane, v, memory_order_relaxed); break;
+    default:           break;
+    }
+}
+
+static inline int loop_status_load(int n)
+{
+    return n == 0 ? atomic_load_explicit(&bb.loop_status, memory_order_relaxed)
+                  : atomic_load_explicit(&bb.loopn[n].status, memory_order_relaxed);
+}
+
+static inline unsigned loop_frames_load(int n)
+{
+    return n == 0 ? atomic_load_explicit(&bb.loop_frames, memory_order_relaxed)
+                  : atomic_load_explicit(&bb.loopn[n].frames, memory_order_relaxed);
+}
+
+static inline unsigned loop_pos_load(int n)
+{
+    return n == 0 ? atomic_load_explicit(&bb.loop_pos, memory_order_relaxed)
+                  : atomic_load_explicit(&bb.loopn[n].pos, memory_order_relaxed);
 }
 #endif /* !__cplusplus */
 
