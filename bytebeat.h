@@ -262,6 +262,63 @@ typedef struct {
     BB_ATOMIC(int)  peak;
 } SamplerSlot;
 
+/* ---- GRAIN MASS wells -----------------------------------------------------
+ * Four FREE-RUNNING sample players. Where a step-sampler slot is fired by a
+ * pattern and retriggers from frame 0, a well is a bed: you start it, it runs
+ * (optionally looping, optionally backwards) until you stop it.
+ *
+ * These lived in JUCE until 2026-08-05, as SamplerVoice objects whose
+ * mixInto() added into the device's float buffers AFTER bb_engine_render()
+ * had already returned. Everything this instrument does with finished audio
+ * reads bb.sink -- the WAV recorder, the master meter, the scope, and the
+ * loop bank's capture of the pre-master bus -- so a well was audible and
+ * nothing else: REC did not record it and SURVIVOR could not loop it. On a
+ * workflow built out of layered loops that is the expensive kind of bug, and
+ * R1's own notes predicted it in as many words: the step sampler's audio was
+ * put in the engine "because REC and SURVIVOR capture the engine's master
+ * bus; a JUCE-only mixer would sit outside the sink/looper". The wells were
+ * that JUCE-only mixer. They are now summed inside the render loop beside the
+ * LICKS bus, which is what makes all four true at once.
+ *
+ * Same split as the sampler above: the CONTROLS live here, the sample audio
+ * is published through bb_engine_well_set() and owns nothing in this struct.
+ * There is deliberately no `on` flag -- "is this well loaded" has exactly one
+ * answer, the published buffer pointer, and a second flag beside it could
+ * only ever disagree with it. */
+#define BB_NWELL 4
+enum {
+    WELL_CTL_LEVEL = 0,  /* 0..256 mix level into the master bus, 256 = unity */
+    WELL_CTL_PITCH,      /* semitone offset, -24..+24                         */
+    WELL_CTL_COUNT
+};
+
+typedef struct {
+    BB_ATOMIC(int)  play;      /* 1 = sounding. The AUDIO thread clears this   */
+                               /*   when a non-looping well reaches its end,   */
+                               /*   which is how the PLAY plate un-latches.    */
+    BB_ATOMIC(int)  loop;      /* 1 = wrap at the end instead of stopping      */
+    BB_ATOMIC(int)  reverse;   /* 1 = play backwards from the current point    */
+    BB_ATOMIC(int)  arm;       /* bar-synced start pending (PLAY ALL)          */
+    BB_ATOMIC(int)  ctl[WELL_CTL_COUNT];
+    /* There is deliberately no `mute`. One was written, honoured by the render
+     * loop and round-tripped through the session before anyone noticed that no
+     * control anywhere could set it -- an engine value with no way in, which is
+     * the same lie as a control with no way out, and persisted besides. LEVEL 0
+     * silences a well today. When the console condenses and voices, sampler
+     * slots, wells and returns share one strip grammar, mute arrives for all
+     * four at once or not at all. */
+
+    /* Play position as 0..65536 over the whole sample, published once per
+     * period whether or not the well is sounding -- unlike the JUCE version,
+     * which only ever published from inside its mix loop and so left a stale
+     * value behind on stop. Cosmetic; torn reads do not matter. */
+    BB_ATOMIC(int)  pos;
+
+    /* Post-level abs peak, 0..32767, max-held once per period and read with
+     * atomic_exchange(&peak, 0), exactly like SamplerSlot::peak above. */
+    BB_ATOMIC(int)  peak;
+} WellSlot;
+
 /* ---- THE RETURN BUS -------------------------------------------------------
  * Eight pre-allocated return slots. bb_engine_render() never allocates, so
  * "create" and "destroy" are a TYPE CHANGE over a fixed array, executed by a
@@ -289,23 +346,35 @@ typedef struct {
 
 /* Send sources. 0..7 mirror the voices (post-fader `con`, exactly where the
  * CHAMBER send taps today). 8 is the LICKS sampler bus (mix - premix). 9 is
- * the DRY master tap: `mix` after voices and sampler, BEFORE any return output
- * and before the arrangement. 10 is the previous frame's summed return output
- * -- one knob for global master feedback, the no-input-mixer row, well defined
- * because it is a frame old.
+ * the DRY master tap: `mix` after voices, sampler and wells, BEFORE any return
+ * output and before the arrangement. 10 is the previous frame's summed return
+ * output -- one knob for global master feedback, the no-input-mixer row, well
+ * defined because it is a frame old. 11 is the GRAIN MASS well bus, tapped the
+ * same way LICKS is; a sample into the big chamber is most of what the wells
+ * are for, and a well that could reach the master but no effect would have
+ * been the only strip on the MIXER with no send at all.
+ *
+ * Index 11 previously carried a comment reserving it for BB_RET_SRC_LOOP,
+ * which is worth reading as a small lesson: the sentence before it explains at
+ * length why the phrase looper must NEVER be a send source, and then the next
+ * sentence holds an id open for it anyway. Nothing implemented it, nothing
+ * could have (BB_RET_NSRC was 11, so 11 was out of range and no session can
+ * contain it), and reserving an id for a thing you have just argued is
+ * forbidden is a dead control in comment form. The reservation is gone.
  *
  * The arrangement is NOT a source and must never become one. Clips are summed
  * AFTER the return bus; that ordering is what makes BB_REC_LIVE exact and it
  * is written down at the BB_REC_* enum above. The phrase looper is not a
  * source either -- it lives after dsp_clip16, and a hard clipper inside a
  * feedback loop is the full-scale-square-into-headphones failure the limiter
- * exists to prevent. BB_RET_SRC_LOOP = 11 is reserved, unimplemented. */
+ * exists to prevent. */
 enum {
     BB_RET_SRC_V0    = 0,
     BB_RET_SRC_LICKS = BB_NLAYER,      /* 8  */
     BB_RET_SRC_DRY,                    /* 9  */
     BB_RET_SRC_WET,                    /* 10 */
-    BB_RET_NSRC                        /* 11 */
+    BB_RET_SRC_MASS,                   /* 11 */
+    BB_RET_NSRC                        /* 12 */
 };
 
 typedef struct {
@@ -444,6 +513,9 @@ struct bb_state {
 
     /* 8 one-shot sample slots sequenced on the step clock (see above).   */
     SamplerSlot  sampler[BB_SAMPLER];
+
+    /* 4 free-running GRAIN MASS wells (see above).                       */
+    WellSlot     well[BB_NWELL];
 
     /* Incremented by the audio thread at the top of every block. The UI
      * thread uses it to know when a retired Program can no longer be in use:

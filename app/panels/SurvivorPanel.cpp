@@ -607,8 +607,8 @@ void SurvivorPanel::rebuildDetailText (int f)
               "bus, the other five loopers included. That pin is what keeps a session "
               "using only this slot bit-identical to the engine before the bank.")
         : U8 ("SOURCE \xe2\x80\x94 what this looper records: ") + srcBlurb (s.src)
-            + U8 (". Click to change. GRAIN MASS cannot be recorded by any looper: it is "
-                  "mixed outside the engine."));
+            + U8 (". Click to change. GRAIN MASS is inside the master bus now, so LIVE "
+                  "and DRY both carry the wells."));
 
     /* length chips: slot 0 is 1..4 bars, a satellite is FOLLOW/1/2/4/8 */
     static const int satVals[5] = { 0, 1, 2, 4, 8 };
@@ -753,8 +753,13 @@ void SurvivorPanel::srcMenu (int slot, juce::Component* target)
         m.addItem (1 + L, srcName (L) + U8 ("   \xe2\x80\x94 ONE VOICE, POST-FADER"),
                    true, cur == L);
     m.addSeparator();
-    m.addSectionHeader ("GRAIN MASS CANNOT BE RECORDED");
-    m.addSectionHeader ("IT IS MIXED OUTSIDE THE ENGINE");
+    /* This used to read "GRAIN MASS CANNOT BE RECORDED / IT IS MIXED OUTSIDE
+     * THE ENGINE". It no longer is: the wells sum beside the LICKS bus, so
+     * they are already in LIVE and DRY and there is nothing to warn about.
+     * They get no source of their own -- a well is not a performance layer
+     * you would loop in isolation, and every id here is persisted as an
+     * integer in the session's `loopn` line. */
+    m.addSectionHeader ("GRAIN MASS IS IN LIVE AND DRY");
 
     juce::PopupMenu::Options opts = juce::PopupMenu::Options().withMinimumWidth (260);
     opts = target != nullptr ? opts.withTargetComponent (target) : opts.withMousePosition();
@@ -1576,8 +1581,8 @@ juce::String SurvivorPanel::LaneStrip::getTooltip()
                 ? U8 ("MASTER records the whole bus, the other five loopers included. "
                       "Its source is pinned -- that pin is the bit-exactness argument.")
                 : tag + U8 (" records ") + srcName (s.src) + U8 (" \xe2\x80\x94 ")
-                      + srcBlurb (s.src) + U8 (". Click to change. GRAIN MASS cannot be "
-                                               "recorded: it is mixed outside the engine.");
+                      + srcBlurb (s.src) + U8 (". Click to change. GRAIN MASS is inside "
+                                               "the master bus, so LIVE and DRY carry it.");
         case CellLevel:
             return n == 0
                 ? U8 ("MIX \xe2\x80\x94 dry vs loop crossfade for the master phrase looper. Drag.")

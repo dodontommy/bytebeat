@@ -130,6 +130,7 @@ juce::String MixerPanel::srcName (int src)
     if (src == BB_RET_SRC_LICKS) return "LICKS";
     if (src == BB_RET_SRC_DRY)   return "DRY";
     if (src == BB_RET_SRC_WET)   return "WET";
+    if (src == BB_RET_SRC_MASS)  return "MASS";
     return "?";
 }
 
@@ -788,8 +789,12 @@ juce::String MixerPanel::SendMatrix::getTooltip()
                  "feedback, and any value above zero puts every live return inside "
                  "a loop.");
     else if (hoverSrc == BB_RET_SRC_DRY)
-        t += U8 ("  DRY is the master tap taken after the voices and the sampler and "
-                 "before any return output, so it cannot make a loop by itself.");
+        t += U8 ("  DRY is the master tap taken after the voices, the sampler and the "
+                 "wells and before any return output, so it cannot make a loop by "
+                 "itself.");
+    else if (hoverSrc == BB_RET_SRC_MASS)
+        t += U8 ("  MASS is the GRAIN MASS well bus, tapped exactly where LICKS is: "
+                 "this is how a specimen reaches the chamber.");
     return t;
 }
 

@@ -6,7 +6,7 @@
  * dead RETURN B strip -- is GONE. Every control on this panel now moves an
  * engine value; nothing is painted that cannot be touched.
  *
- * THE PROBLEM THIS LAYOUT SOLVES. The engine exposes an 11 x 8 send matrix
+ * THE PROBLEM THIS LAYOUT SOLVES. The engine exposes an 12 x 8 send matrix
  * (8 voices + LICKS + DRY master + WET feedback row, into 8 return slots)
  * plus an 8 x 8 return->return link matrix. Eighty-eight send knobs and
  * sixty-four link knobs is not a mixer, it is a punch card. So:
@@ -18,7 +18,7 @@
  *   FINGERPRINT: this source's send into every slot, at a glance, click to
  *   focus. One knob per strip, full matrix reachable in one click.
  *
- *   SEND MATRIX. The whole 11 x 8 grid, drawn small, in the routing dock.
+ *   SEND MATRIX. The whole 12 x 8 grid, drawn small, in the routing dock.
  *   Every cell is editable in place (drag vertical), every column header
  *   focuses its slot. It is the overview, not the primary editor.
  *

@@ -28,7 +28,7 @@ target, `morgue-tests`.
 | **GRAIN LICKS** | The drum machine: 8 sample slots × 16 steps with per-step pitch and velocity, choke groups, mute/solo. On first run the engine synthesizes a kick, snare and hat into the first three slots and writes a starting pattern across them, so the panel makes sound before a file is loaded. |
 | **GRAIN MASS** | Four sample wells: load anything, pitch it ±24 semitones, reverse it, loop it. PLAY ALL starts every well together on the next bar. |
 | **SURVIVOR** | The loop bank: six bar-synced loopers. Slot 0 is the master phrase looper; the other five record **LIVE** — voices, sampler and returns, but never another looper — so layers stack without recording each other. Commit any finished loop to an ARRANGE lane. |
-| **MIXER** | Faders, mutes and meters, plus the **return bus**: eight ad-hoc slots (CHAMBER, DELAY, DRIVE, CHOIR), an 11×8 send matrix, and a link grid so returns feed each other. Every link is one sample old, which is what makes any feedback patch bounded. |
+| **MIXER** | Faders, mutes and meters, plus the **return bus**: eight ad-hoc slots (CHAMBER, DELAY, DRIVE, CHOIR), a 12×8 send matrix, and a link grid so returns feed each other. Every link is one sample old, which is what makes any feedback patch bounded. |
 | **HW/SYNC** | MIDI in: notes trigger and re-pitch the focused voice, CC1 rides p0. |
 | **EXHUME** | archive.org acquisition: search, audition, and download into the locker, transcoded and carrying its licence and provenance. |
 | **PLATE** | The visual wing: a watched INTAKE folder for scans and captures, and generation loss as a seeded, reproducible operator chain. |

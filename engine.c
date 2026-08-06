@@ -88,6 +88,7 @@ const CtlInfo bb_gctl_info[GCTL_COUNT] = {
 static Program *retire_head;
 
 static void free_all_sampler_data(void);   /* defined with the step sampler */
+static void free_all_well_data(void);      /* defined with the well pool    */
 static void arr_clip_reclaim(void);        /* defined with the R2 song      */
 static void free_all_arr_clips(void);
 static void arr_song_reclaim(void);
@@ -148,9 +149,9 @@ static void free_all_programs(void)
 int bb_engine_publish(int layer, const char *src, ExprError *err)
 { return bb_publish(layer, src, err); }
 
-void bb_engine_reclaim(void) { bb_reclaim(); bb_engine_sampler_reclaim(); arr_clip_reclaim(); arr_song_reclaim(); bb_engine_ret_service(); }
+void bb_engine_reclaim(void) { bb_reclaim(); bb_engine_sampler_reclaim(); bb_engine_well_reclaim(); arr_clip_reclaim(); arr_song_reclaim(); bb_engine_ret_service(); }
 
-void bb_engine_shutdown(void) { free_all_programs(); free_all_sampler_data(); free_all_arr_clips(); free_all_arr_songs(); }
+void bb_engine_shutdown(void) { free_all_programs(); free_all_sampler_data(); free_all_well_data(); free_all_arr_clips(); free_all_arr_songs(); }
 
 /* ======================================================================== */
 /*  R1 step sampler: sample pool + playback state                            */
@@ -244,6 +245,88 @@ static void free_all_sampler_data(void)
     smp_retire_head = NULL;
     for (int s = 0; s < BB_SAMPLER; s++) {
         SmpBuf *p = atomic_exchange(&g_smp_buf[s], NULL);
+        if (p) { free(p->data); free(p); }
+    }
+}
+
+/* ---- GRAIN MASS well pool -------------------------------------------------
+ * Structurally identical to the step-sampler pool above, and deliberately a
+ * second copy rather than a shared one: the two have the same OWNERSHIP rules
+ * but different lifetimes, and sharing a retire list would mean a well load
+ * could not be reasoned about without also reasoning about the sampler. The
+ * duplication is nine lines and the coupling would be permanent. */
+static _Atomic(SmpBuf *) g_well_buf[BB_NWELL];
+static SmpBuf *well_retire_head;
+
+static void well_retire(SmpBuf *b)
+{
+    if (!b) return;
+    b->retire_epoch = atomic_load(&bb.epoch);
+    b->next = well_retire_head;
+    well_retire_head = b;
+}
+
+int bb_engine_well_set(int well, int16_t *mono, int n, int rate)
+{
+    if (well < 0 || well >= BB_NWELL || !mono || n <= 0 || rate <= 0) {
+        if (mono) free(mono);
+        return 0;
+    }
+    SmpBuf *nb = malloc(sizeof *nb);
+    if (!nb) { free(mono); return 0; }   /* never published, safe to free */
+    nb->data = mono;
+    nb->n    = n;
+    nb->rate = rate;
+    nb->retire_epoch = 0;
+    nb->next = NULL;
+    SmpBuf *old = atomic_exchange(&g_well_buf[well], nb);
+    if (old) well_retire(old);
+    return 1;
+}
+
+void bb_engine_well_clear(int well)
+{
+    if (well < 0 || well >= BB_NWELL) return;
+    SmpBuf *old = atomic_exchange(&g_well_buf[well], NULL);
+    if (old) well_retire(old);
+}
+
+void bb_engine_well_reclaim(void)
+{
+    unsigned long long now = atomic_load(&bb.epoch);
+    SmpBuf **pp = &well_retire_head;
+    while (*pp) {
+        SmpBuf *b = *pp;
+        if (now >= b->retire_epoch + 2) {
+            *pp = b->next;
+            free(b->data);
+            free(b);
+        } else {
+            pp = &b->next;
+        }
+    }
+}
+
+int bb_engine_well_loaded(int well)
+{
+    if (well < 0 || well >= BB_NWELL) return 0;
+    return atomic_load(&g_well_buf[well]) != NULL;   /* n > 0 guaranteed */
+}
+
+unsigned bb_engine_well_frames(int well)
+{
+    if (well < 0 || well >= BB_NWELL) return 0u;
+    SmpBuf *b = atomic_load(&g_well_buf[well]);
+    return b ? (unsigned)b->n : 0u;
+}
+
+static void free_all_well_data(void)
+{
+    SmpBuf *b = well_retire_head;
+    while (b) { SmpBuf *nx = b->next; free(b->data); free(b); b = nx; }
+    well_retire_head = NULL;
+    for (int w = 0; w < BB_NWELL; w++) {
+        SmpBuf *p = atomic_exchange(&g_well_buf[w], NULL);
         if (p) { free(p->data); free(p); }
     }
 }
@@ -465,8 +548,12 @@ static atomic_int         g_arr_rec_bars;
 
 int bb_engine_arr_arm(int lane, int bars, int16_t *dst, unsigned cap)
 {
-    /* Lane 9 (FILE/MASS) has no engine-side bus to tap -- refused. */
-    if (lane < 0 || lane > 8 || bars < 1 || !dst || cap == 0)
+    /* Lane 9 is the GRAIN MASS well bus. It used to be refused here, with the
+     * true reason: the wells were mixed on the JUCE side after the render
+     * returned, so there was no engine-side bus to tap. Now that they sum
+     * beside the LICKS bus there is one, and the lane captures like any
+     * other. */
+    if (lane < 0 || lane > 9 || bars < 1 || !dst || cap == 0)
         return -1;
     int st = atomic_load(&bb.arr_rec_status);
     if (st == ARR_REC_ARMED || st == ARR_REC_RECORDING)
@@ -539,6 +626,40 @@ static int32_t   g_smp_amp[BB_SAMPLER];  /* Q16 current amp              */
 static int32_t   g_smp_vol[BB_SAMPLER];  /* Q16 smoothed level           */
 static int32_t   g_smp_pk[BB_SAMPLER];   /* abs peak this period (meters) */
 static uint32_t  g_smp_tick = UINT32_MAX;
+
+/* GRAIN MASS well playback state -- audio thread only, same shape as the
+ * step-sampler block above with two deliberate differences.
+ *
+ * FIRST: the position is SIGNED. The sampler's is uint64_t with the increment
+ * forced positive (`if (inc < 1) inc = 1`), which is fine for a one-shot that
+ * only ever runs forwards, and cannot express a well running backwards at all
+ * -- flipping the sign there yields inc = 1, a frozen DC drone holding frame 0
+ * for four billion frames, and removing the clamp instead wraps the unsigned
+ * position near 2^64 where the one-sided `idx >= len` test kills the voice one
+ * frame after it starts. A signed position with a TWO-SIDED bound is the
+ * honest shape for something that can run either way. The alternative, reading
+ * a mirrored index off a forward-running counter the way the looper does at
+ * loop_process(), was rejected because toggling REVERSE mid-playback would
+ * then teleport the read head to the mirror point instead of turning round
+ * where it stands, and turning round where it stands is the gesture.
+ *
+ * SECOND: `inc` is a MAGNITUDE and the direction is applied per frame from the
+ * snapshot, so hitting REVERSE never has to recompute the pitch. */
+static const SmpBuf *g_well_cur[BB_NWELL];  /* last published buf seen      */
+static int16_t  *g_well_ds[BB_NWELL];    /* snapshot of the sample ptr      */
+static uint32_t  g_well_dlen[BB_NWELL];  /* snapshot sample length          */
+static uint32_t  g_well_drate[BB_NWELL];
+static int       g_well_play[BB_NWELL];  /* snapshot: transport wanted      */
+static int       g_well_loop[BB_NWELL];
+static int       g_well_rev[BB_NWELL];
+static int64_t   g_well_pos[BB_NWELL];   /* play position, SIGNED Q32       */
+static int64_t   g_well_inc[BB_NWELL];   /* Q32 frames/frame, MAGNITUDE     */
+static int32_t   g_well_vtgt[BB_NWELL];  /* Q16 level target this period    */
+static int32_t   g_well_vol[BB_NWELL];   /* Q16 smoothed level              */
+static int32_t   g_well_pk[BB_NWELL];    /* abs peak this period (meters)   */
+static int       g_well_end[BB_NWELL];   /* one-shot finished: clear `play` */
+static int       g_well_pplay[BB_NWELL]; /* previous snapshot's play, for    */
+                                         /*   the rising-edge rewind         */
 
 /* R2 song playback state -- audio thread only. One frames-into-window
  * counter and one in-window flag per clip INDEX: the counter resets when
@@ -775,6 +896,7 @@ typedef struct {
     int nl, lr[BB_NRET], la[BB_NRET];                     /* LICKS   0..255 */
     int nd, dr[BB_NRET], da[BB_NRET];                     /* DRY     0..255 */
     int nw, wr[BB_NRET], wa[BB_NRET];                     /* WET     0..255 */
+    int nm, mr[BB_NRET], ma[BB_NRET];                     /* MASS    0..255 */
     int nk, kt[BB_NRET * BB_NRET],                        /* links   0..256 */
             kf[BB_NRET * BB_NRET],
             ka[BB_NRET * BB_NRET];
@@ -903,7 +1025,7 @@ static void ret_snapshot(RetBus *rb, int rate, uint32_t beat_len,
         }
     }
 
-    rb->nl = rb->nd = rb->nw = rb->nk = 0;
+    rb->nl = rb->nd = rb->nw = rb->nm = rb->nk = 0;
     for (int j = 0; j < rb->nlive; j++) {
         int r = rb->live[j], a;
 
@@ -915,6 +1037,9 @@ static void ret_snapshot(RetBus *rb, int rate, uint32_t beat_len,
 
         a = panicked ? 0 : bb_clampi(ret_send_load(BB_RET_SRC_WET, r), 0, 255);
         if (a) { rb->wr[rb->nw] = r; rb->wa[rb->nw] = a; rb->nw++; }
+
+        a = panicked ? 0 : bb_clampi(ret_send_load(BB_RET_SRC_MASS, r), 0, 255);
+        if (a) { rb->mr[rb->nm] = r; rb->ma[rb->nm] = a; rb->nm++; }
     }
 
     for (int jt = 0; jt < rb->nlive; jt++) {
@@ -1747,6 +1872,207 @@ static inline void sampler_process(int32_t *mix, uint32_t tick, int rate, int32_
 }
 
 /* ======================================================================== */
+/*  GRAIN MASS wells                                                         */
+/* ======================================================================== */
+
+/* Snapshot the well controls once per period, exactly as the layers and the
+ * step sampler are snapshotted. Audio thread; never allocates. */
+static void well_snapshot(int rate)
+{
+    for (int w = 0; w < BB_NWELL; w++) {
+        const WellSlot *sl = &bb.well[w];
+        const SmpBuf *buf = atomic_load(&g_well_buf[w]);
+        const int swapped = (buf != g_well_cur[w]);
+        if (swapped) g_well_cur[w] = buf;
+
+        if (buf) {
+            g_well_ds[w]    = buf->data;
+            g_well_dlen[w]  = (uint32_t)buf->n;
+            g_well_drate[w] = (uint32_t)buf->rate;
+        } else {
+            g_well_ds[w]    = NULL;
+            g_well_dlen[w]  = 0;
+            g_well_drate[w] = 0;
+        }
+
+        g_well_play[w] = atomic_load_explicit(&sl->play,    memory_order_relaxed);
+        g_well_loop[w] = atomic_load_explicit(&sl->loop,    memory_order_relaxed);
+        g_well_rev[w]  = atomic_load_explicit(&sl->reverse, memory_order_relaxed);
+
+        const int64_t lenq = (int64_t)g_well_dlen[w] << 32;
+
+        /* THE TOP OF A SPECIMEN DEPENDS ON WHICH WAY IT IS BEING PLAYED, and
+         * all three rewind sites have to agree about that. This one is here,
+         * BELOW the control loads, precisely so it can see `reverse`: it used
+         * to sit above them and rewind to frame 0 unconditionally, which for a
+         * reversed well is the FINISH line. Loading a specimen into a reversed
+         * non-looping well then played exactly one frame and stopped, and the
+         * rising-edge rewind below could not rescue it because frame 0 is
+         * perfectly in range. */
+        if (swapped) {
+            g_well_pos[w] = (g_well_rev[w] && g_well_dlen[w] > 1) ? lenq - 1 : 0;
+            g_well_end[w] = 0;
+        }
+
+        /* PLAY ALWAYS SOUNDS. A finished one-shot leaves the head parked past
+         * the end, so a bare play = 1 would be swallowed by the bounds test in
+         * well_process on the very first frame and the well would sit there
+         * refusing to start. Rewind on the rising edge of play, and ONLY when
+         * the head is out of range -- pressing PLAY after STOP half way
+         * through a specimen must carry on from where it stopped, not jump to
+         * the top. The deleted JUCE SamplerVoice::play() did exactly this, and
+         * dropping it on the way across is the sort of behaviour that vanishes
+         * silently because nothing about it looks like audio code. */
+        if (g_well_play[w] && !g_well_pplay[w]) {
+            if (g_well_dlen[w] > 0 && (g_well_pos[w] < 0 || g_well_pos[w] >= lenq))
+                g_well_pos[w] = g_well_rev[w] ? lenq - 1 : 0;
+        }
+        g_well_pplay[w] = g_well_play[w];
+
+        g_well_vtgt[w] = bb_clampi(atomic_load_explicit(&sl->ctl[WELL_CTL_LEVEL],
+                                                        memory_order_relaxed),
+                                   0, 256) << 8;
+
+        /* Pitch -> Q32 increment magnitude. PITCH_Q32 spans only -12..+12
+         * because that is all a sequenced one-shot ever asked for, while a
+         * well's knob is +/-24, so fold the octaves onto the table rather than
+         * grow it: doubling and halving a ratio is exact in binary and needs
+         * no libm, which the audio thread may not call. */
+        int st = bb_clampi(atomic_load_explicit(&sl->ctl[WELL_CTL_PITCH],
+                                                memory_order_relaxed), -24, 24);
+        uint64_t ratio;
+        if (st > 12)       ratio = PITCH_Q32[st - 12 + 12] * 2u;
+        else if (st < -12) ratio = PITCH_Q32[st + 12 + 12] / 2u;
+        else               ratio = PITCH_Q32[st + 12];
+
+        uint64_t fr    = g_well_drate[w] > 0 ? g_well_drate[w] : 44100u;
+        uint64_t orate = rate > 0 ? (uint32_t)rate : 44100u;
+        g_well_inc[w] = (int64_t)((ratio * fr) / orate);
+        if (g_well_inc[w] < 1) g_well_inc[w] = 1;
+    }
+}
+
+/* True when any well is loaded and asking to sound. Used to keep the block
+ * out of the frame loop entirely in the overwhelmingly common case of no
+ * wells at all -- and, more importantly, to make it OBVIOUS that an empty
+ * GRAIN MASS adds exactly nothing to the master bus. The chamber's golden
+ * hash depends on that: `mix += 0` is bit-identity on int32_t, so every
+ * nonlinear stage downstream (two limiters, two DC blockers, three hard
+ * ceilings) sees an unchanged input and evolves its state unchanged. */
+static int well_any_live(void)
+{
+    for (int w = 0; w < BB_NWELL; w++) {
+        if (g_well_ds[w] && g_well_dlen[w] > 0 && g_well_play[w]) return 1;
+        /* A level ramp still in flight counts as live even with every well
+         * stopped, or it freezes half-way and the next PLAY resumes from the
+         * stale gain -- a well stopped at full, turned down, and started again
+         * would open at the OLD level for the 46 ms the ramp takes. Ramping to
+         * a target it has already reached is what makes this cost nothing in
+         * the idle case, which is also what keeps the golden hash still: with
+         * no well loaded, vol and vtgt are both 0 and this returns 0. */
+        if (g_well_vol[w] != g_well_vtgt[w]) return 1;
+    }
+    return 0;
+}
+
+/* Fire every armed well together, rewound. Called on the bar edge from the
+ * render loop, which is what makes PLAY ALL sample-exact: the JUCE version
+ * fired at the top of a device buffer AFTER the render returned, so it was up
+ * to a full buffer late, never landed on the bar's own sample, and missed the
+ * bar entirely whenever one buffer happened to span two of them.
+ *
+ * Returns 1 if anything actually started, because the caller's "is any well
+ * live this period" flag was computed from the snapshot BEFORE the frame loop
+ * began. Without this the well would be armed, fired, and then silent until
+ * the next period -- audible as PLAY ALL dropping the first buffer of every
+ * well it starts, which is exactly the class of bug the JUCE version had. */
+static int well_fire_armed(void)
+{
+    int fired = 0;
+    for (int w = 0; w < BB_NWELL; w++) {
+        if (!atomic_load_explicit(&bb.well[w].arm, memory_order_relaxed)) continue;
+        atomic_store_explicit(&bb.well[w].arm, 0, memory_order_relaxed);
+        if (!g_well_ds[w] || g_well_dlen[w] == 0) continue;
+        g_well_pos[w] = g_well_rev[w] && g_well_dlen[w] > 1
+                      ? ((int64_t)(g_well_dlen[w] - 1u) << 32) : 0;
+        g_well_end[w] = 0;
+        g_well_play[w] = 1;
+        atomic_store_explicit(&bb.well[w].play, 1, memory_order_relaxed);
+        fired = 1;
+    }
+    return fired;
+}
+
+/* One output frame of the wells: advance every sounding well and sum it into
+ * the master mix. No trigger logic -- a well is started by hand or by the bar
+ * edge above, and then simply runs. */
+static inline void well_process(int32_t *mix)
+{
+    for (int w = 0; w < BB_NWELL; w++) {
+        if (g_well_vol[w] < g_well_vtgt[w]) {
+            g_well_vol[w] += 32; if (g_well_vol[w] > g_well_vtgt[w]) g_well_vol[w] = g_well_vtgt[w];
+        } else if (g_well_vol[w] > g_well_vtgt[w]) {
+            g_well_vol[w] -= 32; if (g_well_vol[w] < g_well_vtgt[w]) g_well_vol[w] = g_well_vtgt[w];
+        }
+
+        if (!g_well_play[w] || !g_well_ds[w] || g_well_dlen[w] == 0) continue;
+
+        /* A WELL AT LEVEL 0 IS SILENT, NOT PAUSED, and the difference is the
+         * whole of the next twenty lines. The obvious shape -- and the shape
+         * this function was first written in, copied from sampler_process --
+         * skips the frame entirely when the level has ramped to zero. That is
+         * harmless for a step-sampler slot, which is retriggered to frame 0 on
+         * every step, so a frozen position is never observable. A well is a
+         * free-running bed, and freezing it means:
+         *
+         *   - a looping bed pulled down for two bars and brought back up
+         *     resumes two bars late, permanently out of phase with the grid
+         *     and with every other well PLAY ALL started it with -- which
+         *     quietly discards the sample-exact bar sync above;
+         *   - a ONE-SHOT held at zero never reaches its end, so it never sets
+         *     g_well_end, never clears bb.well[].play, and the PLAY plate
+         *     latches on for the rest of the session.
+         *
+         * So the head advances and the end-of-sample test runs on every frame
+         * a well is playing. Only the SUM is skipped when there is nothing to
+         * add. A fader is not a transport control. */
+
+        /* TWO-SIDED, because the head may be travelling either way. */
+        const int64_t lenq = (int64_t)g_well_dlen[w] << 32;
+        if (g_well_pos[w] < 0 || g_well_pos[w] >= lenq) {
+            if (!g_well_loop[w]) {
+                /* A one-shot that has run out stops itself. The UI thread is
+                 * told through bb.well[].play so the PLAY plate un-latches;
+                 * publishing it here rather than leaving the panel to infer it
+                 * is what stops the plate latching on forever.
+                 *
+                 * g_well_pplay is cleared with it so that a PLAY arriving
+                 * before the end of this period still reads as a rising edge
+                 * next period: without it the rewind above is skipped and the
+                 * well refuses to restart. */
+                g_well_play[w]  = 0;
+                g_well_pplay[w] = 0;
+                g_well_end[w]   = 1;
+                continue;
+            }
+            g_well_pos[w] = g_well_rev[w] ? lenq - 1 : 0;
+        }
+
+        uint32_t idx = (uint32_t)(g_well_pos[w] >> 32);
+        if (idx >= g_well_dlen[w]) idx = g_well_dlen[w] - 1u;   /* belt and braces */
+        int16_t v = g_well_ds[w][idx];
+        g_well_pos[w] += g_well_rev[w] ? -g_well_inc[w] : g_well_inc[w];
+
+        if (g_well_vol[w] == 0) continue;     /* silent, but it kept moving */
+
+        int32_t con = (int32_t)(((int64_t)v * g_well_vol[w]) >> 16);
+        *mix += con;
+        if (con < 0) con = -con;
+        if (con > g_well_pk[w]) g_well_pk[w] = con;
+    }
+}
+
+/* ======================================================================== */
 /*  THE RETURN BUS: the public API (UI thread)                               */
 /* ======================================================================== */
 
@@ -2106,6 +2432,25 @@ void bb_engine_init(int rate)
         g_smp_vol[s]  = 0;
     }
 
+    /* Wells: the same reset, and for the same reason -- a level ramp or a play
+     * position surviving init is exactly the residue that made ten return-bus
+     * checks fail while looking like arena corruption. g_well_cur is nulled so
+     * the first snapshot after init re-reads the published buffer rather than
+     * trusting a pointer compare against a pre-init value. The SAMPLE DATA is
+     * deliberately untouched: it belongs to the pool, which outlives init the
+     * way programs and clips do. */
+    for (int w = 0; w < BB_NWELL; w++) {
+        g_well_cur[w]  = NULL;
+        g_well_pos[w]  = 0;
+        g_well_inc[w]  = (int64_t)1 << 32;
+        g_well_vol[w]  = 0;
+        g_well_vtgt[w] = 0;
+        g_well_pk[w]   = 0;
+        g_well_end[w]  = 0;
+        g_well_play[w] = 0;
+        g_well_pplay[w] = 0;
+    }
+
     /* R2 song traffic: -1 means "no pending seek" -- the zero the BSS gives
      * us would read as a request to jump to bar 0. */
     atomic_store(&bb.arr_rec_status, ARR_REC_IDLE);
@@ -2249,6 +2594,9 @@ void bb_engine_render(int16_t *out, int frames, int channels)
 
     sampler_snapshot();
     int sampler_clock = sampler_any_gate();
+
+    well_snapshot(rate);
+    int well_live = well_any_live();
 
     /* --- snapshot the song ------------------------------------------------
      * One pointer load per period, like a Program: every clip this period
@@ -2493,6 +2841,14 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         uint32_t tick = k / step_len;
         uint32_t in_step = k % step_len;
 
+        /* PLAY ALL lands HERE, on the transport's own downbeat, which is what
+         * makes it sample-exact. It used to be a bar-counter edge detector on
+         * the JUCE side firing after bb_engine_render() had already returned:
+         * up to a whole buffer late, never on the bar's own sample, and blind
+         * to a bar boundary that fell inside a buffer rather than between two.
+         * Cheap enough to test unconditionally -- one compare per frame. */
+        if (bar_pos == 0 && well_fire_armed()) well_live = 1;
+
         for (int L = 0; L < BB_NLAYER; L++) {
             LSnap *sn = &ls[L];
 
@@ -2660,8 +3016,36 @@ void bb_engine_render(int16_t *out, int frames, int channels)
                 cap_smp += mix - premix;   /* LICKS-bus capture tap */
         }
 
-        /* The DRY looper tap: voices + sampler, pre-return, pre-arrangement.
-         * The same point BB_RET_SRC_DRY taps. */
+        /* --- THE GRAIN MASS WELLS -------------------------------------------
+         * Beside the LICKS bus and for the same reason. Everything that reads
+         * finished audio sits BELOW this line -- the DRY tap immediately after
+         * it, the return sends, the arrangement, the record fork, the master
+         * clamp, the phrase looper, the scope and the sink -- so one insertion
+         * here is what puts a well inside REC, SURVIVOR, both meters, the
+         * scope and ARRANGE's lane 9 at once.
+         *
+         * It must not move DOWN. Below the record fork the wells drop out of
+         * REC again, which is the bug this replaced; below lsrc[LIVE] they
+         * drop out of every satellite looper, which is the same bug wearing a
+         * different hat. Above is equally wrong in one specific way: a well is
+         * NOT an arrangement source and must never become one, because clips
+         * are summed after the return bus and that ordering is the whole of
+         * the BB_REC_LIVE guarantee.
+         *
+         * Skipped entirely when no well is loaded and playing, so an empty
+         * GRAIN MASS adds a branch and not a sample. */
+        if (well_live) {
+            int32_t premix = mix;
+            well_process(&mix);
+            int32_t wbus = mix - premix;
+            for (int e = 0; e < rb.nm; e++)
+                rin[rb.mr[e]] += (int32_t)(((int64_t)wbus * rb.ma[e]) >> 8);
+            if (cap_on && g_cap_lane == 9)
+                cap_smp += wbus;           /* MASS-bus capture tap */
+        }
+
+        /* The DRY looper tap: voices, sampler and wells, pre-return,
+         * pre-arrangement. The same point BB_RET_SRC_DRY taps. */
         if (sb.want_dry) lsrc[BB_LOOP_SRC_DRY] = mix;
 
         /* --- THE RETURN BUS -------------------------------------------------
@@ -3058,6 +3442,37 @@ void bb_engine_render(int16_t *out, int frames, int channels)
             atomic_store_explicit(&bb.sampler[s].peak, g_smp_pk[s],
                                   memory_order_relaxed);
         g_smp_pk[s] = 0;
+    }
+    for (int w = 0; w < BB_NWELL; w++) {
+        if (g_well_pk[w] > atomic_load_explicit(&bb.well[w].peak,
+                                                memory_order_relaxed))
+            atomic_store_explicit(&bb.well[w].peak, g_well_pk[w],
+                                  memory_order_relaxed);
+        g_well_pk[w] = 0;
+
+        /* A one-shot that ran out during this period tells the UI so, which is
+         * what un-latches the PLAY plate. Only ever cleared here, never set --
+         * setting `play` is the UI's or the bar edge's job, and a store from
+         * both ends would race a PLAY issued during the same period. */
+        if (g_well_end[w]) {
+            g_well_end[w] = 0;
+            atomic_store_explicit(&bb.well[w].play, 0, memory_order_relaxed);
+        }
+
+        /* The playhead, published whether or not the well is sounding: the
+         * JUCE version only ever wrote it from inside its mix loop, so a
+         * stopped well left the last value behind and the head sat wherever it
+         * happened to die. Cosmetic, so a torn read costs one frame. */
+        unsigned wlen = g_well_dlen[w];
+        int wpos = 0;
+        if (wlen > 0) {
+            int64_t p = g_well_pos[w];
+            if (p < 0) p = 0;
+            uint64_t fr = (uint64_t)(p >> 32);
+            if (fr >= wlen) fr = wlen - 1u;
+            wpos = (int)((fr * 65536u) / wlen);
+        }
+        atomic_store_explicit(&bb.well[w].pos, wpos, memory_order_relaxed);
     }
     /* Return-bus telemetry. Slot 0 additionally publishes to bb.verb_peak so
      * the existing RETURN A strip keeps its meter with no migration, and
@@ -3745,6 +4160,22 @@ int bb_config_save(void)
         fprintf(f, "\n");
     }
 
+    /* GRAIN MASS wells: the CONTROLS, and deliberately not the sample path.
+     * Persisting a path here would mean writing an absolute one, which is the
+     * defect `aclip` already has and the reason cross-machine sync is its own
+     * piece of work -- one absolute path in a session file is a bug, two is a
+     * migration. The controls are worth keeping on their own: coming back to a
+     * session with the levels, pitches and loop flags you left is most of the
+     * value, and reloading four files is a gesture you were making anyway.
+     * `play` is not written; see bb_engine_set_defaults(). */
+    for (int w = 0; w < BB_NWELL; w++) {
+        WellSlot *wl = &bb.well[w];
+        fprintf(f, "well %d lvl %d pitch %d loop %d rev %d\n", w,
+                atomic_load(&wl->ctl[WELL_CTL_LEVEL]),
+                atomic_load(&wl->ctl[WELL_CTL_PITCH]),
+                atomic_load(&wl->loop), atomic_load(&wl->reverse));
+    }
+
     /* R2 song meta (version 7), one line per clip:
      *
      *   aclip <lane> <start> <len> <loop> <gain> <namelen>:<name> <path>
@@ -4137,6 +4568,19 @@ int bb_config_load(void)
             L = (int)strtol(p, (char **)&p, 10);
             if (L >= 0 && L < BB_SAMPLER)
                 read_ints(p, bb.sampler[L].vel, BB_STEPS, 0, 255);
+        } else if (!strncmp(line, "well ", 5)) {
+            int lvl, pit, lp, rv;
+            if (sscanf(line, "well %d lvl %d pitch %d loop %d rev %d",
+                       &L, &lvl, &pit, &lp, &rv) == 5 &&
+                L >= 0 && L < BB_NWELL) {
+                WellSlot *wl = &bb.well[L];
+                atomic_store(&wl->ctl[WELL_CTL_LEVEL], bb_clampi(lvl, 0, 256));
+                atomic_store(&wl->ctl[WELL_CTL_PITCH], bb_clampi(pit, -24, 24));
+                atomic_store(&wl->loop,    !!lp);
+                atomic_store(&wl->reverse, !!rv);
+                /* `play` is never restored -- the sample is not persisted, so
+                 * an armed well would come back pointing at nothing. */
+            }
         } else if (!strncmp(line, "aclip ", 6)) {
             /* R2 song meta (v7) -- format documented at the writer. The
              * name is length-prefixed (it may contain spaces); the path is
@@ -4320,6 +4764,25 @@ void bb_engine_set_defaults(void)
             atomic_store(&sl->pitch[i], 0);
             atomic_store(&sl->vel[i], 200);
         }
+    }
+
+    /* The wells. LEVEL 128 of 256 is exactly the half-scale the JUCE wells
+     * shipped at, and LOOP defaults on because a well is a bed -- both are the
+     * behaviour that already existed, restated in the engine's units. `play`
+     * is 0 for a reason that matters after a session restore: the controls
+     * persist and the sample path does not, so a well that came back armed
+     * would either blast on load or, worse, latch a PLAY plate over an empty
+     * well. */
+    for (int w = 0; w < BB_NWELL; w++) {
+        WellSlot *wl = &bb.well[w];
+        atomic_store(&wl->play,    0);
+        atomic_store(&wl->loop,    1);
+        atomic_store(&wl->reverse, 0);
+        atomic_store(&wl->arm,     0);
+        atomic_store(&wl->ctl[WELL_CTL_LEVEL], 128);
+        atomic_store(&wl->ctl[WELL_CTL_PITCH], 0);
+        atomic_store(&wl->pos,  0);
+        atomic_store(&wl->peak, 0);
     }
 }
 

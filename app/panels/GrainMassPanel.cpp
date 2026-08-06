@@ -1,10 +1,20 @@
 /* GrainMassPanel.cpp -- see GrainMassPanel.h.
  *
- * Spec section 8 + HTML frame "04 GRAIN MASS". All SamplerVoice wiring
- * preserved: double-click (or file drop) loads via the async chooser,
- * PLAY/STOP/R/O plates and the PITCH knob write straight to the voice, keys
- * 1-4/P/A/Z/R/O act on the selected well. The waveform is the real decoded
- * file (peaks computed once at load); nothing is faked.
+ * Spec section 8 + HTML frame "04 GRAIN MASS". Double-click, a file drop from
+ * the desktop, or a drag out of the LOCKER loads through the engine's well
+ * pool; PLAY/STOP/R/O plates and the PITCH and LEVEL knobs write straight to
+ * bb.well[i]; keys 1-4/P/A/Z/R/O act on the selected well. The waveform is the
+ * real decoded file (peaks computed once at load); nothing is faked.
+ *
+ * THE WELLS ARE IN THE ENGINE NOW. They used to be four JUCE SamplerVoice
+ * objects that mixed into the device buffers after bb_engine_render() had
+ * returned, which meant they reached the speakers and nothing else: REC did
+ * not record them, SURVIVOR could not loop them, the master meter and the
+ * scope could not see them, and ARRANGE's MASS lane refused to capture because
+ * there was no engine-side bus to point at. This panel is now a control
+ * surface over bb.well[], exactly as LicksPanel is over bb.sampler[]: the
+ * decode happens here on the message thread, because the engine has no WAV
+ * reader and must never see a path, and the audio happens there.
  *
  * LEGIBILITY PASS. Removed: the GRAIN and ERASE "knobs". They were a paint
  * lambda -- a CONTROL circle, a dead ring and a pointer frozen at -135
@@ -22,11 +32,12 @@
 #include "GrainMassPanel.h"
 #include "AudioEngine.h"
 #include "Session.h"
+#include "bytebeat.h"
+#include "engine.h"
 
 #include <cmath>
+#include <cstdlib>          // calloc -- bb_engine_well_set takes the buffer
 #include <memory>
-#include <type_traits>
-#include <utility>          // std::declval, used by the detection idiom below
 #include <vector>
 
 namespace morgue
@@ -37,23 +48,20 @@ using juce::Justification;
 
 namespace
 {
-    /* LOCAL STOPGAP -- SamplerVoice does not yet expose its play position
-     * (shared change request: double positionNorm() const noexcept, 0..1).
-     * This detects the accessor at compile time; until it lands we return
-     * -1 and draw no playhead. Never fake live data. */
-    template <typename T, typename = void>
-    struct HasPositionNorm : std::false_type {};
-    template <typename T>
-    struct HasPositionNorm<T, std::void_t<decltype (std::declval<const T&> ().positionNorm())>>
-        : std::true_type {};
-
-    template <typename V>
-    double playheadNorm (const V& v)
+    /* The playhead. The engine publishes it as 0..65536 over the whole
+     * sample, once per period whether or not the well is sounding.
+     *
+     * This replaces a compile-time detection idiom that tested whether
+     * SamplerVoice had a positionNorm() accessor and drew no playhead if it
+     * did not. The accessor had in fact existed for some time, so the
+     * detection had only ever taken its true branch: a std::void_t template
+     * pair, an <utility> include and a stopgap comment, all to test a
+     * condition that could not be false. Scaffolding outlives the thing it
+     * was holding up unless someone takes it down. */
+    double playheadNorm (int well)
     {
-        if constexpr (HasPositionNorm<V>::value)
-            return juce::jlimit (0.0, 1.0, (double) v.positionNorm());
-        else
-            return -1.0;
+        return juce::jlimit (0.0, 1.0,
+                             (double) atomic_load (&bb.well[well].pos) / 65536.0);
     }
 
     int textW (const juce::Font& f, const juce::String& s)
@@ -61,13 +69,22 @@ namespace
         return (int) std::ceil (juce::GlyphArrangement::getStringWidth (f, s));
     }
 
-    /* rate <-> semitone mapping for the PITCH knob (2^(st/12)). */
-    int rateToSemis (float rate)
+    /* One predicate for both drop routes -- the desktop file drag and the
+     * LOCKER's internal drag -- so a file the panel accepts from Explorer can
+     * never be one it silently refuses from the console's own browser. */
+    bool isAudioPath (const juce::String& p)
     {
-        return juce::jlimit (-24, 24,
-                             juce::roundToInt (12.0 * std::log2 ((double) juce::jmax (0.01f, rate))));
+        return p.endsWithIgnoreCase (".wav")  || p.endsWithIgnoreCase (".aif")
+            || p.endsWithIgnoreCase (".aiff") || p.endsWithIgnoreCase (".mp3")
+            || p.endsWithIgnoreCase (".ogg")  || p.endsWithIgnoreCase (".flac");
     }
-    float semisToRate (int st) { return (float) std::pow (2.0, st / 12.0); }
+
+    /* The PITCH knob is semitones and so is the engine control, so there is no
+     * conversion left to do. There used to be a rate<->semitone pair here,
+     * because the JUCE voice stored a raw float rate; that is also why the A/Z
+     * keys multiplied by 1.122f and escaped the knob's own range. See
+     * keyPressed(). */
+    float rateOf (int semis) { return (float) std::pow (2.0, semis / 12.0); }
 }
 
 /* ======================================================================== */
@@ -93,25 +110,29 @@ public:
         prep (play); prep (stopB); prep (rev); prep (loop); prep (pitch);
         prep (level);
 
-        play.setTooltip (U8 ("PLAY \xe2\x80\x94 sound this well over the engine output. Key P."));
+        play.setTooltip (U8 ("PLAY \xe2\x80\x94 sound this well into the master bus. "
+                             "REC records it and SURVIVOR can loop it. Key P."));
         play.onToggle = [this] (bool on)
         {
             owner.select (index);
-            if (auto* v = audio.voice (index)) { if (on) v->play(); else v->stop(); }
+            if (on && ! bb_engine_well_loaded (index)) { play.setToggleStateQuiet (false); return; }
+            atomic_store (&bb.well[index].play, on ? 1 : 0);
         };
 
         stopB.setTooltip (U8 ("STOP \xe2\x80\x94 silence this well. Key P."));
         stopB.onToggle = [this] (bool)
         {
             owner.select (index);
-            if (auto* v = audio.voice (index)) v->stop();
+            atomic_store (&bb.well[index].play, 0);
+            atomic_store (&bb.well[index].arm,  0);
         };
 
-        rev.setTooltip (U8 ("REVERSE \xe2\x80\x94 play the specimen backwards. Key R."));
+        rev.setTooltip (U8 ("REVERSE \xe2\x80\x94 play the specimen backwards. The head "
+                            "turns round where it stands. Key R."));
         rev.onToggle = [this] (bool on)
         {
             owner.select (index);
-            if (auto* v = audio.voice (index)) v->setReverse (on);
+            atomic_store (&bb.well[index].reverse, on ? 1 : 0);
         };
 
         loop.setOxideStyle (true);
@@ -119,7 +140,7 @@ public:
         loop.onToggle = [this] (bool on)
         {
             owner.select (index);
-            if (auto* v = audio.voice (index)) v->setLoop (on);
+            atomic_store (&bb.well[index].loop, on ? 1 : 0);
         };
 
         pitch.setShowText (false);              // 32px face; label painted below
@@ -128,17 +149,18 @@ public:
         pitch.onChange = [this] (int st)
         {
             owner.select (index);
-            if (auto* v = audio.voice (index)) v->setRate (semisToRate (st));
+            atomic_store (&bb.well[index].ctl[WELL_CTL_PITCH],
+                          juce::jlimit (-24, 24, st));
         };
 
         level.setShowText (false);              // 32px face; label painted below
-        level.setTooltip (U8 ("LEVEL \xe2\x80\x94 this well into the output mix. "
-                              "0\xe2\x80\x93" "255; 128 is the shipped level."));
+        level.setTooltip (U8 ("LEVEL \xe2\x80\x94 this well into the master bus. "
+                              "0\xe2\x80\x93" "256, 256 is unity; 128 is the shipped level."));
         level.onChange = [this] (int v)
         {
             owner.select (index);
-            if (auto* sv = audio.voice (index))
-                sv->setGain ((float) v / 255.0f);
+            atomic_store (&bb.well[index].ctl[WELL_CTL_LEVEL],
+                          juce::jlimit (0, 256, v));
         };
     }
 
@@ -199,33 +221,42 @@ public:
         repaint();
     }
 
-    /* 30 Hz engine pull (spec section 15): quiet writes, drag-guarded. */
+    /* 30 Hz engine pull (spec section 15): quiet writes, drag-guarded. The
+     * engine is the single source of truth, so `play` is READ back rather
+     * than remembered -- a non-looping well clears it from the audio thread
+     * when it runs out, which is what un-latches the plate. */
     void sync()
     {
-        SamplerVoice* v = audio.voice (index);
-        const bool has     = v != nullptr && v->hasData();
-        const bool sounding = v != nullptr && v->isPlaying();
-        const bool rv      = v != nullptr && v->getReverse();
-        const bool lp      = v != nullptr && v->getLoop();
-        const float rt     = v != nullptr ? v->getRate() : 1.0f;
+        const WellSlot& w = bb.well[index];
+        const bool has      = bb_engine_well_loaded (index) != 0;
+        const bool sounding = has && atomic_load (&w.play) != 0;
+        const bool rv       = atomic_load (&w.reverse) != 0;
+        const bool lp       = atomic_load (&w.loop) != 0;
+        const int  st       = atomic_load (&w.ctl[WELL_CTL_PITCH]);
+        const int  lv       = atomic_load (&w.ctl[WELL_CTL_LEVEL]);
 
         /* transport plates present the WELL's state: an empty well draws
          * every plate idle (HTML frame 04 empty well), even though the
-         * voice keeps its loop/reverse preference for the next load */
+         * well keeps its loop/reverse preference for the next load */
         if (! play.isUserDragging())  play.setToggleStateQuiet (sounding);
         if (! rev.isUserDragging())   rev.setToggleStateQuiet (has && rv);
         if (! loop.isUserDragging())  loop.setToggleStateQuiet (has && lp);
-        if (! pitch.isUserDragging()) pitch.setValueQuiet (rateToSemis (rt));
-        if (! level.isUserDragging() && v != nullptr)
-            level.setValueQuiet (juce::roundToInt (v->getGain() * 255.0f));
+        if (! pitch.isUserDragging()) pitch.setValueQuiet (st);
+        if (! level.isUserDragging()) level.setValueQuiet (lv);
 
         if (sounding || sounding != lastPlaying || has != lastHas
-            || rv != lastRev || lp != lastLoop || rt != lastRate)
+            || rv != lastRev || lp != lastLoop || st != lastSemis)
             repaint();
 
         lastPlaying = sounding; lastHas = has;
-        lastRev = rv; lastLoop = lp; lastRate = rt;
+        lastRev = rv; lastLoop = lp; lastSemis = st;
     }
+
+    /* The engine holds no juce::String, so the specimen's name lives here,
+     * beside the peak table that is also panel-side and message-thread-only.
+     * NOT setName(): juce::Component already has one, and quietly shadowing a
+     * base-class member is how a component ends up with two names. */
+    void setSpecimenName (const juce::String& n) { name = n; }
 
     void mouseDown (const juce::MouseEvent&) override        { owner.select (index); }
     void mouseDoubleClick (const juce::MouseEvent&) override { owner.select (index);
@@ -247,9 +278,8 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        SamplerVoice* v = audio.voice (index);
-        const bool has      = v != nullptr && v->hasData();
-        const bool sounding = v != nullptr && v->isPlaying();
+        const bool has      = bb_engine_well_loaded (index) != 0;
+        const bool sounding = has && atomic_load (&bb.well[index].play) != 0;
 
         Rectangle<int> b = getLocalBounds();
         g.setColour (C::PANEL);
@@ -309,7 +339,7 @@ public:
         g.setFont (Type::monoMedium (10.0f, 0.04f));
         g.setColour (has ? (selected ? C::INK : C::INK_DIM) : C::INK_FAINT);
         const int nameX = head.getX() + 8 + textW (hf, wl) + 10;
-        g.drawText (has ? v->getName() : U8 ("\xe2\x80\x94 EMPTY \xe2\x80\x94"),
+        g.drawText (has ? name : U8 ("\xe2\x80\x94 EMPTY \xe2\x80\x94"),
                     nameX, head.getY(), juce::jmax (0, metaR - nameX),
                     head.getHeight(), Justification::centredLeft, true);
 
@@ -336,8 +366,8 @@ public:
          * from them. A knob that cannot be turned is not a control, and the
          * space is better spent on the readout that is real. */
 
-        // RATE: the live playback rate of this well, read from the voice
-        const float rate = v != nullptr ? v->getRate() : 1.0f;
+        // RATE: the live playback rate of this well, from its semitone control
+        const float rate = rateOf (atomic_load (&bb.well[index].ctl[WELL_CTL_PITCH]));
         Rectangle<int> rateR (ctl.getX() + 270, ctl.getY() + 12,
                               juce::jmax (0, ctl.getWidth() - 270 - 8), 16);
         g.setFont (Type::micro());
@@ -382,16 +412,13 @@ public:
             }
         }
 
-        if (sounding && v != nullptr)
+        if (sounding)
         {
-            const double pn = playheadNorm (*v);             // -1 until the accessor lands
-            if (pn >= 0.0)
-            {
-                const int px = inner.getX()
-                             + juce::roundToInt (pn * (double) juce::jmax (0, inner.getWidth() - 1));
-                g.setColour (C::BLOOD_HOT);                  // 1px play position
-                g.fillRect (px, plot.getY() + 1, 1, plot.getHeight() - 2);
-            }
+            const double pn = playheadNorm (index);
+            const int px = inner.getX()
+                         + juce::roundToInt (pn * (double) juce::jmax (0, inner.getWidth() - 1));
+            g.setColour (C::BLOOD_HOT);                      // 1px play position
+            g.fillRect (px, plot.getY() + 1, 1, plot.getHeight() - 2);
         }
 
         /* An empty well must say so, in the middle of the space it is empty
@@ -433,15 +460,16 @@ public:
     PlateButton rev   { "R",    false, true  };
     PlateButton loop  { "O",    false, true  };
     EngravedKnob pitch { "PITCH", 32, -24, 24, 0 };
-    EngravedKnob level { "LEVEL", 32, 0, 255, 128 };
+    EngravedKnob level { "LEVEL", 32, 0, 256, 128 };
 
     static constexpr int kBins = 512;
     std::vector<float> mins, maxs;
     bool hasPeaks = false;
     juce::String metaText;
+    juce::String name;
 
     bool lastPlaying = false, lastHas = false, lastRev = false, lastLoop = false;
-    float lastRate = 1.0f;
+    int lastSemis = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SampleWell)
 };
@@ -466,15 +494,13 @@ GrainMassPanel::GrainMassPanel (AudioEngine& e) : audio (e)
     playAll.onToggle = [this] (bool)
     {
         bool anyPending = false;
-        for (int i = 0; i < audio.numVoices(); ++i)
-            if (auto* v = audio.voice (i))
-                anyPending = anyPending || v->syncPending();
-        for (int i = 0; i < audio.numVoices(); ++i)
-            if (auto* v = audio.voice (i))
-            {
-                if (anyPending)          v->cancelSyncStart();   // toggle off
-                else if (v->hasData())   v->armSyncStart();
-            }
+        for (int i = 0; i < BB_NWELL; ++i)
+            anyPending = anyPending || atomic_load (&bb.well[i].arm) != 0;
+        for (int i = 0; i < BB_NWELL; ++i)
+        {
+            if (anyPending)                        atomic_store (&bb.well[i].arm, 0);
+            else if (bb_engine_well_loaded (i))    atomic_store (&bb.well[i].arm, 1);
+        }
     };
     addAndMakeVisible (playAll);
 
@@ -483,12 +509,11 @@ GrainMassPanel::GrainMassPanel (AudioEngine& e) : audio (e)
     stopAll.setMouseClickGrabsKeyboardFocus (false);
     stopAll.onToggle = [this] (bool)
     {
-        for (int i = 0; i < audio.numVoices(); ++i)
-            if (auto* v = audio.voice (i))
-            {
-                v->cancelSyncStart();
-                v->stop();
-            }
+        for (int i = 0; i < BB_NWELL; ++i)
+        {
+            atomic_store (&bb.well[i].arm,  0);
+            atomic_store (&bb.well[i].play, 0);
+        }
     };
     addAndMakeVisible (stopAll);
 
@@ -504,9 +529,8 @@ void GrainMassPanel::timerCallback()
         w->sync();
 
     bool anyPending = false;
-    for (int i = 0; i < audio.numVoices(); ++i)
-        if (auto* v = audio.voice (i))
-            anyPending = anyPending || v->syncPending();
+    for (int i = 0; i < BB_NWELL; ++i)
+        anyPending = anyPending || atomic_load (&bb.well[i].arm) != 0;
     playAll.setToggleStateQuiet (anyPending);   // lamp = armed, clears on fire
 }
 
@@ -575,14 +599,56 @@ void GrainMassPanel::mouseDown (const juce::MouseEvent& e)
 
 void GrainMassPanel::loadFileInto (int well, const juce::File& f)
 {
-    if (! f.existsAsFile()) return;
-    if (auto* v = audio.voice (well))
-        if (v->loadFile (f))
-        {
-            v->play();
-            wells[(size_t) well]->analyse (f);
-            select (well);
-        }
+    if (! f.existsAsFile() || well < 0 || well >= BB_NWELL) return;
+
+    /* Decode HERE, on the message thread. The engine owns no file format
+     * reader and must never be handed a path -- the same division LICKS uses
+     * (LicksPanel::loadPath). The frames go over as mono int16 because the
+     * whole engine bus is mono: a stereo specimen folds to (L+R)/2, which is
+     * a real change from the JUCE wells and is also what every recording of
+     * one has always sounded like, the sink having been mono throughout. */
+    std::unique_ptr<juce::AudioFormatReader> r (audio.getFormats().createReaderFor (f));
+    if (r == nullptr || r->lengthInSamples <= 0
+        || r->lengthInSamples > 0x7fffffff / 2)
+        return;                    // the length guard the wells never had
+
+    const int len = (int) r->lengthInSamples;
+    juce::AudioBuffer<float> tmp (2, len);
+
+    /* CLEAR IT, AND CHECK THE READ. juce::AudioBuffer's constructor allocates
+     * without zeroing, and AudioFormatReader::read() returns false WITHOUT
+     * zeroing the destination when the underlying decode fails part way. A
+     * truncated or damaged file therefore leaves uninitialised heap in `tmp`,
+     * and the conversion below turns that into full-scale int16 -- which is
+     * then published, and (this panel auto-plays a fresh load) sent straight
+     * into the master bus, the recorder and every looper. The deleted
+     * SamplerVoice::loadFile cleared its buffer; ArrangePanel's decoder still
+     * does; analyse() forty lines above checks the return value. */
+    tmp.clear();
+    if (! r->read (&tmp, 0, len, 0, true, true))
+        return;
+
+    int16_t* mono = (int16_t*) calloc ((size_t) len, sizeof (int16_t));
+    if (mono == nullptr) return;
+
+    for (int i = 0; i < len; ++i)
+    {
+        const float m = tmp.getNumChannels() > 1
+                ? (tmp.getSample (0, i) + tmp.getSample (1, i)) * 0.5f
+                : tmp.getSample (0, i);
+        const int32_t v = (int32_t) (m * 32767.0f);
+        mono[i] = (int16_t) juce::jlimit (-32768, 32767, v);
+    }
+
+    /* bb_engine_well_set takes ownership of `mono` UNCONDITIONALLY -- it frees
+     * it on every failure path too, so there is nothing to clean up here. */
+    if (bb_engine_well_set (well, mono, len, (int) r->sampleRate) != 0)
+    {
+        wells[(size_t) well]->setSpecimenName (f.getFileNameWithoutExtension());
+        wells[(size_t) well]->analyse (f);
+        atomic_store (&bb.well[well].play, 1);
+        select (well);
+    }
 }
 
 void GrainMassPanel::loadInto (int well)
@@ -611,9 +677,7 @@ void GrainMassPanel::loadInto (int well)
 bool GrainMassPanel::isInterestedInFileDrag (const juce::StringArray& files)
 {
     for (const auto& f : files)
-        if (f.endsWithIgnoreCase (".wav")  || f.endsWithIgnoreCase (".aif")
-         || f.endsWithIgnoreCase (".aiff") || f.endsWithIgnoreCase (".mp3")
-         || f.endsWithIgnoreCase (".ogg")  || f.endsWithIgnoreCase (".flac"))
+        if (isAudioPath (f))
             return true;
     return false;
 }
@@ -627,8 +691,8 @@ void GrainMassPanel::filesDropped (const juce::StringArray& files, int x, int y)
 bool GrainMassPanel::keyPressed (const juce::KeyPress& key)
 {
     const int k = key.getKeyCode();
-    SamplerVoice* v = audio.voice (slot);
-    if (v == nullptr) return false;
+    if (slot < 0 || slot >= BB_NWELL) return false;
+    WellSlot& w = bb.well[slot];
 
     if (k >= '1' && k <= '4')
     {
@@ -637,16 +701,62 @@ bool GrainMassPanel::keyPressed (const juce::KeyPress& key)
     }
     if (key.getTextCharacter() == 'p')
     {
-        if (v->isPlaying()) v->stop();
-        else                v->play();
+        const bool sounding = atomic_load (&w.play) != 0;
+        if (! sounding && ! bb_engine_well_loaded (slot)) return true;
+        atomic_store (&w.play, sounding ? 0 : 1);
         return true;
     }
-    if (key.getTextCharacter() == 'r') { v->setReverse (! v->getReverse()); return true; }
-    if (key.getTextCharacter() == 'o') { v->setLoop (! v->getLoop()); return true; }
-    if (key.getTextCharacter() == 'a') { v->setRate (v->getRate() * 1.122f); return true; }
-    if (key.getTextCharacter() == 'z') { v->setRate (v->getRate() / 1.122f); return true; }
+    if (key.getTextCharacter() == 'r')
+    {
+        atomic_store (&w.reverse, atomic_load (&w.reverse) ? 0 : 1);
+        return true;
+    }
+    if (key.getTextCharacter() == 'o')
+    {
+        atomic_store (&w.loop, atomic_load (&w.loop) ? 0 : 1);
+        return true;
+    }
+
+    /* A and Z are ONE SEMITONE, and they respect the knob's range.
+     *
+     * They used to multiply a raw float rate by 1.122f. That constant is
+     * 2^(2/12) -- a whole tone, twice the step the tooltip and the knob both
+     * promise -- and SamplerVoice::setRate stored it without a clamp, so a
+     * thirteenth press pushed the well past +24 semitones while the knob face
+     * sat frozen at 24, the only place the -24..+24 limit was ever applied.
+     * An integer semitone control makes the step exact, the range real, and
+     * the keys and the knob the same control. */
+    if (key.getTextCharacter() == 'a' || key.getTextCharacter() == 'z')
+    {
+        const int step = key.getTextCharacter() == 'a' ? 1 : -1;
+        atomic_store (&w.ctl[WELL_CTL_PITCH],
+                      juce::jlimit (-24, 24,
+                                    atomic_load (&w.ctl[WELL_CTL_PITCH]) + step));
+        return true;
+    }
 
     return false;
+}
+
+/* ---- LOCKER drag ----------------------------------------------------------
+ * The LOCKER is a juce::DragAndDropContainer and packages the absolute path
+ * of the row you dragged (Chrome.cpp). GRAIN MASS implemented only
+ * FileDragAndDropTarget, which is the interface for a drag out of Explorer or
+ * Finder, so a drag from the console's OWN locker sailed over the wells and
+ * did nothing -- while the identical file dragged from a file manager landed.
+ * GRAIN LICKS has had the internal target all along; this is the same pair. */
+bool GrainMassPanel::isInterestedInDragSource (const SourceDetails& d)
+{
+    const juce::String p = d.description.toString();
+    return isAudioPath (p) && juce::File::isAbsolutePath (p)
+        && juce::File (p).existsAsFile();
+}
+
+void GrainMassPanel::itemDropped (const SourceDetails& d)
+{
+    const juce::String p = d.description.toString();
+    if (! isAudioPath (p) || ! juce::File::isAbsolutePath (p)) return;
+    loadFileInto (slotAt (d.localPosition), juce::File (p));
 }
 
 void GrainMassPanel::paint (juce::Graphics& g)

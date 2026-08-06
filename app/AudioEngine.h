@@ -2,8 +2,10 @@
  *
  * engine.c is the instrument and knows nothing about JUCE. This class owns
  * JUCE's AudioDeviceManager, an audio callback that pushes every hardware
- * buffer straight into bb_engine_render(), a WAV recorder fed from the
- * engine's own sink ring, and the sampler voices that mix on top.
+ * buffer straight into bb_engine_render(), and a WAV recorder fed from the
+ * engine's own sink ring. Nothing mixes on top of the engine: everything you
+ * can hear goes through bb_engine_render(), which is the only way everything
+ * you can hear also ends up in the recording.
  */
 
 #pragma once
@@ -17,78 +19,32 @@
 #include <mutex>
 #include <vector>
 
-/* One hardware output voice for the sampler. UI loads files; the audio
- * thread reads the loaded buffer under a short lock. Control flags cross
- * the UI/audio boundary as relaxed atomics (the audio thread also writes
- * `playing` when a one-shot ends). */
-class SamplerVoice
-{
-public:
-    SamplerVoice();
-    ~SamplerVoice();
+/* SamplerVoice IS GONE, and its absence is the fix.
+ *
+ * It was one hardware output voice per GRAIN MASS well, holding the decoded
+ * file behind a mutex and adding itself into the device's float buffers from
+ * mixInto(), called after bb_engine_render() had returned. That put the wells
+ * downstream of bb.sink, which is the ring the WAV recorder drains, the master
+ * meter measures, the scope reads and the loop bank captures -- so a well
+ * reached the speakers and none of those four. REC did not record it, SURVIVOR
+ * could not loop it, and ARRANGE's MASS lane refused to capture for the honest
+ * reason that there was no engine-side bus to tap.
+ *
+ * The wells now live in engine.c as bb.well[], summed inside the render loop
+ * beside the LICKS bus (see the block comment on WellSlot in bytebeat.h). Two
+ * things improved on the way past: the audio thread no longer try-locks a
+ * std::mutex and silently drops a whole buffer when the UI is mid-load, and
+ * PLAY ALL fires on the transport's own downbeat instead of at the top of
+ * whichever device buffer first noticed the bar counter move.
+ *
+ * If a JUCE-side mixer is ever wanted again -- it should not be -- read R1's
+ * note in DESIGN_SPEC.md first. It predicted this exact bug in advance. */
 
-    bool loadFile (const juce::File&);
-    bool hasData() const noexcept;
-    juce::String getName() const noexcept;
-
-    void play();   // rewinds a finished one-shot so PLAY always sounds
-    void stop()  { playing.store (false, std::memory_order_relaxed); }
-    bool isPlaying() const noexcept { return playing.load (std::memory_order_relaxed); }
-
-    float getRate() const noexcept { return rate.load (std::memory_order_relaxed); }
-    bool getReverse() const noexcept { return reverse.load (std::memory_order_relaxed); }
-    bool getLoop() const noexcept { return loop.load (std::memory_order_relaxed); }
-    void setRate (float r)        { rate.store (r, std::memory_order_relaxed); }
-    void setReverse (bool b)      { reverse.store (b, std::memory_order_relaxed); }
-    void setLoop (bool b)         { loop.store (b, std::memory_order_relaxed); }
-    void setGain (float g)        { gain.store (g, std::memory_order_relaxed); }
-    float getGain() const noexcept { return gain.load (std::memory_order_relaxed); }
-    void setFocused (bool b)      { focused.store (b, std::memory_order_relaxed); }
-    void setOutputRate (double r) { outRate.store (r, std::memory_order_relaxed); }
-
-    /* Bar-synced start: the UI arms a well; the audio callback fires every
-     * pending well together on the next bar transition of the engine clock,
-     * rewound to the top of its sample. All atomics -- no locks. */
-    void armSyncStart()            { syncPend.store (true,  std::memory_order_relaxed); }
-    void cancelSyncStart()         { syncPend.store (false, std::memory_order_relaxed); }
-    bool syncPending() const noexcept { return syncPend.load (std::memory_order_relaxed); }
-    void fireSync()                                        // audio thread only
-    {
-        syncPend.store (false, std::memory_order_relaxed);
-        retrig.store (true, std::memory_order_relaxed);
-        playing.store (true, std::memory_order_relaxed);
-    }
-
-    /* Current play position 0..1 (mirrored out of mixInto, relaxed). */
-    double positionNorm() const noexcept { return posNorm.load (std::memory_order_relaxed); }
-
-    void mixInto (float* const* out, int nOut, int nframes);
-
-private:
-    std::mutex mu;
-    juce::AudioBuffer<float> buf;
-    juce::String name;
-    double bufRate = 0.0;
-
-    double pos = 0.0;                       // guarded by mu
-    std::atomic<float> rate    { 1.0f };
-    std::atomic<bool>  reverse { false };
-    std::atomic<bool>  loop    { true };
-    std::atomic<bool>  playing { false };
-    std::atomic<bool>  focused { false };
-    std::atomic<float> gain    { 0.5f };
-    std::atomic<double> outRate { 44100.0 };
-    std::atomic<double> posNorm { 0.0 };
-    std::atomic<bool>  syncPend { false };  // armed for bar-synced start
-    std::atomic<bool>  retrig   { false };  // rewind consumed in mixInto
-};
-
-/* Audio thread callback: render the engine, then mix sampler voices over it. */
+/* Audio thread callback: hand every device buffer to the engine. Nothing is
+ * mixed on top; if it were, it would not be in the recording. */
 class EngineCAPlayback final : public juce::AudioIODeviceCallback
 {
 public:
-    void attachVoices (SamplerVoice** v, int n) { voices = v; numVoices = n; }
-
     void audioDeviceIOCallbackWithContext (const float* const* in,
                                            int numInputChannels,
                                            float* const* outputChannelData,
@@ -102,9 +58,6 @@ public:
 private:
     std::vector<int16_t> scratch;           // preallocated in audioDeviceAboutToStart;
                                             //   NEVER resized on the audio thread
-    SamplerVoice** voices = nullptr;
-    int numVoices = 0;
-    unsigned barSeen = ~0u;                 // engine bar counter edge detector
 };
 
 /* WAV recorder: drains the engine's sink ring and writes real audio. */
@@ -146,12 +99,6 @@ public:
         if (deviceErr.isEmpty() && engine.getCurrentAudioDevice() == nullptr)
             deviceErr = "no audio output device";
         formats.registerBasicFormats();
-        for (int i = 0; i < 4; ++i)
-        {
-            voices[i].reset (new SamplerVoice());
-            voicePtrs[(size_t) i] = voices[(size_t) i].get();
-        }
-        callback.attachVoices (voicePtrs.data(), 4);
     }
 
     void start()  { engine.addAudioCallback (&callback); }
@@ -164,9 +111,11 @@ public:
     juce::String deviceError() const { return deviceErr; }
 
     WavRecorder& recorder() { return wav; }
+
+    /* Still here, and still needed: GRAIN MASS decodes a specimen on the
+     * message thread through this before handing the frames to the engine,
+     * which owns no file format reader of its own. */
     juce::AudioFormatManager& getFormats() { return formats; }
-    SamplerVoice* voice (int i) { return (i >= 0 && i < 4) ? voices[(size_t) i].get() : nullptr; }
-    int numVoices() const noexcept { return 4; }
 
 private:
     juce::AudioDeviceManager engine;
@@ -174,6 +123,4 @@ private:
     juce::AudioFormatManager formats;
     EngineCAPlayback callback;
     WavRecorder wav;
-    std::array<std::unique_ptr<SamplerVoice>, 4> voices;
-    std::array<SamplerVoice*, 4> voicePtrs;   // stable for the audio callback
 };

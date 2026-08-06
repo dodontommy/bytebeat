@@ -78,7 +78,8 @@ The instrument is an 8-layer bytebeat synth. Each layer (VOICE 01–08) holds:
 - The panel owns the clip edit model and republishes it to the engine after
   every change, so the song that is drawn is the song that plays. ARM a lane
   and CAPTURE prints that lane's own output for 1/2/4/8 bars from the next
-  bar boundary -- the MASS lane refuses, having no engine-side bus to tap.
+  bar boundary. Every lane captures, the MASS lane included: it refused for as
+  long as the wells were mixed outside the engine and there was no bus to tap.
   PLACE drops the selected LOCKER file on the focused lane at the playhead;
   clips move between bars and lanes, trim by either edge, loop inside their
   window, and delete on right-click.
@@ -94,9 +95,20 @@ The instrument is an 8-layer bytebeat synth. Each layer (VOICE 01–08) holds:
 ## 4. GRAIN MASS (sampler / granular / tape mangling)
 
 - 4 sample slots (wells).
-- **Double-click a well** to load WAV/AIFF/MP3/OGG/FLAC from disk.
-- Per-slot playback: PLAY/STOP, PITCH (A/Z), REVERSE (R), LOOP (O).
-- Samples mix on top of the engine output in real time.
+- **Double-click a well** to load WAV/AIFF/MP3/OGG/FLAC from disk. A drop from
+  the desktop or a drag out of the LOCKER loads one too.
+- Per-slot playback: PLAY/STOP, PITCH (A/Z, one semitone a press, -24..+24),
+  REVERSE (R), LOOP (O), LEVEL (0..256).
+- The wells are ENGINE voices (`bb.well[]`), summed inside `bb_engine_render`
+  beside the LICKS sampler bus. So REC records them, SURVIVOR loops them, the
+  master meter and the scope see them, ARRANGE's lane 9 captures them, and they
+  have a send column into the return bus. Until 2026-08-05 they were four
+  JUCE-side voices mixed on top of the engine after the render returned, which
+  meant they reached the speakers and none of that list -- see R1's note below,
+  which called it in advance.
+- Mono. The engine bus is mono end to end, so a stereo specimen folds to
+  (L+R)/2. Nothing was lost that ever reached disk: the sink has always been
+  mono, so no recording of a well was ever in stereo.
 - Vision: granular slicing, tape-eraser textures, cross-modulation with the
   engine voices.
 
@@ -119,8 +131,9 @@ The engine's REAL master phrase looper, surfaced live:
 - Mute button per channel.
 - Live peak meter per channel + master.
 - **Return bus**: eight return slots, each holding one of four effects
-  (CHAMBER, DELAY, DRIVE, CHOIR), fed by a send matrix of eleven sources --
-  the eight voices, LICKS, the dry master and the return sum. A link grid
+  (CHAMBER, DELAY, DRIVE, CHOIR), fed by a send matrix of twelve sources --
+  the eight voices, LICKS, the dry master, the return sum and the GRAIN MASS
+  well bus. A link grid
   routes returns into each other, and FB PANIC zeroes every link and every
   return level in one gesture, because a grid that can feed a return back
   into itself needs one control that is never in a menu.
@@ -253,8 +266,16 @@ Implementation notes (deviations from the original sketch, decided while
 building):
 - The audio path lives in the engine (not the JUCE `SamplerVoice` class),
   because REC and SURVIVOR capture the engine's master bus — a JUCE-only
-  mixer would sit outside the sink/looper. `SamplerVoice` still powers the
-  GRAIN MASS wells unchanged.
+  mixer would sit outside the sink/looper.
+
+  **That sentence described a live bug for the next several milestones**, and
+  is worth keeping as written for exactly that reason. It ended "`SamplerVoice`
+  still powers the GRAIN MASS wells unchanged" — and `SamplerVoice` WAS the
+  JUCE-only mixer the sentence had just ruled out. The consequence was the one
+  predicted: a GRAIN MASS well could not be recorded or looped. The wells moved
+  onto the engine path on 2026-08-05 and `SamplerVoice` is deleted. A reasoned
+  architectural decision, applied to one of two things it applied to, is how
+  this bug was written down and shipped at the same time.
 - Session "version 5" now persists slot patterns/levels/choke/mute/solo (not
   the sample audio itself).
 - Regression coverage added: one-shot timing/amplitudes, one-shot end, choke
@@ -329,7 +350,7 @@ playhead = blood-red vertical rule. This is the largest single UI effort.
   Add: distortion types, bitcrush, wavefolder, pitch-shifter, delay, reverb
   (convolution), filter (LP/HP/BP), and a **feedback/glitch** module.
 - **Sends**: built, and wider than the sketch. Eight return slots rather than
-  four lettered sends, any of the eleven sources can be dialled into any of
+  four lettered sends, any of the twelve sources can be dialled into any of
   them, and a return can be linked into another return -- the big reverb, the
   big feedback delay and the drive node are all there, and the second reverb
   can feed the first. Four effect types exist (CHAMBER, DELAY, DRIVE, CHOIR);

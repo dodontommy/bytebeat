@@ -47,9 +47,12 @@ so `make` could not link for some time before it was removed.
   `bb_atomic.h` gives C++ a `std::atomic<>` view of the same bytes.
 - `app/` — the JUCE console, and the only front end. `app/AudioEngine.cpp`
   owns JUCE's `AudioDeviceManager`, pushes every hardware buffer straight into
-  `bb_engine_render`, records WAVs off the engine's own sink ring, and mixes
-  the GRAIN MASS `SamplerVoice`s on top under a try-lock (the audio thread
-  never waits for a file load). `app/Main.cpp` is the shell and the 30 Hz
+  `bb_engine_render`, and records WAVs off the engine's own sink ring. It
+  mixes NOTHING on top of the engine, and that is load-bearing rather than
+  incidental: it used to add the GRAIN MASS wells into the device buffers
+  after the render returned, which put them downstream of `bb.sink` and so
+  outside the recorder, the meter, the scope and every looper. Anything
+  audible has to go through `bb_engine_render`. `app/Main.cpp` is the shell and the 30 Hz
   timer; `app/panels/` is one file per workspace, plus `Chrome.cpp` for the
   title bar, tabs, locker, scope, transport and status line, and
   `FieldManual.cpp` for the `?` overlay.
@@ -73,12 +76,18 @@ ctest --preset windows-msvc-relwithdebinfo
 Expect from the suite:
 
 ```text
-2966 historical checks, 41 port checks, 106 return-bus checks, 120 loop-bank checks, 8 gate checks
-all 3241 checks passed (22 sources, session v7, reads v2+)
+2967 historical checks, 41 port checks, 106 return-bus checks, 120 loop-bank checks, 8 gate checks, 31 well checks
+all 3273 checks passed (22 sources, session v7, reads v2+)
 ```
 
 Those groups are counted separately on purpose: each one contains a check that
 exists to notice a specific regression, and a moving total would let it hide.
+
+The historical group moved from 2966 to 2967 when GRAIN MASS went into the
+engine: the check pinning ARRANGE's refusal to capture lane 9 became a check
+that lane 9 captures, and it was joined by one asserting the lane bound past it
+is still enforced. That is the only time that number has moved, and it moved
+because the behaviour it pinned was deliberately changed.
 
 There is no `make`, no `make test`, no `./bytebeat` and no `bytebeat -T`. The
 suite still accepts `-T` so muscle memory and any carried-over CI invocation
@@ -161,11 +170,11 @@ Ten workspace tabs, in tab order (`StageTabs`, `app/panels/Chrome.cpp`):
 | Workspace | What it does |
 |---|---|
 | **RACK** | The voice station. Voice focus (keys 1-8, shift+1-8 toggles a layer), the 22-source grid, 16 curated patches, ROLL/MUTATE, the live expression editor (RETURN compiles; a failed compile keeps the old program running), p0-p7 with roles inferred from the compiled bytecode, the five VOICE DESIGN macros, SCULPT with STEP BACK, the post chain, and the 16-step sequencer with its parameter-lock lane and its **SEQ** switch. |
-| **ARRANGE** | The song timeline: 64 bars, 10 lanes (8 voices, LICKS, MASS), clips scheduled in absolute bars. Per-lane CAPTURE, PLACE from the locker, move/re-lane/trim/loop, ruler click to seek, and its own PLAY/STOP independent of master RUN. `REC: OVERDUB` (`BB_REC_LIVE`) prints everything except the arrangement's own playback, so a take does not stack the backing on every pass. |
+| **ARRANGE** | The song timeline: 64 bars, 10 lanes (8 voices, LICKS, MASS), clips scheduled in absolute bars. Per-lane CAPTURE on every lane, MASS included since the wells moved into the engine. PLACE from the locker, move/re-lane/trim/loop, ruler click to seek, and its own PLAY/STOP independent of master RUN. `REC: OVERDUB` (`BB_REC_LIVE`) prints everything except the arrangement's own playback, so a take does not stack the backing on every pass. |
 | **GRAIN LICKS** | The step sampler: 8 slots × 16 steps on the engine's clock, per-step pitch and velocity, choke groups, mute/solo. One 16-step pattern per slot; there is no pattern bank to switch between. |
-| **GRAIN MASS** | Four sample wells: load anything, pitch it, reverse it, loop it. PLAY ALL starts every well together on the next bar. Mixed on top of the engine by `SamplerVoice`. |
+| **GRAIN MASS** | Four sample wells: load anything, pitch it, reverse it, loop it. PLAY ALL starts every well together on the next bar. The wells are engine voices (`bb.well[]`), summed inside `bb_engine_render` beside the LICKS bus, so REC records them, SURVIVOR loops them, the meter and scope see them and ARRANGE's lane 9 captures them. Loads by double-click, by a drop from the desktop, or by a drag out of the LOCKER. |
 | **SURVIVOR** | The loop bank: six bar-synced loopers. Slot 0 IS the master phrase looper, reached through the bank API by an alias. Slots 1-5 record `BB_LOOP_SRC_LIVE` — the bus at the input of the loop stage, which contains no looper's playback — so layers stack without recording each other. |
-| **MIXER** | Faders, mutes and meters, plus the return bus: eight ad-hoc slots (CHAMBER, DELAY, DRIVE, CHOIR), the 11×8 send matrix and the 8×8 return→return link grid. One live send knob per strip into the focused return, with the full matrix drawn small in the routing dock. Any link that closes a cycle is drawn in blood and named in the footer, because the loop should be visible before it screams. |
+| **MIXER** | Faders, mutes and meters, plus the return bus: eight ad-hoc slots (CHAMBER, DELAY, DRIVE, CHOIR), the 12×8 send matrix (eight voices, LICKS, DRY, WET, MASS) and the 8×8 return→return link grid. One live send knob per strip into the focused return, with the full matrix drawn small in the routing dock. Any link that closes a cycle is drawn in blood and named in the footer, because the loop should be visible before it screams. |
 | **HW/SYNC** | MIDI in, and only what is wired: note on/off trigger and re-pitch the focused voice, CC 1 rides p0. The engine reads no MIDI clock, so this panel shows none. |
 | **EXHUME** | archive.org acquisition: search, audition and fetch into the locker, md5-verified, ffmpeg-transcoded, carrying licence and provenance. It is a faithful port of `tools/exhume.py`; read the script before "simplifying" anything here. |
 | **PLATE** | The visual wing: a watched INTAKE folder, and generation loss as a seeded, reproducible operator chain. It shells out to `tools/degrade.py` rather than owning ffmpeg command construction twice. |

@@ -795,8 +795,19 @@ static void test_arrangement(void)
 
     bb_engine_render(ref, 12000, 1);               /* levels + gain settle */
 
-    test_expect(bb_engine_arr_arm(9, 1, dst, 16000) == -1,
-                "lane 9 (FILE/MASS) capture is refused");
+    /* Lane 9 is the GRAIN MASS well bus. This check pinned a REFUSAL for as
+     * long as the wells were mixed JUCE-side, after bb_engine_render() had
+     * already returned: there was genuinely no engine-side bus to tap and the
+     * refusal was honest. The wells sum beside the LICKS bus now, so the lane
+     * arms like any other, and the cancel puts the capture back to idle for
+     * the argument-validation checks below. Lane 10 is checked in the same
+     * breath because widening the bound from 8 to 9 is exactly the edit that
+     * could have removed the bound instead of moving it. */
+    test_expect(bb_engine_arr_arm(9, 1, dst, 16000) == 0,
+                "lane 9 (GRAIN MASS) captures now the wells are in the engine");
+    bb_engine_arr_cancel();
+    test_expect(bb_engine_arr_arm(ARR_LANES, 1, dst, 16000) == -1,
+                "a lane past the last is still refused");
     test_expect(bb_engine_arr_arm(3, 0, dst, 16000) == -1 &&
                 bb_engine_arr_arm(3, 1, NULL, 16000) == -1 &&
                 bb_engine_arr_arm(3, 1, dst, 0) == -1,
@@ -3924,6 +3935,311 @@ static void test_seq_gate(void)
     bb_engine_reclaim();
 }
 
+/* ---- GRAIN MASS wells -----------------------------------------------------
+ * These could not have existed before the merge. The wells were four JUCE
+ * SamplerVoice objects mixed into the device buffers after bb_engine_render()
+ * returned, and morgue-tests links no JUCE, so there was nothing here to
+ * reach. That is not a footnote: it is the reason "REC does not record a
+ * well" survived as long as it did. Every check below is against bb.sink,
+ * the ring the WAV recorder actually drains.
+ *
+ * A CONSTANT sample is used wherever a check needs exactness. The level ramps
+ * at 32/frame, so any comparison against sample data would be a comparison
+ * against the ramp as well; with a flat sample every settled output frame is
+ * the same number no matter where the play head has got to. */
+/* Render `frames` frames through a scratch buffer of `cap`, in as many passes
+ * as it takes. Several checks below need more frames than any sane stack
+ * buffer holds -- a whole bar at 44100, or eight times a sample's length --
+ * and the engine does not care how the block is divided. */
+static void well_run(int16_t *scratch, int cap, int frames)
+{
+    while (frames > 0) {
+        int n = frames > cap ? cap : frames;
+        bb_engine_render(scratch, n, 1);
+        frames -= n;
+    }
+}
+
+/* The level ramps at 32/frame from 0 to level<<8, so full scale takes 2048
+ * frames. Anything asserting an exact amplitude has to wait for it. */
+#define WELL_SETTLE 4096
+
+static void test_wells(void)
+{
+    const int rate = 44100;
+    const int N = 8192;
+    static int16_t out[4096];
+    const int cap = 4096;
+    const int16_t FLAT = 10000;
+
+    /* ---- the headline: a playing well reaches bb.sink ------------------- */
+    bb_engine_set_defaults();
+    bb_engine_init(rate);
+    atomic_store(&bb.gain, 256);
+    for (int L = 0; L < BB_NLAYER; L++) atomic_store(&bb.layer[L].on, 0);
+    bb_engine_reset_loop();
+
+    /* Baseline: nothing loaded, nothing playing. This is also the check that
+     * an empty GRAIN MASS costs the master bus exactly nothing, which is what
+     * lets the chamber's golden hash survive the new bus. */
+    unsigned w0 = atomic_load(&bb.sink_w);
+    bb_engine_render(out, 512, 1);
+    int base_energy = 0;
+    for (unsigned j = w0; j != atomic_load(&bb.sink_w); j++)
+        if (bb.sink[j & BB_SINK_MASK] != 0) base_energy++;
+    test_expect(base_energy == 0,
+                "an empty GRAIN MASS puts exactly nothing in the sink (%d)",
+                base_energy);
+
+    int16_t *flat = malloc((size_t)N * sizeof(int16_t));
+    test_expect(flat != NULL, "well test buffer allocates");
+    if (flat == NULL) return;
+    for (int i = 0; i < N; i++) flat[i] = FLAT;
+
+    test_expect(bb_engine_well_set(0, flat, N, rate) == 1,
+                "well 0 accepts a published sample buffer");
+    test_expect(bb_engine_well_loaded(0) == 1 &&
+                bb_engine_well_frames(0) == (unsigned)N,
+                "a loaded well reports its frame count");
+
+    WellSlot *w = &bb.well[0];
+    atomic_store(&w->ctl[WELL_CTL_LEVEL], 256);
+    atomic_store(&w->loop, 1);
+    atomic_store(&w->play, 1);
+
+    well_run(out, cap, WELL_SETTLE);   /* let the 32/frame level ramp arrive */
+
+    w0 = atomic_load(&bb.sink_w);
+    bb_engine_render(out, 256, 1);
+    int hits = 0, exact = 0;
+    for (unsigned j = w0; j != atomic_load(&bb.sink_w); j++) {
+        int16_t s = bb.sink[j & BB_SINK_MASK];
+        if (s != 0) hits++;
+        if (s == FLAT) exact++;
+    }
+    test_expect(hits == 256,
+                "every frame of a playing well reaches the sink (%d of 256)",
+                hits);
+    test_expect(exact == 256,
+                "the well arrives at unity level, unaltered (%d of 256)", exact);
+
+    /* The same frames reach the device buffer, so what you hear and what REC
+     * writes are the one signal -- the property that did not hold before. */
+    int agree = 1;
+    for (int i = 0; i < 256; i++) if (out[i] != FLAT) agree = 0;
+    test_expect(agree, "the speaker output and the recorded sink agree");
+
+    /* ---- LEVEL 0 is silent, and is NOT a transport control --------------
+     * A fader must not move the play head. The first shape of well_process()
+     * skipped the whole frame when the level reached 0, copying
+     * sampler_process() where it is harmless because a step-sampler slot is
+     * retriggered to frame 0 on every step. On a free-running well it PAUSED
+     * the specimen: a looping bed pulled down for a bar came back a bar out of
+     * phase with the grid, permanently, and a one-shot held at 0 never reached
+     * its end so its PLAY plate latched on forever. Both are pinned here. */
+    atomic_store(&w->ctl[WELL_CTL_LEVEL], 0);
+    well_run(out, cap, WELL_SETTLE);
+    w0 = atomic_load(&bb.sink_w);
+    int posA = atomic_load(&w->pos);
+    bb_engine_render(out, 256, 1);
+    int silent_energy = 0;
+    for (unsigned j = w0; j != atomic_load(&bb.sink_w); j++)
+        if (bb.sink[j & BB_SINK_MASK] != 0) silent_energy++;
+    int posB = atomic_load(&w->pos);
+    test_expect(silent_energy == 0, "a well at LEVEL 0 is exactly silent (%d)",
+                silent_energy);
+    test_expect(posB != posA,
+                "a well at LEVEL 0 keeps running: it is silenced, not paused "
+                "(%d -> %d)", posA, posB);
+    atomic_store(&w->ctl[WELL_CTL_LEVEL], 256);
+
+    /* And the one-shot consequence: held silent, it must still reach its end
+     * and release the PLAY plate. */
+    atomic_store(&w->ctl[WELL_CTL_LEVEL], 0);
+    atomic_store(&w->loop, 0);
+    atomic_store(&w->play, 1);
+    well_run(out, cap, N * 2);
+    test_expect(atomic_load(&w->play) == 0,
+                "a silent one-shot still ends, so PLAY cannot latch on forever");
+    atomic_store(&w->loop, 1);
+    atomic_store(&w->ctl[WELL_CTL_LEVEL], 256);
+    atomic_store(&w->play, 1);
+    well_run(out, cap, WELL_SETTLE);
+
+    atomic_store(&w->ctl[WELL_CTL_LEVEL], 128);
+    well_run(out, cap, WELL_SETTLE);
+    bb_engine_render(out, 64, 1);
+    test_expect(out[0] == FLAT / 2,
+                "LEVEL 128 of 256 is exactly half scale (%d)", (int)out[0]);
+    atomic_store(&w->ctl[WELL_CTL_LEVEL], 256);
+
+    /* ---- the play head runs forwards, and backwards ---------------------
+     * Direction is asserted through the published playhead rather than the
+     * samples, because a flat sample cannot show which way it is being read
+     * -- which is the whole reason it is flat. */
+    atomic_store(&w->reverse, 0);
+    atomic_store(&w->loop, 1);
+    atomic_store(&w->play, 1);
+    bb_engine_render(out, 1024, 1);            /* 1/8 of the way in          */
+    int fwd_a = atomic_load(&w->pos);
+    bb_engine_render(out, 256, 1);
+    int fwd_b = atomic_load(&w->pos);
+    test_expect(fwd_b > fwd_a,
+                "the playhead runs forwards while a well plays (%d -> %d)",
+                fwd_a, fwd_b);
+
+    atomic_store(&w->reverse, 1);
+    bb_engine_render(out, 128, 1);
+    int rev_a = atomic_load(&w->pos);
+    bb_engine_render(out, 128, 1);
+    int rev_b = atomic_load(&w->pos);
+    test_expect(rev_b < rev_a,
+                "REVERSE turns the head round where it stands (%d -> %d)",
+                rev_a, rev_b);
+    test_expect(atomic_load(&w->play) == 1,
+                "a looping well played backwards does not stop at the top");
+    atomic_store(&w->reverse, 0);
+
+    /* ---- PLAY ALL fires on the bar --------------------------------------
+     * The transport's bar is whatever the tempo makes it, so this renders
+     * until the bar counter actually moves rather than guessing a frame
+     * count. That is also the point of the check: the arm must survive until
+     * the boundary and fire ON it, not at the top of whichever block happens
+     * to notice. */
+    atomic_store(&w->play, 0);
+    atomic_store(&w->arm, 1);
+    unsigned bar0 = atomic_load(&bb.bar);
+    for (int guard = 0; guard < 64 && atomic_load(&bb.bar) == bar0; guard++)
+        bb_engine_render(out, cap, 1);
+    test_expect(atomic_load(&bb.bar) != bar0, "the transport crossed a bar");
+    test_expect(atomic_load(&w->play) == 1,
+                "an armed well starts on the bar and publishes PLAY");
+    test_expect(atomic_load(&w->arm) == 0, "firing consumes the arm");
+
+    /* ---- a one-shot stops itself and says so ---------------------------- */
+    atomic_store(&w->loop, 0);
+    atomic_store(&w->play, 1);
+    well_run(out, cap, N * 2);         /* twice the sample: it must run out  */
+    test_expect(atomic_load(&w->play) == 0,
+                "a non-looping well clears PLAY when it reaches the end");
+
+    w0 = atomic_load(&bb.sink_w);
+    bb_engine_render(out, 256, 1);
+    int after_end = 0;
+    for (unsigned j = w0; j != atomic_load(&bb.sink_w); j++)
+        if (bb.sink[j & BB_SINK_MASK] != 0) after_end++;
+    test_expect(after_end == 0, "a finished one-shot is silent (%d)", after_end);
+
+    /* PLAY ALWAYS SOUNDS. The head is parked past the end here, so without the
+     * rising-edge rewind in well_snapshot() the bounds test swallows play on
+     * the very first frame and the well refuses to restart -- a silent
+     * regression, because everything about the well still LOOKS armed. The
+     * deleted JUCE SamplerVoice::play() carried this rewind; it was dropped on
+     * the way into the engine and this check is why that did not survive. */
+    atomic_store(&w->play, 1);
+    w0 = atomic_load(&bb.sink_w);
+    well_run(out, cap, 512);
+    int restart = 0;
+    for (unsigned j = w0; j != atomic_load(&bb.sink_w); j++)
+        if (bb.sink[j & BB_SINK_MASK] != 0) restart++;
+    test_expect(restart > 0,
+                "PLAY restarts a one-shot that had run out (%d frames)", restart);
+    atomic_store(&w->play, 0);
+
+    /* ---- a looping well does not stop --------------------------------- */
+    atomic_store(&w->loop, 1);
+    atomic_store(&w->play, 1);
+    well_run(out, cap, N * 4);         /* four times round the sample        */
+    test_expect(atomic_load(&w->play) == 1, "a looping well keeps running");
+    bb_engine_render(out, 64, 1);
+    test_expect(out[63] == FLAT, "a looping well is still at level after wrap");
+
+    /* ---- ARRANGE lane 9 captures the well bus ---------------------------
+     * The lane the panel refused for as long as there was no bus to tap. */
+    static int16_t lane9[8192];
+    bb_engine_arr_cancel();
+    test_expect(bb_engine_arr_arm(9, 1, lane9, 8192) == 0,
+                "lane 9 arms against the well bus");
+    bb_engine_arr_cancel();
+
+    /* ---- a load into a REVERSED well starts at the END -------------------
+     * Frame 0 is where a backwards specimen FINISHES. The buffer-swap rewind
+     * used to reset to 0 regardless of direction, so loading into a reversed
+     * non-looping well played exactly one frame and stopped -- and the
+     * rising-edge rewind could not save it, because frame 0 is in range. */
+    {
+        int16_t *revbuf = malloc((size_t)N * sizeof(int16_t));
+        test_expect(revbuf != NULL, "reverse-load buffer allocates");
+        if (revbuf != NULL) {
+            for (int i = 0; i < N; i++) revbuf[i] = FLAT;
+            atomic_store(&w->play, 0);
+            atomic_store(&w->reverse, 1);
+            atomic_store(&w->loop, 0);
+            atomic_store(&w->ctl[WELL_CTL_LEVEL], 256);
+            test_expect(bb_engine_well_set(0, revbuf, N, rate) == 1,
+                        "the reverse-load specimen publishes");
+            atomic_store(&w->play, 1);
+            bb_engine_render(out, 256, 1);      /* 1/32 of the way back */
+            test_expect(atomic_load(&w->pos) > 49152,
+                        "a reversed well starts at the END of the specimen (%d)",
+                        atomic_load(&w->pos));
+            well_run(out, cap, N / 2);
+            test_expect(atomic_load(&w->play) == 1,
+                        "a reversed one-shot does not end one frame after loading");
+            atomic_store(&w->reverse, 0);
+            atomic_store(&w->loop, 1);
+            atomic_store(&w->play, 0);
+        }
+    }
+
+    /* ---- swapping the sample under a running well ----------------------- */
+    int16_t *shorter = malloc(16 * sizeof(int16_t));
+    test_expect(shorter != NULL, "well swap buffer allocates");
+    if (shorter != NULL) {
+        for (int i = 0; i < 16; i++) shorter[i] = FLAT;
+        test_expect(bb_engine_well_set(0, shorter, 16, rate) == 1,
+                    "a well accepts a replacement sample while running");
+        bb_engine_render(out, 512, 1);
+        test_expect(bb_engine_well_frames(0) == 16u,
+                    "the replacement's length is what the engine reports");
+    }
+
+    /* ---- the pool's ownership contract ---------------------------------- */
+    test_expect(bb_engine_well_set(99, NULL, 0, rate) == 0,
+                "a bad well index is refused");
+    int16_t *doomed = malloc(8 * sizeof(int16_t));
+    if (doomed != NULL)
+        test_expect(bb_engine_well_set(0, doomed, 8, 0) == 0,
+                    "a bad rate is refused (and the buffer is freed, not leaked)");
+    bb_engine_well_clear(0);
+    test_expect(bb_engine_well_loaded(0) == 0 &&
+                bb_engine_well_frames(0) == 0u,
+                "a cleared well reports empty");
+    bb_engine_reclaim();
+
+    /* ---- the controls survive a session, and the sample does not --------
+     * Deliberate: persisting a path here would mean persisting an ABSOLUTE
+     * one, which is the defect aclip already carries. */
+    bb_engine_set_defaults();
+    WellSlot *w1 = &bb.well[1];
+    atomic_store(&w1->ctl[WELL_CTL_LEVEL], 77);
+    atomic_store(&w1->ctl[WELL_CTL_PITCH], -19);
+    atomic_store(&w1->loop, 0);
+    atomic_store(&w1->reverse, 1);
+    atomic_store(&w1->play, 1);
+    test_expect(bb_config_save() == 0, "a session with well controls saves");
+
+    bb_engine_set_defaults();
+    test_expect(bb_config_load() == 1, "that session loads");
+    test_expect(atomic_load(&w1->ctl[WELL_CTL_LEVEL]) == 77 &&
+                atomic_load(&w1->ctl[WELL_CTL_PITCH]) == -19 &&
+                atomic_load(&w1->loop) == 0 &&
+                atomic_load(&w1->reverse) == 1,
+                "well controls survive a session round-trip");
+    test_expect(atomic_load(&w1->play) == 0,
+                "a restored well is NOT playing, having no sample to play");
+}
+
 static int self_test_mode(void)
 {
     test_checks = test_failures = 0;
@@ -3977,14 +4293,23 @@ static int self_test_mode(void)
     int loopbank = test_checks - historical - port - retbus;
     test_seq_gate();
 
+    /* Counted separately for the fifth time and the same reason. The check
+     * that matters in here is the one asserting a playing well reaches
+     * bb.sink: for the whole life of GRAIN MASS it did not, and nothing in the
+     * suite could have noticed, because the wells were mixed on the JUCE side
+     * and morgue-tests links no JUCE. A total that moved for an unrelated
+     * reason must never be able to hide it again. */
+    int gate = test_checks - historical - port - retbus - loopbank;
+    test_wells();
+
     if (test_failures) {
         fprintf(stderr, "%d of %d checks failed\n", test_failures, test_checks);
         return 1;
     }
     printf("%d historical checks, %d port checks, %d return-bus checks, "
-           "%d loop-bank checks, %d gate checks\n",
-           historical, port, retbus, loopbank,
-           test_checks - historical - port - retbus - loopbank);
+           "%d loop-bank checks, %d gate checks, %d well checks\n",
+           historical, port, retbus, loopbank, gate,
+           test_checks - historical - port - retbus - loopbank - gate);
     printf("all %d checks passed (%d sources, session v7, reads v2+)\n",
            test_checks, rack_nsrc());
     return 0;

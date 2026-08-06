@@ -2,9 +2,11 @@
  * serial N.72-0420, LIVE).
  *
  * 2x2 grid of SampleWell components separated by 1px HAIRLINE. Each well
- * loads a real file into its SamplerVoice (AudioEngine) and plays it over
- * the engine. Keys: 1-4 select, P play/stop, A/Z pitch, R reverse, O loop.
- * Double-click a well (or drop an audio file on it) to load.
+ * decodes a real file on the message thread and publishes it to the engine's
+ * well pool (bb_engine_well_set); the audio is summed INSIDE bb_engine_render,
+ * so REC records it and SURVIVOR loops it. Keys: 1-4 select, P play/stop, A/Z
+ * pitch, R reverse, O loop. Double-click a well, drop an audio file on it, or
+ * drag one out of the LOCKER to load.
  */
 
 #pragma once
@@ -22,6 +24,7 @@ namespace morgue
 
 class GrainMassPanel : public juce::Component,
                        public juce::FileDragAndDropTarget,
+                       public juce::DragAndDropTarget,
                        private juce::Timer
 {
 public:
@@ -36,12 +39,18 @@ public:
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
+    /* The LOCKER's internal drag. GRAIN LICKS has always accepted one; the
+     * wells accepted only a drag from the desktop, so the same file behaved
+     * differently depending on which browser you dragged it out of. */
+    bool isInterestedInDragSource (const SourceDetails&) override;
+    void itemDropped (const SourceDetails&) override;
+
 private:
     class SampleWell;
 
     void timerCallback() override;
     void select (int well);                     // focus a well (keys act on it)
-    void loadInto (int well);                   // async chooser -> SamplerVoice
+    void loadInto (int well);                   // async chooser -> engine pool
     void loadFileInto (int well, const juce::File&);
     juce::Rectangle<int> gridArea() const;
     juce::Rectangle<int> wellRect (int i) const;

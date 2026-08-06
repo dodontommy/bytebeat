@@ -703,7 +703,17 @@ void LicksPanel::loadPath (int s, const juce::File& f)
 
     const int len = (int) r->lengthInSamples;
     juce::AudioBuffer<float> tmp (2, len);
-    r->read (&tmp, 0, len, 0, true, true);
+
+    /* CLEAR IT, AND CHECK THE READ -- see the same block in
+     * GrainMassPanel::loadFileInto. juce::AudioBuffer does not zero on
+     * construction and AudioFormatReader::read() does not zero on failure, so
+     * a truncated file otherwise loads uninitialised heap as a sample and
+     * sequences it into the master bus at full scale. This bug was found in
+     * the wells, which had copied this loader verbatim; it was already here. */
+    tmp.clear();
+    if (! r->read (&tmp, 0, len, 0, true, true))
+        return;
+
     int16_t* mono = (int16_t*) calloc ((size_t) len, sizeof (int16_t));
     if (mono == nullptr) return;
 

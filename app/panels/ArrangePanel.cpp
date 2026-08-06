@@ -150,7 +150,7 @@ ArrangePanel::ArrangePanel()
     trimBtn.setTooltip   (U8 ("TRIM - resize clips. Drag a clip's left or right "
                               "edge; whole bars, minimum 1."));
     armBtn.setTooltip    (U8 ("ARM LANE - arm the focused lane for capture. One "
-                              "lane at a time; the MASS lane cannot be armed."));
+                              "lane at a time."));
     captureBtn.setTooltip (U8 ("CAPTURE - record the armed lane's output for the "
                                "set bars, starting at the next bar boundary. "
                                "Click again to cancel."));
@@ -180,11 +180,9 @@ ArrangePanel::ArrangePanel()
 
     armBtn.onToggle = [this] (bool on)
     {
-        if (focusedLane >= kNumLanes - 1)          // MASS lane: engine refuses
-        {
-            armBtn.setToggleStateQuiet (false);
-            return;
-        }
+        /* The MASS lane used to be refused here, mirroring an engine refusal
+         * that was honest at the time: the wells were mixed JUCE-side, after
+         * the render returned, so lane 9 had no bus to tap. It has one now. */
         if (on)                        armedLane = focusedLane;
         else if (armedLane == focusedLane) armedLane = -1;
         refreshToolbarState();
@@ -552,7 +550,7 @@ void ArrangePanel::startOrCancelCapture()
         return;
     }
 
-    if (armedLane < 0 || armedLane >= kNumLanes - 1)   // needs an armed lane; MASS refused
+    if (armedLane < 0 || armedLane >= kNumLanes)       // needs an armed lane
         return;
     if ((int) clips.size() >= ARR_MAX_CLIPS)
         return;
@@ -1025,8 +1023,14 @@ void ArrangePanel::paintLanes (juce::Graphics& g, Rectangle<int> area)
         }
         else
         {
+            /* The MASS lane's lamp used to be hard-wired dark, because the
+             * wells were a GUI-side mixer the engine knew nothing about and
+             * there was no state to read. There is now: the lane lights when
+             * any well is sounding, like every other lane on the panel. */
             kindTag = "SMPL";
-            on = false;                    // GUI-side sampler; no engine state
+            on = false;
+            for (int wi = 0; wi < BB_NWELL; ++wi)
+                if (atomic_load (&bb.well[wi].play)) { on = true; break; }
         }
 
         const bool armed = (L == armedLane);

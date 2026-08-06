@@ -14,8 +14,8 @@ cmake --build --preset windows-msvc-relwithdebinfo
 ctest  --preset windows-msvc-relwithdebinfo
 ```
 
-Expect: `2966 historical checks, 41 port checks, 106 return-bus checks, 120
-loop-bank checks, 8 gate checks / all 3241 checks passed`.
+Expect: `2967 historical checks, 41 port checks, 106 return-bus checks, 120
+loop-bank checks, 8 gate checks, 31 well checks / all 3273 checks passed`.
 
 Windows needs VS 2022 **17.5+** (C11 atomics) and a **short build directory** —
 JUCE's intermediate paths are long enough that a deep one exceeds `MAX_PATH`
@@ -78,7 +78,7 @@ submodule absent.
 |---|---|
 | Cross-platform | Windows/MSVC, macOS/Clang, Linux/gcc **and** clang. CI matrix in `.github/workflows/build.yml`. |
 | Loop bank | Six bar-synced loopers. Satellites record `LIVE` — never another looper. |
-| Return bus | Eight ad-hoc slots (CHAMBER/DELAY/DRIVE/CHOIR), 11×8 send matrix, 8×8 link grid, per-slot limiter. Every link one sample old. |
+| Return bus | Eight ad-hoc slots (CHAMBER/DELAY/DRIVE/CHOIR), 12×8 send matrix, 8×8 link grid, per-slot limiter. Every link one sample old. |
 | Arrangement | Own PLAY/STOP; `BB_REC_LIVE` records without printing the arrangement into the take. |
 | EXHUME | archive.org search/audition/fetch, md5-verified, ffmpeg transcode, provenance + clearance. |
 | PLATE | Watched INTAKE folder, seeded reproducible generation loss via ffmpeg. |
@@ -87,44 +87,31 @@ submodule absent.
 | UI | Contrast fixed by measurement; every dead control and fake meter removed. |
 | One front end | The ncurses/ALSA terminal instrument is deleted. The JUCE GUI is the only front end; the engine is a static lib both it and the suite link. |
 | RACK SEQ | The 16-step grid has a switch. Without it a layer whose `seq_on` was clear had a sixteen-cell editor that could never fire. |
+| One sampler path | GRAIN MASS wells are engine voices (`bb.well[]`), summed beside the LICKS bus. `SamplerVoice` is deleted and nothing mixes on top of `bb_engine_render` any more. REC records a well, SURVIVOR loops it, ARRANGE lane 9 captures it, and it has a MASS column in the send matrix. |
 
 ---
 
 ## What is NOT done, roughly in the order I would do it
 
-### 1. EXPORT / stem rendering (R6), and the sampler merge it depends on
+### 1. EXPORT / stem rendering (R6)
 The sheet honestly says the engine cannot do it. It is the last big **missing**
-feature rather than a broken one. Render each voice, slot and return in
+feature rather than a broken one. Render each voice, slot, well and return in
 isolation offline — `bb_engine_render_specimen_voice()` and the per-lane
 capture path are the precedents. This is what gets a finished record out.
 
-**Do the sampler merge first, because a stem cannot be rendered for a source
-the engine has never heard of.** There are two sampler implementations today:
-
-- GRAIN LICKS loads through `bb_engine_sampler_set()` into the engine's
-  `g_smp_*` slots, so its audio is inside `bb_engine_render()` and therefore
-  inside `bb.sink`.
-- GRAIN MASS loads into four JUCE-side `SamplerVoice` objects whose
-  `mixInto()` adds straight into the device's float buffers *after* the render
-  loop returns, and never touches `bb.sink`.
-
-Everything downstream reads `bb.sink` — the recorder, the master meter, the
-scope, and the loop bank's capture of the pre-master bus. So a GRAIN MASS well
-is audible and nothing else: **REC does not record it and SURVIVOR cannot loop
-it.** That is a live bug, not just an architectural wart, and on a loop-layering
-workflow it is the expensive kind. DESIGN_SPEC's R1 notes predicted it exactly
-— the step sampler's audio was put in the engine "because REC and SURVIVOR
-capture the engine's master bus; a JUCE-only mixer would sit outside the
-sink/looper" — and GRAIN MASS is the JUCE-only mixer that sentence describes.
-
-Move the wells onto the engine sampler, then render stems.
+The sampler merge this used to depend on is **done** (2026-08-05): the GRAIN
+MASS wells are engine voices now, so there is a source for the engine to render
+a stem of. See "What is done" above.
 
 ### 1b. Condense the console, 10 tabs → 6
 Decided 2026-08-05. Ten workspaces is more than the instrument has ideas, and
-three of the overlaps are real code duplication rather than similar-looking
-screens: two samplers (above), three separate channel-strip implementations
-(MIXER faders, LICKS per-slot level/mute/solo, GRAIN MASS per-well LEVEL), and
-two acquisition panels that are not audio-path panels at all.
+the overlaps are real code duplication rather than similar-looking screens:
+three separate channel-strip implementations (MIXER faders, LICKS per-slot
+level/mute/solo, GRAIN MASS per-well LEVEL) and two acquisition panels that are
+not audio-path panels at all. The two SAMPLERS that used to head this list are
+now one audio path, which is what makes the rest of it safe to do: a MIXER
+strip for a well can finally read the same meter, in the same units, as the
+strip beside it.
 
 Target shape: **one SAMPLER** (wells and pattern grid as two views of the same
 engine slots), **MIXER as the only place a level lives** — voices, sampler
@@ -144,6 +131,11 @@ point Syncthing or an external SSD at it. Content-addressed storage, an S3
 vtable and a merge UI are the right answer to a problem that does not exist
 yet. Two real bugs to fix in passing: `aclip` stores absolute paths, and
 GRAIN MASS well filenames and sampler slot names never touch disk at all.
+
+Well CONTROLS (level, pitch, loop, reverse, mute) now persist as `well` lines.
+The sample PATH deliberately does not, and this is the place to add it: writing
+one today would mean writing an absolute one, which is the very defect `aclip`
+already has. One absolute path in a session file is a bug; two is a migration.
 
 ### 3. Desktop / window audio capture
 Windows is tractable: WASAPI process loopback (Win10 20H1+) captures a specific
@@ -208,6 +200,16 @@ R3 automation lanes, R9 undo/project versions. Both real, neither blocking.
   omitted `bb_platform.o` while `engine.c` called `bb_now_us()` ten times. A
   second build system that no one runs and CI does not cover rots in silence
   and then gets cited in a decision as though it worked.
+- **A decision applied to one of the two things it applied to.** R1's notes
+  put the step sampler's audio in the engine "because REC and SURVIVOR capture
+  the engine's master bus; a JUCE-only mixer would sit outside the
+  sink/looper", and then left GRAIN MASS as a JUCE-only mixer. The reasoning
+  was right, written down, and half-applied, so the bug shipped with its own
+  explanation attached and survived several milestones — audible on the
+  speakers, absent from every recording. The suite could not have caught it:
+  `morgue-tests` links no JUCE, so the wells were literally unreachable from
+  the only thing that checks anything. **If a rule explains why a subsystem
+  belongs somewhere, check every subsystem it names.**
 - **Deleting a file orphans the comments that point at it.** The pitch table in
   `engine.c` said "see audio.c's comment" — and `audio.c` had never contained
   it. A cross-reference nothing checks is a claim nothing checks. Inline the

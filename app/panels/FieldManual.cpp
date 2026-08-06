@@ -66,7 +66,7 @@ static const ZoneCard zones[] =
     { "03", "ARRANGE",     Badge::CANVAS,  "CANVAS",
       "Song timeline. Bars across, lanes down. Clips, one armed lane at a time for recording, automation. Playhead is the engine clock." },
     { "04", "GRAIN MASS",  Badge::LIVE,    "LIVE",
-      "Four sample wells. Load, play, pitch, reverse, loop. Mixes on top of the engine in real time. Keys act on the selected well." },
+      "Four sample wells. Load, play, pitch, reverse, loop. Inside the master bus, so REC records them and SURVIVOR loops them. Keys act on the selected well." },
     { "05", "GRAIN LICKS", Badge::LIVE,    "LIVE",
       "Step sampler. One sample per slot, one 16-step pattern per slot, choke groups. This is how you make a beat." },
     { "06", "SURVIVOR",    Badge::LIVE,    "LIVE",

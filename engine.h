@@ -119,6 +119,24 @@ int  bb_engine_sampler_loaded(int slot);
  * patterns but not sample memory. */
 void bb_engine_demo_kit_samples(void);
 
+/* ---- GRAIN MASS well pool -------------------------------------------------
+ * The four free-running sample players (bb.well[], bytebeat.h). Identical
+ * ownership rules to the step-sampler pool above, including the unconditional
+ * transfer: `mono` must be malloc'd, and bb_engine_well_set() frees it on
+ * EVERY failure path as well as owning it on success, so never free it
+ * yourself and never touch it after the call. Reclaimed by the same per-frame
+ * bb_engine_reclaim().
+ *
+ * There is no transport API here on purpose. Play, stop, loop, reverse, level,
+ * pitch and the bar-synced arm are plain atomics in bb.well[i], written
+ * directly by the panel exactly as bb.sampler[i] is -- adding setter functions
+ * would be a second way to say the same thing, and the two would drift. */
+int  bb_engine_well_set(int well, int16_t *mono, int n, int rate);
+void bb_engine_well_clear(int well);
+void bb_engine_well_reclaim(void);      /* UI thread, per frame */
+int  bb_engine_well_loaded(int well);
+unsigned bb_engine_well_frames(int well);
+
 /* ---- R2 arrangement timeline (the song) -----------------------------------
  * The song is a flat list of clips scheduled in ABSOLUTE BARS against the
  * same monotonic bar counter the transport publishes (bb.bar). Ten lanes:
@@ -210,8 +228,8 @@ int  bb_engine_rec_src_get(void);
 
 /* Arm per-lane capture: at the NEXT bar boundary the render loop starts
  * copying the post-fader mono contribution of `lane` (voice lanes: the
- * voice's summed contribution; lane 8: the sampler-bus premix; lane 9:
- * refused, returns -1) into `dst`, one int16 per frame, for `bars` whole
+ * voice's summed contribution; lane 8: the LICKS sampler bus; lane 9: the
+ * GRAIN MASS well bus) into `dst`, one int16 per frame, for `bars` whole
  * bars or until `cap` frames run out. `dst` is UI-owned and preallocated --
  * the engine never frees it, and it must outlive the capture. Progress is
  * published in bb.arr_rec_status (ARR_REC_ARMED -> RECORDING -> DONE) and
@@ -241,7 +259,7 @@ void bb_engine_arr_cancel(void);
 ArrClipBuf *bb_engine_loop_clip(int slot, unsigned *bars_out);
 
 /* ---- THE RETURN BUS -------------------------------------------------------
- * Eight pre-allocated return slots (bb.ret[], bytebeat.h), an 11 x 8 send
+ * Eight pre-allocated return slots (bb.ret[], bytebeat.h), a 12 x 8 send
  * matrix and an 8 x 8 return->return link matrix. bb_engine_render() may not
  * allocate, so "create" and "destroy" are a TYPE CHANGE over the fixed array,
  * not an allocation: the DSP arenas exist from load and never move.
