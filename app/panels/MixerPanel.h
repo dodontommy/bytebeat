@@ -6,10 +6,19 @@
  * dead RETURN B strip -- is GONE. Every control on this panel now moves an
  * engine value; nothing is painted that cannot be touched.
  *
- * THE PROBLEM THIS LAYOUT SOLVES. The engine exposes an 12 x 8 send matrix
- * (8 voices + LICKS + DRY master + WET feedback row, into 8 return slots)
- * plus an 8 x 8 return->return link matrix. Eighty-eight send knobs and
- * sixty-four link knobs is not a mixer, it is a punch card. So:
+ * THE PROBLEM THIS LAYOUT SOLVES. The engine exposes a 12 x 8 send matrix
+ * (8 voices + LICKS + DRY master + WET feedback row + the GRAIN MASS well bus,
+ * into 8 return slots) plus an 8 x 8 return->return link matrix. Ninety-six
+ * send knobs and sixty-four link knobs is not a mixer, it is a punch card. So:
+ *
+ * NOTE, AND IT IS THE NEXT JOB ON THIS PANEL: MASS is a source in the matrix
+ * but it has NO CHANNEL STRIP, so the only way to dial a well into a return is
+ * to click a cell in the small grid in the routing dock. Every other source
+ * has a strip with a fader, a meter and a live send knob. That asymmetry is
+ * the thing the console condense is meant to remove -- one strip grammar over
+ * voices, sampler slots, wells and returns -- and the wells can now hold up
+ * their end of it, having a real 0..256 level and a real peak since they moved
+ * into the engine.
  *
  *   FOCUSED RETURN. Exactly one return slot is focused at a time. Every
  *   channel strip carries ONE live send knob, and it sends into the focused
@@ -133,14 +142,14 @@ private:
     void refreshChildren();                     // push snapshot -> controls
 
     /* ==================================================================== */
-    /*  Channel strip: 8 voices + LICKS + MASTER. Returns are NOT strips     */
-    /*  any more -- they live in the rack, because eight of them would eat   */
-    /*  the console.                                                         */
+    /*  Channel strip: 8 voices + LICKS + MASS + MASTER. Returns are NOT      */
+    /*  strips any more -- they live in the rack, because eight of them would */
+    /*  eat the console.                                                      */
     /* ==================================================================== */
     class Strip : public juce::Component
     {
     public:
-        enum class Kind { Voice, Licks, Master };
+        enum class Kind { Voice, Licks, Mass, Master };
 
         Strip (MixerPanel& owner, Kind k, int layerIndex, int sendSource);
 

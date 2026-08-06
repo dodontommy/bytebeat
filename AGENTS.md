@@ -76,8 +76,8 @@ ctest --preset windows-msvc-relwithdebinfo
 Expect from the suite:
 
 ```text
-2967 historical checks, 41 port checks, 106 return-bus checks, 120 loop-bank checks, 8 gate checks, 31 well checks
-all 3273 checks passed (22 sources, session v7, reads v2+)
+2967 historical checks, 41 port checks, 106 return-bus checks, 120 loop-bank checks, 8 gate checks, 47 well checks
+all 3289 checks passed (22 sources, session v7, reads v2+)
 ```
 
 Those groups are counted separately on purpose: each one contains a check that
@@ -174,7 +174,7 @@ Ten workspace tabs, in tab order (`StageTabs`, `app/panels/Chrome.cpp`):
 | **GRAIN LICKS** | The step sampler: 8 slots × 16 steps on the engine's clock, per-step pitch and velocity, choke groups, mute/solo. One 16-step pattern per slot; there is no pattern bank to switch between. |
 | **GRAIN MASS** | Four sample wells: load anything, pitch it, reverse it, loop it. PLAY ALL starts every well together on the next bar. The wells are engine voices (`bb.well[]`), summed inside `bb_engine_render` beside the LICKS bus, so REC records them, SURVIVOR loops them, the meter and scope see them and ARRANGE's lane 9 captures them. Loads by double-click, by a drop from the desktop, or by a drag out of the LOCKER. |
 | **SURVIVOR** | The loop bank: six bar-synced loopers. Slot 0 IS the master phrase looper, reached through the bank API by an alias. Slots 1-5 record `BB_LOOP_SRC_LIVE` — the bus at the input of the loop stage, which contains no looper's playback — so layers stack without recording each other. |
-| **MIXER** | Faders, mutes and meters, plus the return bus: eight ad-hoc slots (CHAMBER, DELAY, DRIVE, CHOIR), the 12×8 send matrix (eight voices, LICKS, DRY, WET, MASS) and the 8×8 return→return link grid. One live send knob per strip into the focused return, with the full matrix drawn small in the routing dock. Any link that closes a cycle is drawn in blood and named in the footer, because the loop should be visible before it screams. |
+| **MIXER** | Eleven strips — eight voices, the LICKS bus, the MASS well bus and MASTER — each with a fader, mute, meter and one live send into the focused return. Plus the return bus: eight ad-hoc slots (CHAMBER, DELAY, DRIVE, CHOIR), the 12×8 send matrix (eight voices, LICKS, DRY, WET, MASS) and the 8×8 return→return link grid. One live send knob per strip into the focused return, with the full matrix drawn small in the routing dock. Any link that closes a cycle is drawn in blood and named in the footer, because the loop should be visible before it screams. |
 | **HW/SYNC** | MIDI in, and only what is wired: note on/off trigger and re-pitch the focused voice, CC 1 rides p0. The engine reads no MIDI clock, so this panel shows none. |
 | **EXHUME** | archive.org acquisition: search, audition and fetch into the locker, md5-verified, ffmpeg-transcoded, carrying licence and provenance. It is a faithful port of `tools/exhume.py`; read the script before "simplifying" anything here. |
 | **PLATE** | The visual wing: a watched INTAKE folder, and generation loss as a seeded, reproducible operator chain. It shells out to `tools/degrade.py` rather than owning ffmpeg command construction twice. |

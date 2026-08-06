@@ -126,8 +126,10 @@ The engine's REAL master phrase looper, surfaced live:
 
 ## 6. MIXER (levels + routing)
 
-- 8 channel faders (voice level 0–256) + MASTER fader, plus a LICKS strip
-  whose SEND is live but whose level, mute and meter are still an engine gap.
+- 8 channel faders (voice level 0–256) + MASTER fader, plus a LICKS strip and
+  a MASS strip. Both sampler buses carry a real level, mute, meter and send —
+  the LICKS strip used to be drawn with an empty trough because the engine had
+  no bus level for it, and GRAIN MASS had no strip at all.
 - Mute button per channel.
 - Live peak meter per channel + master.
 - **Return bus**: eight return slots, each holding one of four effects
@@ -223,7 +225,8 @@ move/trim/loop/delete, song transport; automation strip display-only) ·
 GRAIN MASS: live (load/play/pitch/reverse/loop) · STEPS: live (8 slots × 16
 steps, per-step pitch/velocity, level, choke groups, mute/solo) · SURVIVOR:
 live · MIXER: live (fader/mute/meter, send matrix, eight-slot return bus and
-link grid; no pan, no solo, no LICKS level) · HW/SYNC: live (note+CC) ·
+link grid, LICKS and MASS bus strips; no pan, no solo, no per-channel
+inserts) · HW/SYNC: live (note+CC) ·
 TRANSPORT: live · SCOPE: live · STATUS: live · FIELD MANUAL: live.
 
 ---

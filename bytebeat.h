@@ -564,6 +564,35 @@ struct bb_state {
     BB_ATOMIC(int)   smp_send;      /* LICKS sampler-bus send, 0..255        */
     BB_ATOMIC(int)   verb_peak;     /* return abs peak for the RETURN A meter */
 
+    /* --- THE TWO SAMPLER BUSES -------------------------------------------
+     * A bus fader, mute and meter for GRAIN LICKS and for GRAIN MASS, so both
+     * can carry a MIXER strip that behaves like the eight voice strips beside
+     * them rather than an emptied-out one.
+     *
+     * These exist because the MIXER used to draw a LICKS strip with an empty
+     * trough and no meter -- honest about the gap, which is why the panel's
+     * badge said PARTIAL, but still a strip you could not mix with. GRAIN MASS
+     * had no strip at all: it became a send SOURCE when the wells moved into
+     * the engine, reachable only by dragging a cell in the small matrix.
+     *
+     * 256 IS UNITY AND IS THE DEFAULT, and the level is applied as
+     * `(bus * lvl) >> 16` with lvl in Q16, so at unity the arithmetic is
+     * exactly the identity on int32 and a session that never touches either
+     * fader renders bit-identically to the engine that had no faders. The
+     * smoothing ramp is SNAPPED to its target by bb_engine_init() rather than
+     * ramped up from zero, for the reason g_ret_fade carries the same rule:
+     * ramping in would make the first ~46 ms of every session differ and the
+     * chamber's golden hash would fail for a reason that looks like DSP.
+     *
+     * Both are POST-FADER taps, like the voices: the send, the looper source
+     * and the ARRANGE lane capture all see the level. */
+    BB_ATOMIC(int)   smp_level;     /* LICKS bus level, 0..256, 256 = unity  */
+    BB_ATOMIC(int)   smp_mute;
+    BB_ATOMIC(int)   smp_peak;      /* post-fader abs peak, read-and-clear   */
+    BB_ATOMIC(int)   mass_level;    /* GRAIN MASS bus level, 0..256          */
+    BB_ATOMIC(int)   mass_mute;
+    BB_ATOMIC(int)   mass_peak;     /* post-fader abs peak, read-and-clear   */
+
     /* --- the return bus (slot 0 IS the CHAMBER above; see `Return`) ----- */
     Return ret[BB_NRET];
 

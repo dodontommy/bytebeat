@@ -225,10 +225,51 @@ MixerPanel::Strip::Strip (MixerPanel& owner, Kind k, int layerIndex, int sendSou
     }
     else
     {
-        /* engine gap: the sampler bus has no level, mute or peak. The strip
-         * is drawn at its documented value and its trough stays empty --
-         * only the SEND is live. */
-        name = "LICKS"; value = 200; drawnDb = "\xe2\x88\x92" "4.7";
+        /* THE TWO SAMPLER BUSES. Both are ordinary strips now.
+         *
+         * LICKS used to be the one strip on this panel that could not be
+         * mixed with: the engine had no bus level, mute or peak for it, so it
+         * was drawn at a fixed number with an empty trough -- honest about
+         * the gap, which is why the header badge said PARTIAL, and useless.
+         * GRAIN MASS had no strip at all; once the wells moved into the engine
+         * it became a send SOURCE reachable only by dragging a cell in the
+         * small matrix, which is not mixing either. Both buses now carry a
+         * level, a mute and a post-fader peak (bytebeat.h), so both strips
+         * behave exactly like the eight voice strips beside them. */
+        const bool isMass = (kind == Kind::Mass);
+        name = isMass ? "MASS" : "LICKS";
+
+        fader = std::make_unique<TroughFader> (name);
+        fader->setTooltip (isMass
+            ? U8 ("MASS \xe2\x80\x94 the GRAIN MASS well bus into the master. "
+                  "0\xe2\x80\x93" "256, 256 is unity. The per-well LEVEL knobs "
+                  "balance the wells against each other; this is all four.")
+            : U8 ("LICKS \xe2\x80\x94 the step-sampler bus into the master. "
+                  "0\xe2\x80\x93" "256, 256 is unity. The per-slot levels balance "
+                  "the slots; this is the whole bus."));
+        fader->onChange = [this, isMass] (int v)
+        {
+            atomic_store (isMass ? &bb.mass_level : &bb.smp_level, v);
+            repaint();
+        };
+        addAndMakeVisible (*fader);
+
+        muteBtn = std::make_unique<PlateButton> ("M", false);
+        muteBtn->setTooltip (isMass
+            ? U8 ("MUTE \xe2\x80\x94 silence the well bus. The wells keep running "
+                  "underneath, so they stay in phase with the bar grid.")
+            : U8 ("MUTE \xe2\x80\x94 silence the step-sampler bus."));
+        muteBtn->onToggle = [this, isMass] (bool on)
+        {
+            atomic_store (isMass ? &bb.mass_mute : &bb.smp_mute, on ? 1 : 0);
+            repaint();
+        };
+        addAndMakeVisible (*muteBtn);
+
+        meter->source = peakSource ([isMass]
+        {
+            return atomic_exchange (isMass ? &bb.mass_peak : &bb.smp_peak, 0);
+        });
     }
 
     /* the one live send knob: this source into the FOCUSED return */
@@ -1237,6 +1278,7 @@ MixerPanel::MixerPanel()
     for (int L = 0; L < BB_NLAYER; ++L)
         strips.add (new Strip (*this, Strip::Kind::Voice, L, L));
     strips.add (new Strip (*this, Strip::Kind::Licks,  -1, BB_RET_SRC_LICKS));
+    strips.add (new Strip (*this, Strip::Kind::Mass,   -1, BB_RET_SRC_MASS));
     strips.add (new Strip (*this, Strip::Kind::Master, -1, BB_RET_SRC_DRY));
     for (auto* s : strips) addAndMakeVisible (s);
 
@@ -1398,6 +1440,34 @@ void MixerPanel::sync()
             if (! s->fader->isUserDragging())
                 s->fader->setValueQuiet (atomic_load (&bb.gain));
             s->update ("MASTER", muted, true, s->fader->value());
+        }
+        else
+        {
+            /* LICKS and MASS: the same pull as a voice strip, which is the
+             * point of them being ordinary strips now. HOT means the bus has
+             * something on it -- a loaded sampler slot, a loaded well -- so a
+             * strip for an empty bus reads as idle rather than as silent. */
+            const bool isMass = (s->kind == Strip::Kind::Mass);
+            const bool muted = atomic_load (isMass ? &bb.mass_mute : &bb.smp_mute) != 0;
+
+            bool loaded = false;
+            if (isMass)
+            {
+                for (int i = 0; i < BB_NWELL && ! loaded; ++i)
+                    loaded = bb_engine_well_loaded (i) != 0;
+            }
+            else
+            {
+                for (int i = 0; i < BB_SAMPLER && ! loaded; ++i)
+                    loaded = bb_engine_sampler_loaded (i) != 0;
+            }
+
+            s->muteBtn->setToggleStateQuiet (muted);
+            s->fader->setMuted (muted);
+            if (! s->fader->isUserDragging())
+                s->fader->setValueQuiet (atomic_load (isMass ? &bb.mass_level
+                                                             : &bb.smp_level));
+            s->update (isMass ? "MASS" : "LICKS", muted, loaded, s->fader->value());
         }
     }
 
@@ -1597,17 +1667,34 @@ void MixerPanel::resized()
     links->setBounds (linkArea);
     inspector->setBounds (inspectorArea);
 
-    /* 9 strips flex 1 + master flex 1.4 -> integer edges at W*u/10.4 */
-    const double SW = (double) stripsArea.getWidth();
-    int ex[11];
-    for (int i = 0; i <= 10; ++i)
+    /* Every strip flexes 1 except MASTER, which flexes 1.4, and the edges are
+     * computed as W*units/total so they land on integers with no accumulated
+     * rounding gap between neighbours.
+     *
+     * DERIVED FROM strips.size(), not from a constant. This was a fixed
+     * `int ex[11]` filled for exactly ten strips; adding the MASS strip made
+     * the loop read ex[11], one past the end, and MASTER was laid out at
+     * whatever that garbage said -- off the right edge of the console. A
+     * layout table sized by a literal is a landmine for the next strip, and
+     * the next strip is already scheduled (the console condense puts sampler
+     * slots and returns on this same grammar). */
+    const int n = strips.size();
+    if (n > 0)
     {
-        const double units = i <= 9 ? (double) i : 10.4;
-        ex[i] = stripsArea.getX() + juce::roundToInt (SW * units / 10.4);
+        const double SW    = (double) stripsArea.getWidth();
+        const double total = (double) (n - 1) + 1.4;   // MASTER is the wide one
+        auto edge = [&] (int i)
+        {
+            const double units = i <= n - 1 ? (double) i : total;
+            return stripsArea.getX() + juce::roundToInt (SW * units / total);
+        };
+        for (int i = 0; i < n; ++i)
+        {
+            const int x0 = edge (i), x1 = edge (i + 1);
+            strips[i]->setBounds (x0, stripsArea.getY(),
+                                  x1 - x0, stripsArea.getHeight());
+        }
     }
-    for (int i = 0; i < strips.size(); ++i)
-        strips[i]->setBounds (ex[i], stripsArea.getY(),
-                              ex[i + 1] - ex[i], stripsArea.getHeight());
 }
 
 /* ---- paint ------------------------------------------------------------- */
@@ -1620,7 +1707,7 @@ void MixerPanel::paint (juce::Graphics& g)
 
     paintHeaderBand (g, b.removeFromTop (headerBandH),
                      "MIXER",
-                     U8 ("8 VOICES + SAMPLER + 8 RETURN SLOTS + MASTER"),
+                     U8 ("8 VOICES + LICKS + MASS + 8 RETURN SLOTS + MASTER"),
                      juce::String (SerialNo::MIXER)
                          + U8 (" \xc2\xb7 SENDS 0\xe2\x80\x93" "255 \xc2\xb7 EVERY LINK ONE SAMPLE OLD"),
                      Badge::PARTIAL, "PARTIAL");
@@ -1683,8 +1770,11 @@ void MixerPanel::paint (juce::Graphics& g)
                 footerArea.getWidth() - 20, footerArea.getHeight() - 1,
                 Justification::centredLeft, true);
 
+    /* What this panel still cannot do, named. The LICKS bus level used to be
+     * on this list -- it is not any more, and neither is the missing MASS
+     * strip, so the list is shorter by exactly what was built. */
     g.setColour (C::OXIDE);
-    g.drawText (U8 ("NO PAN \xc2\xb7 NO SOLO \xc2\xb7 NO LICKS BUS LEVEL: NO ENGINE"),
+    g.drawText (U8 ("NO PAN \xc2\xb7 NO SOLO \xc2\xb7 NO PER-CHANNEL INSERTS: NO ENGINE"),
                 footerArea.withTrimmedRight (10).withTrimmedTop (1),
                 Justification::centredRight);
 }

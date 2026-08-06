@@ -661,6 +661,20 @@ static int       g_well_end[BB_NWELL];   /* one-shot finished: clear `play` */
 static int       g_well_pplay[BB_NWELL]; /* previous snapshot's play, for    */
                                          /*   the rising-edge rewind         */
 
+/* The two sampler-bus faders (bb.smp_level / bb.mass_level, bytebeat.h).
+ * Q16, smoothed at the same 32/frame every other level on this bus ramps at,
+ * and SNAPPED to target by bb_engine_init() rather than ramped from 0 -- see
+ * the comment on those atomics for why the difference decides whether the
+ * chamber's golden hash survives. BUS_UNITY is 256 << 8: the level is applied
+ * as (bus * lvl) >> 16, so this value is exactly the identity. */
+#define BB_BUS_UNITY (256 << 8)
+static int32_t   g_smp_lvl  = BB_BUS_UNITY;   /* LICKS bus, Q16 smoothed */
+static int32_t   g_smp_ltgt = BB_BUS_UNITY;
+static int32_t   g_smp_bus_pk;                /* post-fader abs peak     */
+static int32_t   g_mass_lvl  = BB_BUS_UNITY;  /* GRAIN MASS bus          */
+static int32_t   g_mass_ltgt = BB_BUS_UNITY;
+static int32_t   g_mass_bus_pk;
+
 /* R2 song playback state -- audio thread only. One frames-into-window
  * counter and one in-window flag per clip INDEX: the counter resets when
  * the transport enters the clip's window (edge-detected on membership) and
@@ -2451,6 +2465,20 @@ void bb_engine_init(int rate)
         g_well_pplay[w] = 0;
     }
 
+    /* The bus faders SNAP to their target here; they do not ramp up to it.
+     * g_ret_fade carries the identical rule and says why: a level that ramps
+     * in from 0 makes the first ~46 ms of every session differ from the engine
+     * that had no fader, and the chamber's golden hash then fails for a reason
+     * that looks like DSP and is not. */
+    g_smp_ltgt = atomic_load(&bb.smp_mute)
+               ? 0 : (bb_clampi(atomic_load(&bb.smp_level), 0, 256) << 8);
+    g_mass_ltgt = atomic_load(&bb.mass_mute)
+                ? 0 : (bb_clampi(atomic_load(&bb.mass_level), 0, 256) << 8);
+    g_smp_lvl     = g_smp_ltgt;
+    g_mass_lvl    = g_mass_ltgt;
+    g_smp_bus_pk  = 0;
+    g_mass_bus_pk = 0;
+
     /* R2 song traffic: -1 means "no pending seek" -- the zero the BSS gives
      * us would read as a request to jump to bar 0. */
     atomic_store(&bb.arr_rec_status, ARR_REC_IDLE);
@@ -2597,6 +2625,18 @@ void bb_engine_render(int16_t *out, int frames, int channels)
 
     well_snapshot(rate);
     int well_live = well_any_live();
+
+    /* The two bus faders, snapshotted once per period like everything else.
+     * A muted bus targets 0 rather than being branched around, so the fader
+     * ramps down instead of cutting -- and, more to the point, so the play
+     * heads underneath keep running: a bus mute is not a transport control,
+     * for the same reason a well's LEVEL is not (see well_process). */
+    g_smp_ltgt = atomic_load_explicit(&bb.smp_mute, memory_order_relaxed)
+               ? 0 : (bb_clampi(atomic_load_explicit(&bb.smp_level,
+                                                     memory_order_relaxed), 0, 256) << 8);
+    g_mass_ltgt = atomic_load_explicit(&bb.mass_mute, memory_order_relaxed)
+                ? 0 : (bb_clampi(atomic_load_explicit(&bb.mass_level,
+                                                      memory_order_relaxed), 0, 256) << 8);
 
     /* --- snapshot the song ------------------------------------------------
      * One pointer load per period, like a Program: every clip this period
@@ -2849,6 +2889,22 @@ void bb_engine_render(int16_t *out, int frames, int channels)
          * Cheap enough to test unconditionally -- one compare per frame. */
         if (bar_pos == 0 && well_fire_armed()) well_live = 1;
 
+        /* The two bus faders ramp every frame, unconditionally rather than
+         * inside their own blocks: a fader left frozen mid-travel because its
+         * bus happened to be idle would jump the instant the bus came back.
+         * At unity both are already at target, so neither branch is taken and
+         * not one sample moves -- which is the bit-exactness argument. */
+        if (g_smp_lvl < g_smp_ltgt) {
+            g_smp_lvl += 32;  if (g_smp_lvl > g_smp_ltgt) g_smp_lvl = g_smp_ltgt;
+        } else if (g_smp_lvl > g_smp_ltgt) {
+            g_smp_lvl -= 32;  if (g_smp_lvl < g_smp_ltgt) g_smp_lvl = g_smp_ltgt;
+        }
+        if (g_mass_lvl < g_mass_ltgt) {
+            g_mass_lvl += 32; if (g_mass_lvl > g_mass_ltgt) g_mass_lvl = g_mass_ltgt;
+        } else if (g_mass_lvl > g_mass_ltgt) {
+            g_mass_lvl -= 32; if (g_mass_lvl < g_mass_ltgt) g_mass_lvl = g_mass_ltgt;
+        }
+
         for (int L = 0; L < BB_NLAYER; L++) {
             LSnap *sn = &ls[L];
 
@@ -3008,12 +3064,25 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         {
             int32_t premix = mix;
             sampler_process(&mix, tick, rate, atk_inc);
+
+            /* THE LICKS BUS FADER. Applied to the summed slot contribution and
+             * folded back into `mix`, so everything below -- the send, the
+             * looper tap, the lane-8 capture and the master -- sees ONE
+             * post-fader value. At unity (lvl = 65536) this is exactly the
+             * identity on int32, which is what keeps the chamber's golden hash
+             * still for a session that never touches the fader. */
             int32_t sbus = mix - premix;
+            sbus = (int32_t)(((int64_t)sbus * g_smp_lvl) >> 16);
+            mix  = premix + sbus;
+
+            if (sbus > g_smp_bus_pk) g_smp_bus_pk = sbus;
+            else if (-sbus > g_smp_bus_pk) g_smp_bus_pk = -sbus;
+
             if (sb.want_licks) lsrc[BB_LOOP_SRC_LICKS] = sbus;
             for (int e = 0; e < rb.nl; e++)
                 rin[rb.lr[e]] += (int32_t)(((int64_t)sbus * rb.la[e]) >> 8);
             if (cap_on && g_cap_lane == 8)
-                cap_smp += mix - premix;   /* LICKS-bus capture tap */
+                cap_smp += sbus;           /* LICKS-bus capture tap */
         }
 
         /* --- THE GRAIN MASS WELLS -------------------------------------------
@@ -3037,7 +3106,19 @@ void bb_engine_render(int16_t *out, int frames, int channels)
         if (well_live) {
             int32_t premix = mix;
             well_process(&mix);
+
+            /* THE MASS BUS FADER, exactly as the LICKS one above: applied to
+             * the summed well contribution and folded back, so the send, the
+             * lane-9 capture and the master all see the same post-fader
+             * value. The per-well LEVEL knobs stay what they are -- the
+             * balance BETWEEN wells -- and this is the whole bus. */
             int32_t wbus = mix - premix;
+            wbus = (int32_t)(((int64_t)wbus * g_mass_lvl) >> 16);
+            mix  = premix + wbus;
+
+            if (wbus > g_mass_bus_pk) g_mass_bus_pk = wbus;
+            else if (-wbus > g_mass_bus_pk) g_mass_bus_pk = -wbus;
+
             for (int e = 0; e < rb.nm; e++)
                 rin[rb.mr[e]] += (int32_t)(((int64_t)wbus * rb.ma[e]) >> 8);
             if (cap_on && g_cap_lane == 9)
@@ -3443,6 +3524,14 @@ void bb_engine_render(int16_t *out, int frames, int channels)
                                   memory_order_relaxed);
         g_smp_pk[s] = 0;
     }
+    /* The two bus meters, max-held and read-and-cleared like every other. */
+    if (g_smp_bus_pk > atomic_load_explicit(&bb.smp_peak, memory_order_relaxed))
+        atomic_store_explicit(&bb.smp_peak, g_smp_bus_pk, memory_order_relaxed);
+    g_smp_bus_pk = 0;
+    if (g_mass_bus_pk > atomic_load_explicit(&bb.mass_peak, memory_order_relaxed))
+        atomic_store_explicit(&bb.mass_peak, g_mass_bus_pk, memory_order_relaxed);
+    g_mass_bus_pk = 0;
+
     for (int w = 0; w < BB_NWELL; w++) {
         if (g_well_pk[w] > atomic_load_explicit(&bb.well[w].peak,
                                                 memory_order_relaxed))
@@ -4168,6 +4257,11 @@ int bb_config_save(void)
      * session with the levels, pitches and loop flags you left is most of the
      * value, and reloading four files is a gesture you were making anyway.
      * `play` is not written; see bb_engine_set_defaults(). */
+    /* The two bus faders. One line, both buses, because they are one idea. */
+    fprintf(f, "busfader licks %d %d mass %d %d\n",
+            atomic_load(&bb.smp_level),  atomic_load(&bb.smp_mute),
+            atomic_load(&bb.mass_level), atomic_load(&bb.mass_mute));
+
     for (int w = 0; w < BB_NWELL; w++) {
         WellSlot *wl = &bb.well[w];
         fprintf(f, "well %d lvl %d pitch %d loop %d rev %d\n", w,
@@ -4568,6 +4662,15 @@ int bb_config_load(void)
             L = (int)strtol(p, (char **)&p, 10);
             if (L >= 0 && L < BB_SAMPLER)
                 read_ints(p, bb.sampler[L].vel, BB_STEPS, 0, 255);
+        } else if (!strncmp(line, "busfader ", 9)) {
+            int sl, sm, ml, mm;
+            if (sscanf(line, "busfader licks %d %d mass %d %d",
+                       &sl, &sm, &ml, &mm) == 4) {
+                atomic_store(&bb.smp_level,  bb_clampi(sl, 0, 256));
+                atomic_store(&bb.smp_mute,   !!sm);
+                atomic_store(&bb.mass_level, bb_clampi(ml, 0, 256));
+                atomic_store(&bb.mass_mute,  !!mm);
+            }
         } else if (!strncmp(line, "well ", 5)) {
             int lvl, pit, lp, rv;
             if (sscanf(line, "well %d lvl %d pitch %d loop %d rev %d",
@@ -4765,6 +4868,15 @@ void bb_engine_set_defaults(void)
             atomic_store(&sl->vel[i], 200);
         }
     }
+
+    /* The two sampler-bus faders. UNITY, so an untouched session renders
+     * exactly as the engine that had no faders did. */
+    atomic_store(&bb.smp_level,  256);
+    atomic_store(&bb.smp_mute,   0);
+    atomic_store(&bb.smp_peak,   0);
+    atomic_store(&bb.mass_level, 256);
+    atomic_store(&bb.mass_mute,  0);
+    atomic_store(&bb.mass_peak,  0);
 
     /* The wells. LEVEL 128 of 256 is exactly the half-scale the JUCE wells
      * shipped at, and LOOP defaults on because a well is a bed -- both are the

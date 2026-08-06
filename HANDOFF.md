@@ -15,7 +15,7 @@ ctest  --preset windows-msvc-relwithdebinfo
 ```
 
 Expect: `2967 historical checks, 41 port checks, 106 return-bus checks, 120
-loop-bank checks, 8 gate checks, 31 well checks / all 3273 checks passed`.
+loop-bank checks, 8 gate checks, 47 well checks / all 3289 checks passed`.
 
 Windows needs VS 2022 **17.5+** (C11 atomics) and a **short build directory** —
 JUCE's intermediate paths are long enough that a deep one exceeds `MAX_PATH`
@@ -87,6 +87,7 @@ submodule absent.
 | UI | Contrast fixed by measurement; every dead control and fake meter removed. |
 | One front end | The ncurses/ALSA terminal instrument is deleted. The JUCE GUI is the only front end; the engine is a static lib both it and the suite link. |
 | RACK SEQ | The 16-step grid has a switch. Without it a layer whose `seq_on` was clear had a sixteen-cell editor that could never fire. |
+| Sampler bus strips | LICKS and MASS each carry a bus level, mute and post-fader meter (`bb.smp_level` / `bb.mass_level`), so both are ordinary MIXER strips. 256 is unity and is the default, applied as `(bus * lvl) >> 16`, so an untouched session is bit-identical to the engine that had no faders. |
 | One sampler path | GRAIN MASS wells are engine voices (`bb.well[]`), summed beside the LICKS bus. `SamplerVoice` is deleted and nothing mixes on top of `bb_engine_render` any more. REC records a well, SURVIVOR loops it, ARRANGE lane 9 captures it, and it has a MASS column in the send matrix. |
 
 ---

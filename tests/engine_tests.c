@@ -4217,6 +4217,67 @@ static void test_wells(void)
                 "a cleared well reports empty");
     bb_engine_reclaim();
 
+    /* ---- the MASS bus fader ---------------------------------------------
+     * The strip fader for the whole well bus, as distinct from the per-well
+     * LEVEL knobs that balance the wells against each other. */
+    {
+        int16_t *bus = malloc((size_t)N * sizeof(int16_t));
+        test_expect(bus != NULL, "bus-fader buffer allocates");
+        if (bus != NULL) {
+            for (int i = 0; i < N; i++) bus[i] = FLAT;
+            bb_engine_set_defaults();
+            bb_engine_init(rate);
+            atomic_store(&bb.gain, 256);
+            for (int L = 0; L < BB_NLAYER; L++) atomic_store(&bb.layer[L].on, 0);
+            bb_engine_reset_loop();
+
+            test_expect(atomic_load(&bb.mass_level) == 256 &&
+                        atomic_load(&bb.smp_level) == 256,
+                        "both sampler buses default to unity");
+
+            test_expect(bb_engine_well_set(0, bus, N, rate) == 1,
+                        "the bus-fader specimen publishes");
+            atomic_store(&bb.well[0].ctl[WELL_CTL_LEVEL], 256);
+            atomic_store(&bb.well[0].loop, 1);
+            atomic_store(&bb.well[0].play, 1);
+            well_run(out, cap, WELL_SETTLE);
+
+            bb_engine_render(out, 64, 1);
+            test_expect(out[63] == FLAT,
+                        "at unity the MASS bus fader is the identity (%d)",
+                        (int)out[63]);
+
+            atomic_store(&bb.mass_level, 128);
+            well_run(out, cap, WELL_SETTLE);
+            bb_engine_render(out, 64, 1);
+            test_expect(out[63] == FLAT / 2,
+                        "the MASS bus fader at 128 is exactly half (%d)",
+                        (int)out[63]);
+
+            test_expect(atomic_exchange(&bb.mass_peak, 0) > 0,
+                        "the MASS bus publishes a meter peak");
+
+            /* A bus MUTE silences the bus without stopping the wells under it
+             * -- the same rule the per-well LEVEL follows. */
+            atomic_store(&bb.mass_mute, 1);
+            well_run(out, cap, WELL_SETTLE);
+            int posA = atomic_load(&bb.well[0].pos);
+            w0 = atomic_load(&bb.sink_w);
+            bb_engine_render(out, 256, 1);
+            int mutedE = 0;
+            for (unsigned j = w0; j != atomic_load(&bb.sink_w); j++)
+                if (bb.sink[j & BB_SINK_MASK] != 0) mutedE++;
+            test_expect(mutedE == 0, "a muted MASS bus is exactly silent (%d)",
+                        mutedE);
+            test_expect(atomic_load(&bb.well[0].pos) != posA,
+                        "a muted MASS bus does not stop the wells under it");
+            atomic_store(&bb.mass_mute, 0);
+            atomic_store(&bb.mass_level, 256);
+            bb_engine_well_clear(0);
+            bb_engine_reclaim();
+        }
+    }
+
     /* ---- the controls survive a session, and the sample does not --------
      * Deliberate: persisting a path here would mean persisting an ABSOLUTE
      * one, which is the defect aclip already carries. */
@@ -4227,6 +4288,9 @@ static void test_wells(void)
     atomic_store(&w1->loop, 0);
     atomic_store(&w1->reverse, 1);
     atomic_store(&w1->play, 1);
+    atomic_store(&bb.smp_level, 199);
+    atomic_store(&bb.mass_level, 41);
+    atomic_store(&bb.mass_mute, 1);
     test_expect(bb_config_save() == 0, "a session with well controls saves");
 
     bb_engine_set_defaults();
@@ -4238,6 +4302,20 @@ static void test_wells(void)
                 "well controls survive a session round-trip");
     test_expect(atomic_load(&w1->play) == 0,
                 "a restored well is NOT playing, having no sample to play");
+    test_expect(atomic_load(&bb.smp_level) == 199 &&
+                atomic_load(&bb.mass_level) == 41 &&
+                atomic_load(&bb.mass_mute) == 1,
+                "the two bus faders survive a session round-trip");
+
+    /* A session written before the bus faders existed carries no `busfader`
+     * line at all. It must come back at unity -- an omitted key falling to a
+     * quiet default would silently turn a returning player's samplers down. */
+    bb_engine_set_defaults();
+    test_expect(atomic_load(&bb.smp_level) == 256 &&
+                atomic_load(&bb.mass_level) == 256 &&
+                atomic_load(&bb.smp_mute) == 0 &&
+                atomic_load(&bb.mass_mute) == 0,
+                "a session with no busfader line loads both buses at unity");
 }
 
 static int self_test_mode(void)
