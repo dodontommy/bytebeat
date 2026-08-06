@@ -1,9 +1,9 @@
 /* engine.h -- the device-independent audio core.
  *
  * This is the part of the program that makes sound, with every notion of
- * WHERE the sound goes removed from it. The terminal instrument and the GUI
- * both link this file; the only difference between them is who calls
- * bb_engine_render() -- ALSA used to, JUCE does now.
+ * WHERE the sound goes removed from it. A front end is only whoever calls
+ * bb_engine_render(): an ALSA thread used to, JUCE's device callback does
+ * now, and the regression suite does with no device at all.
  *
  * Owning all of these here also means the regression suite can exercise the
  * full DSP, sequencer, phrase looper and session round-trip on ANY platform,
@@ -28,10 +28,10 @@ extern "C" {
  * published sample rate. Called by whoever owns the audio thread. */
 void bb_engine_init(int rate);
 
-/* Render one period: `frames` frames of MONO audio into `out`, duplicated
+/* Render one block: `frames` frames of MONO audio into `out`, duplicated
  * across `channels`. This is the every-sample hot path -- it must never
- * malloc, never lock, and never block. JUCE's device callback calls it; the
- * ALSA thread calls it; the self-test calls it. */
+ * malloc, never lock, and never block. JUCE's device callback calls it, and
+ * so does the self-test, which is how the hot path stays testable. */
 void bb_engine_render(int16_t *out, int frames, int channels);
 
 /* Reset the free-running sample counter and per-layer voice state. */
@@ -99,9 +99,14 @@ void bb_engine_cc(int layer, int cc, int value);                  /* 0..127 -> m
 /* ---- R1 step sampler sample pool -----------------------------------------
  * The UI thread loads WAV data into a slot; the audio thread plays it under
  * the slot's pattern state (bb.sampler[], owned by whoever edits the grid).
- * `mono` must be malloc'd by the caller: on success this function takes
- * ownership and frees it later (so call it with a fresh allocation, and do
- * NOT touch the buffer afterwards). Call bb_engine_reclaim() (or
+ * `mono` must be malloc'd by the caller, and OWNERSHIP TRANSFERS
+ * UNCONDITIONALLY -- on success the buffer is published and freed later, and on
+ * EVERY failure path (bad slot, bad length, out of memory) it is freed before
+ * the call returns. So pass a fresh allocation, never touch it afterwards, and
+ * never free it yourself on a 0 return. This header used to say ownership
+ * transferred "on success", which reads as "still yours if it fails" and is
+ * exactly one free() away from a double free; the real rule was written down
+ * only in a comment in LicksPanel.cpp. Call bb_engine_reclaim() (or
  * bb_engine_sampler_reclaim()) once per UI frame so retired buffers get
  * freed. Render-thread safe to call anytime; all UI-thread safe. */
 int  bb_engine_sampler_set(int slot, int16_t *mono, int n, int rate);

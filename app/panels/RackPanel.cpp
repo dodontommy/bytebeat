@@ -689,7 +689,8 @@ private:
 
 RackPanel::RackPanel()
     : bodyBtn ("BODY", true), spaceBtn ("SPACE", true),
-      rollBtn ("ROLL", false, false), mutateBtn ("MUTATE", false, false)
+      rollBtn ("ROLL", false, false), mutateBtn ("MUTATE", false, false),
+      seqBtn ("SEQ", true)
 {
     /* ---- voice strip -------------------------------------------------- */
     for (int i = 0; i < BB_NLAYER; ++i)
@@ -860,6 +861,51 @@ RackPanel::RackPanel()
     }
 
     /* ---- sequencer + lock lane ---------------------------------------- */
+
+    /* THE GRID IS NOTHING WITHOUT THIS SWITCH, AND UNTIL NOW THERE WAS NO
+     * SWITCH. engine.c gates every trigger behind `if (sn->seq_on)`, and the
+     * only two things in this panel that ever wrote seq_on were ROLL/MUTATE
+     * and applyPatch -- so on a layer whose seq_on was 0 the sixteen cells
+     * below latched, lit, painted and fired nothing, forever, with no way
+     * back short of re-rolling the voice away. That is the fake control this
+     * console is not allowed to have.
+     *
+     * It bit hardest on the struck sources. THUMP is bp(tr*vel*4096,p0,p1) --
+     * the trigger IS its entire input -- so picking THUMP from the SOURCE
+     * grid produced a layer that rendered digital silence: measured peak 0
+     * over four seconds unarmed against 4331 armed. FEEDBACK and RUMBLE
+     * survived but came out 21x and 2.3x down. The retired terminal UI armed
+     * the layer silently as a side effect of choosing the source; putting the
+     * switch on the panel instead says the same thing out loud and covers the
+     * hand-written expressions the source grid never touches. */
+    seqBtn.setTooltip (U8 ("SEQ \xe2\x80\x94 run this layer's 16-step sequencer. "
+                           "OFF means the cells below are inert: the engine "
+                           "fires no triggers at all. Switching it on with an "
+                           "empty grid lays down E(4,16) so there is something "
+                           "to hear."));
+    seqBtn.onToggle = [this] (bool on) {
+        Layer* l = &bb.layer[layer];
+        /* An empty grid plus SEQ ON is still silence, which would read as the
+         * switch being broken too. Seed the same four-on-the-floor euclid the
+         * terminal UI used, but only when the player has drawn nothing -- an
+         * existing pattern is never overwritten by arming. */
+        if (on)
+        {
+            bool any = false;
+            for (int i = 0; i < BB_STEPS; ++i)
+                if (atomic_load (&l->seq_gate[i]) != 0) any = true;
+            if (! any)
+            {
+                int gate[BB_STEPS];
+                gen_euclid (BB_STEPS, 4, gate);
+                for (int i = 0; i < BB_STEPS; ++i)
+                    atomic_store (&l->seq_gate[i], gate[i]);
+            }
+        }
+        atomic_store (&l->seq_on, on ? 1 : 0);
+    };
+    addAndMakeVisible (seqBtn);
+
     for (int i = 0; i < BB_STEPS; ++i)
     {
         auto* c = new StepCell (i);
@@ -1333,6 +1379,8 @@ void RackPanel::sync()
         bodyBtn.setToggleStateQuiet (bb_rack[layer].body != 0);
     if (! spaceBtn.isUserDragging())
         spaceBtn.setToggleStateQuiet (bb_rack[layer].space != 0);
+    if (! seqBtn.isUserDragging())
+        seqBtn.setToggleStateQuiet (atomic_load (&l->seq_on) != 0);
 
     /* knobs; roles inferred from the compiled bytecode. A parameter the
      * program never reads gets no knob at all -- paint() draws its slot as
@@ -1530,6 +1578,15 @@ void RackPanel::resized()
 
     Rectangle<int> seq = mid;
     rcSeqHead = seq.removeFromTop (20);
+    {
+        /* SEQ sits at the right end of the sequencer head, on the same rule
+         * as the label, so the switch and the thing it switches read as one
+         * band. 18 in a 20 row leaves the hairline underneath clear. */
+        const juce::Font pf = Type::mono (10.0f, 0.16f);
+        const int ws = textW (pf, "SEQ") + 31;
+        seqBtn.setBounds (rcSeqHead.getRight() - 10 - ws,
+                          rcSeqHead.getY() + 1, ws, 18);
+    }
     Rectangle<int> sa = seq.reduced (10, 8);
     Rectangle<int> stepRow = sa.removeFromTop (38);
     for (int i = 0; i < steps.size(); ++i)
@@ -1681,10 +1738,20 @@ void RackPanel::paint (juce::Graphics& g)
         const juce::String t1 = U8 ("SEQUENCER \xc2\xb7 1 BAR / 16TH");
         g.drawText (t1, hr, Justification::centredLeft);
         const int w1 = textW (Type::label(), t1);
-        g.setColour (C::INK_FAINT);
+        /* When SEQ is off the cells still latch and light, because they are
+         * an editor for a pattern the engine is not currently running -- that
+         * is a real distinction and drawing them dead would lose it. Say which
+         * of the two states the row is in rather than leaving the player to
+         * infer it from silence. */
+        const bool running = atomic_load (&bb.layer[layer].seq_on) != 0;
+        g.setColour (running ? C::INK_FAINT : C::OXIDE_INK);
         g.setFont (Type::micro());
-        g.drawText (U8 ("CLICK CELL \xe2\x86\x92 OFF / HIT / ACCENT \xc2\xb7 DRAG PAINTS"),
-                    hr.withTrimmedLeft (w1 + 10), Justification::centredLeft);
+        g.drawText (running
+                        ? U8 ("CLICK CELL \xe2\x86\x92 OFF / HIT / ACCENT \xc2\xb7 DRAG PAINTS")
+                        : U8 ("SEQ OFF \xc2\xb7 PATTERN HELD, NO TRIGGERS FIRED"),
+                    hr.withTrimmedLeft (w1 + 10)
+                      .withTrimmedRight (seqBtn.getWidth() + 8),
+                    Justification::centredLeft);
         g.setColour (C::HAIRLINE);
         g.fillRect (rcSeqHead.getX(), rcSeqHead.getBottom() - 1, rcSeqHead.getWidth(), 1);
     }

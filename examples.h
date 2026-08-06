@@ -2,10 +2,16 @@
  *
  * Each entry ships with its knobs, its output mode and its post-chain
  * settings, because a bytebeat expression without its parameter values is
- * like a patch sheet with no numbers on it. Pressing 'n' in the UI loads all
- * of it at once, so every one of these makes a sound immediately.
+ * like a patch sheet with no numbers on it. Loading one applies all of it at
+ * once, so every one of these makes a sound immediately.
  *
- * The same list is reproduced in EXAMPLES.txt with longer prose.
+ * NOTHING COMPILES THIS TODAY, AND IT IS KEPT ANYWAY. The terminal UI was its
+ * only consumer and it is gone; the GUI has no examples browser yet. It stays
+ * because it is the only place the per-example TEMPO lives -- EXAMPLES.txt
+ * reproduces every expression, knob value and post-chain setting in longer
+ * prose, but carries no bpm/beats/bars for any entry, and several of these
+ * only sit right at the tempo they were tuned at. Deleting the header to
+ * tidy up would quietly throw that away.
  */
 #ifndef EXAMPLES_H
 #define EXAMPLES_H

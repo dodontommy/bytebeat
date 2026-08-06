@@ -102,9 +102,9 @@ const char *expr_role_name(int role);
 /* A compiled program.
  *
  * `next` and `retire_epoch` are used only by the UI thread's reclamation
- * list -- see main.c. The audio thread reads everything below them and
- * writes nothing, which is what makes the atomic pointer swap safe without
- * any lock at all. */
+ * list -- see bb_reclaim() in engine.c. The audio thread reads everything
+ * below them and writes nothing, which is what makes the atomic pointer swap
+ * safe without any lock at all. */
 typedef struct Program {
     struct Program *next;
     uint64_t        retire_epoch;

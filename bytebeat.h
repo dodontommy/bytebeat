@@ -1,16 +1,16 @@
 /* bytebeat.h -- state shared between the UI thread and the audio thread.
  *
- * There are exactly two threads in this program:
+ * There are exactly two threads that matter in this program:
  *
- *   UI THREAD    (also the main thread) -- ncurses, parsing, file I/O,
- *                network I/O, malloc/free. Allowed to be slow. Allowed to
- *                block. Runs at whatever priority the OS feels like.
+ *   UI THREAD    (JUCE's message thread) -- drawing, parsing, file I/O,
+ *                malloc/free. Allowed to be slow. Allowed to block. Runs at
+ *                whatever priority the OS feels like.
  *
- *   AUDIO THREAD -- computes samples and hands them to ALSA. Has a hard
- *                deadline: if it does not deliver a period of samples before
- *                the sound card runs out, you get an audible gap (an xrun).
- *                It must therefore never malloc, never take a lock, and never
- *                call anything that can block except snd_pcm_writei().
+ *   AUDIO THREAD -- computes samples and hands them to the device callback.
+ *                Has a hard deadline: if it does not deliver a block of
+ *                samples before the sound card runs out, you get an audible
+ *                gap (an xrun). It must therefore never malloc, never take a
+ *                lock, and never call anything that can block.
  *
  * Every field below that both threads touch is an atomic. That is not
  * decoration: without it the compiler is entitled to cache a value in a
@@ -125,7 +125,8 @@ enum { LOOP_RATE_HALF = 0, LOOP_RATE_NORMAL, LOOP_RATE_DOUBLE };
  * same 10-argument signature. THAT IS THE BIT-EXACTNESS ARGUMENT.
  *
  * Satellites 1..5 are ADDITIVE and share one 10 MiB BSS array. NOTHING may
- * ever memset it: not bb_engine_init() (the suite calls it seven times), not
+ * ever memset it: not bb_engine_init() (the suite calls it many times per run;
+ * the count is beside g_sat_buf in engine.c, where it does the arguing), not
  * CLEAR, not the loader. Every buffer read is `idx % g_sat_len[n]` and every
  * index below len was written during that capture, so residue is unreachable
  * by construction -- unlike the return pools, which had to learn it. */
@@ -341,8 +342,8 @@ typedef struct {
                                           * 256 = none, 0 = fully closed       */
 } Return;
 
-/* Largest period we will ever ask ALSA for. The audio thread's scratch
- * buffer is this big and lives on its stack -- no malloc. */
+/* Largest block we will ever accept from the audio device. The audio
+ * thread's scratch buffer is this big and lives on its stack -- no malloc. */
 #define BB_MAX_PERIOD   2048
 
 #define BB_RATE_MIN     1000
@@ -392,7 +393,7 @@ extern const CtlInfo bb_gctl_info[GCTL_COUNT];
  * store rather than a recompile. See rack.h for what these select.
  *
  * This lives here rather than in rack.h because it is session state that
- * main.c saves and loads, and because a layer has one whether or not the
+ * engine.c saves and loads, and because a layer has one whether or not the
  * rack is currently driving it. */
 typedef struct {
     unsigned char src;    /* index into the source table */
@@ -444,13 +445,15 @@ struct bb_state {
     /* 8 one-shot sample slots sequenced on the step clock (see above).   */
     SamplerSlot  sampler[BB_SAMPLER];
 
-    /* Incremented by the audio thread at the top of every period. The UI
-     * thread uses it to know when a retired Program can no longer be in
-     * use. See bb_reclaim() in main.c for why this is sufficient. */
+    /* Incremented by the audio thread at the top of every block. The UI
+     * thread uses it to know when a retired Program can no longer be in use:
+     * a Program retired during epoch N cannot still be referenced once the
+     * audio thread has started epoch N+2, because the render that could have
+     * been holding it has by then returned. See bb_reclaim() in engine.c. */
     BB_ATOMIC(unsigned long long) epoch;
 
     /* --- transport ------------------------------------------------------ */
-    BB_ATOMIC(int)   rate;          /* rate ALSA actually gave us            */
+    BB_ATOMIC(int)   rate;          /* rate the device actually gave us      */
     BB_ATOMIC(int)   req_rate;      /* rate the user asked for               */
     BB_ATOMIC(unsigned) t;          /* published sample counter (display)    */
     BB_ATOMIC(int)   reset_t;
@@ -564,13 +567,14 @@ struct bb_state {
     int16_t      scope[BB_SCOPE_LEN];
     BB_ATOMIC(unsigned) scope_w;
 
-    /* --- sink ring: two independent read cursors so a stalled network
-     *     client cannot corrupt or stall the .wav being written */
+    /* --- sink ring: the audio thread's only outbound channel for finished
+     *     samples. Everything that consumes it -- the recorder, the master
+     *     meter, the scope -- keeps its OWN read cursor privately and reads
+     *     back from sink_w, so no cursor lives here. That is deliberate: a
+     *     consumer that stalls must not be able to stall or corrupt another,
+     *     and a shared cursor is exactly how that would happen. */
     int16_t      sink[BB_SINK_LEN];
     BB_ATOMIC(unsigned) sink_w;
-    BB_ATOMIC(unsigned) file_r;
-    BB_ATOMIC(unsigned) net_r;
-    BB_ATOMIC(int)   sink_lost;
 };
 
 extern struct bb_state bb;
@@ -580,7 +584,7 @@ static inline int bb_clampi(int v, int lo, int hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
-/* ---- session state, owned by main.c, edited by ui.c --------------------
+/* ---- session state, owned by engine.c, edited by the GUI ---------------
  *
  * `bb_expr` is always the truth -- it is what got compiled and what is
  * playing. `bb_rack` is the structured description that PRODUCED it, and

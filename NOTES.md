@@ -44,10 +44,15 @@ snd_pcm_writei()  ->  blocks  ->  interrupt  ->  returns  ->  we compute
        +----------------------------------------------------------+
 ```
 
-This is why `audio.c` has no timer, no sleep, and no frame counter driving
-it. The sound card's own crystal is the scheduler. Look at the bottom of the
-loop in `audio_thread()`: the only blocking call is `snd_pcm_writei`, and it
-is blocking *on purpose*.
+This is why the terminal instrument's ALSA thread had no timer, no sleep and
+no frame counter driving it: the only blocking call at the bottom of its loop
+was `snd_pcm_writei`, and it blocked *on purpose*. That thread went out with
+the rest of the terminal front end, but the shape survived the port -- JUCE's
+device callback chops whatever buffer the host hands it into blocks that fit
+the interleaved scratch it already owns (sized on the message thread from the
+device's advertised buffer, so the callback never reaches the allocator) and
+calls `bb_engine_render()` once per block, so the sound card's own crystal is
+still the only scheduler in this program.
 
 ### Period size is latency
 
@@ -73,9 +78,11 @@ Two knobs, pulling opposite ways:
 | tiny (64 frames, 1.5ms) | instant response | you must never be late, ever |
 | huge (4096 frames, 93ms) | mushy, laggy | survives almost anything |
 
-We pick `rate/100` (≈10ms) with 4 periods, so ~40ms of runway and ~10ms of
-latency. On a laptop that is comfortable. The readout shows the actual figure
-as `lat`.
+The terminal instrument picked `rate/100` (≈10ms) with 4 periods -- ~40ms of
+runway, ~10ms of latency -- and printed the figure it actually got as `lat`.
+The JUCE app picks nothing: the device declares its rate and buffer size,
+`audioDeviceAboutToStart` sizes the interleaved scratch from that number, and
+the tradeoff above is settled in the OS audio control panel rather than by us.
 
 ### What an xrun actually is
 
@@ -83,15 +90,16 @@ The hardware reached a part of the buffer we had not written yet. It played
 whatever bytes were there — stale audio from one buffer ago, or zeroes.
 You hear a click, a tick, or a stutter.
 
-The damage is *already done* by the time we find out. ALSA tells us by
-returning `-EPIPE` from `snd_pcm_writei`, and the stream is now in the XRUN
-state and refuses everything until `snd_pcm_prepare()` restarts it. That is
-all `recover()` in `audio.c` does — count it and restart.
+The damage is *already done* by the time we find out. ALSA told the terminal
+instrument by returning `-EPIPE` from `snd_pcm_writei`, leaving the stream in
+the XRUN state and refusing everything until `snd_pcm_prepare()` restarted it;
+counting that and restarting was the whole of its `recover()`.
 
-**So the xrun counter in the UI is a performance instrument, not an error
-log.** If it climbs while you sweep a knob, something in your render path got
-slow. If it climbs at rest, the machine is too busy or the period is too
-small.
+**An xrun count is a performance instrument, not an error log.** If it climbs
+while you sweep a knob, something in your render path got slow. If it climbs
+at rest, the machine is too busy or the period is too small. Worth knowing
+that nobody currently measures it: `bb.xruns` is still declared in
+`bytebeat.h` and nothing has written it since the ALSA thread was deleted.
 
 ### Why the audio thread can't malloc
 
@@ -117,30 +125,33 @@ The same argument rules out:
 - **anything in libc that might allocate** — including, annoyingly, some of
   ALSA's own configuration calls
 
-That last one is why the sample-rate change is a whole dance (§5).
+That last one is why the terminal instrument's sample-rate change had to be a
+whole dance (§6).
 
 `mlockall(MCL_CURRENT | MCL_FUTURE)` pins every page into RAM so nothing can
 be paged out and faulted back in mid-period. `MCL_CURRENT` covers everything
-mapped now (including the 1MB delay line and 2MB sample ring in BSS);
+mapped now (the per-layer delay lines and the 2MB sample ring, both in BSS);
 `MCL_FUTURE` covers anything mapped later, i.e. the Programs we `malloc`
 while live coding.
 
 `SCHED_FIFO` asks the kernel to run this thread until it blocks, rather than
-giving it a timeslice like everything else. Both usually need permission:
-
-```sh
-make caps        # setcap cap_sys_nice,cap_ipc_lock=eip ./bytebeat
-```
-
-or add to `/etc/security/limits.conf`:
+giving it a timeslice like everything else. Both usually need permission --
+`setcap cap_sys_nice,cap_ipc_lock=eip` on the binary, or
 
 ```
 @audio   -  rtprio  95
 @audio   -  memlock unlimited
 ```
 
-Both failures are non-fatal and reported on screen. A slightly glitchy
-instrument beats no instrument.
+in `/etc/security/limits.conf`. The terminal instrument asked for both at
+startup, treated either refusal as non-fatal and said so on screen, on the
+grounds that a slightly glitchy instrument beats no instrument.
+
+**Neither call is anywhere in the tree now.** They were Linux-only and
+went out with the ALSA thread; the JUCE app takes whatever priority the host
+gives its device callback and does not pin memory. Anything that goes back to
+owning its own audio thread wants both again, which is why the reasoning is
+written down here rather than in the file that used to make the calls.
 
 ---
 
@@ -176,17 +187,20 @@ metallic and inharmonic rather than like a synthesizer.
 mirror sits at 4000 Hz; nearly everything folds, several times, and the sound
 becomes gritty and detuned in a way you cannot get any other way.
 
-Two ways to exploit that in this program:
+There were two ways to exploit that in this program, and one of them is left:
 
-- `[` `]` `{` `}` retune the actual PCM device.
-- `-R` disables ALSA's resampler. Without it, asking a 48kHz-only card for
-  1000 Hz gets you ALSA politely interpolating, which smooths away the
-  aliasing you were trying to hear. With `-R` the device snaps to the nearest
-  rate it genuinely supports and the readout shows `48000(want 1000)` so you
-  know what you actually got.
+- The terminal instrument retuned the actual PCM device from the keyboard,
+  and its `-R` flag disabled ALSA's resampler -- without that, asking a
+  48kHz-only card for 1000 Hz got you ALSA politely interpolating, which
+  smooths away the aliasing you were trying to hear, so `-R` snapped the
+  device to the nearest rate it genuinely supported and the readout said
+  `48000(want 1000)`. Both went with that front end. The engine's rate is now
+  whatever the audio device reports once, at
+  `bb_engine_init(dev->getCurrentSampleRate())`, and nothing moves it after.
 - The **CRUSH** knob does it in software with no device change at all: hold
   each sample for N frames and you have decimated to `sr/N` without touching
-  the hardware. Sweepable, unlike the real rate.
+  the hardware. Sweepable, unlike the real rate, and now the only one of the
+  two you can reach.
 
 ### Bit depth
 
@@ -214,9 +228,11 @@ The instrument's three output modes are about which bits of the expression's
 | `SIGNED` | `(int8_t)(v & 0xff)` | same 8 bits, two's complement. Silence is 0, so the *wrap points move* — same expression, different sound. |
 | `WORD` | `(int16_t)(v & 0xffff)` | 16 bits. Smoother, wider, much less crunch. Where the drone patches live. |
 
-We always hand ALSA `S16_LE` regardless. The mode is a musical decision about
-how to fold an int32 down; the wire format is a hardware fact, and S16_LE is
-the one every card and plugin supports.
+The engine renders int16 regardless. The mode is a musical decision about how
+to fold an int32 down; the wire format is a hardware fact. The terminal
+instrument handed those int16s straight to ALSA as `S16_LE`, the one format
+every card and plugin supports; the JUCE callback scales them by 1/32768 into
+the float buffers the device asked for. The fold is the same either way.
 
 **Watch the wrap in WORD mode.** `(int16_t)(v & 0xffff)` *wraps*, it does not
 clip. An expression that exceeds ±32767 doesn't get louder, it tears. That's
@@ -241,8 +257,10 @@ y[n] = x[n] - x[n-1] + R*y[n-1]        R = 65500/65536
 ```
 
 The differencing kills DC outright; `R` just below 1 puts everything back
-above ~4 Hz. `B` bypasses the *chain*, not this — "let me hear the raw
-program" is a reasonable request, "let me send DC to my mixer" is not.
+above ~4 Hz. The post-chain bypass -- `bb.bypass`, which the terminal
+instrument put on `B` and which no GUI control currently writes -- skips the
+*chain*, not this: "let me hear the raw program" is a reasonable request,
+"let me send DC to my mixer" is not.
 
 ---
 
@@ -375,7 +393,8 @@ lp(((k>>p0 & k>>p1) * p2 << 6) ^ (r >> p3), p4)
 ```
 
 Loop length comes from the `bpm`, `beats` and `bars` controls:
-`ll = (sr*60/bpm) * beats * bars`. `K` restarts it.
+`ll = (sr*60/bpm) * beats * bars`. `bb_engine_reset_loop()` restarts it; the
+terminal instrument put that on `K` and nothing in the GUI calls it yet.
 
 ### `r` advances on every read
 
@@ -438,7 +457,9 @@ all three identifiers and behave exactly as they did before.
 - **All arithmetic is int32, done internally in `uint32_t`.** Signed overflow
   is undefined behaviour in C, and bytebeat overflows on nearly every sample —
   that overflow *is* the instrument. Unsigned wrapping is defined, so the VM
-  computes there and reinterprets. (`-fwrapv` is belt and braces.)
+  computes there and reinterprets. (`-fwrapv` is belt and braces where it
+  exists: CMake passes it on GCC, Clang and Apple Clang only. MSVC has no
+  equivalent, which is exactly why nothing may depend on one.)
 - **Divide/modulo by zero yields 0.** A live expression *will* divide by zero
   the moment a knob crosses a value. A `SIGFPE` mid-set kills the instrument.
   `INT32_MIN / -1` also traps on x86 and is special-cased for the same reason.
@@ -574,7 +595,8 @@ push old onto retire list
 
 One atomic exchange. The audio thread never waits for anything. A failed
 compile publishes nothing at all, which is why a syntax error can't interrupt
-the sound — verified: typing ` & ((((` and hitting Esc leaves audio playing.
+the sound — verified in the terminal editor: typing ` & ((((` and leaving the
+field left the audio playing.
 
 ### Why the old program can't be freed immediately
 
@@ -615,6 +637,13 @@ leaked ~9 MB. ThreadSanitizer reported **zero** races over the same run.
 
 ### Retuning the device: the park handshake
 
+The park handshake lived in the ALSA thread and went out with it. `park_req`
+and `parked` are not in the tree any more, and the JUCE app takes the device's
+rate once at startup rather than renegotiating it live. The handshake is
+written down here because the transferable part is the argument -- what makes
+it legitimate for a real-time thread to sleep at all -- and because anything
+that ever wants a live rate change will have to make that argument again.
+
 Changing sample rate means calling `snd_pcm_hw_params` again — and ALSA's
 parameter negotiation **allocates**. We refuse to do that on the audio
 thread. But the UI thread can't touch the PCM handle while the audio thread
@@ -647,21 +676,34 @@ rate before giving up.
 **Verified:** 200 fine rate steps, 48 octave jumps, and driving to both the
 1000 Hz floor and 96000 Hz ceiling — no crash, audio still flowing, 0 xruns.
 
-### Recording and streaming use the same trick
+### Recording uses the same trick
 
 The audio thread cannot write a file or a socket. So it writes int16s into a
-preallocated ring and bumps an index; the UI thread drains it every frame.
-The ring holds ~11s at 96kHz, versus the UI's ~16ms poll — the margin is the
-point. If the UI is catastrophically late the ring laps, we drop the oldest
-samples and count them, and **the instrument never stutters**.
+preallocated ring and bumps an index; the UI thread drains it on a timer. The
+ring holds ~11s at 96kHz and ~22s at 48kHz, against a 30 Hz message-thread
+poll — the margin is the point. If the UI is catastrophically late the ring
+laps, `WavRecorder::service()` skips to the oldest still-valid sample and
+counts the lap rather than splicing garbage, and **the instrument never
+stutters**.
 
-The file and the network have **separate read cursors** into that one ring,
-so a stalled TCP client on a bad wifi connection cannot corrupt or delay the
-`.wav` you are recording.
+Every consumer of that ring keeps its **own read cursor**, privately; no read
+cursor is stored in `bb` at all. That is what stopped a stalled TCP listener
+on bad wifi from corrupting or delaying the `.wav` you were recording, and it
+is still what keeps `WavRecorder` and the master meters in `Chrome.cpp` and
+`MixerPanel.cpp` out of each other's way now that the TCP sink is gone.
 
 ---
 
 ## 7. Listening from another machine
+
+Everything in this section was `sink.c`, driven by the terminal front end's
+`-d`, `-s`, `-L` and `-O` flags. `sink.c` is deleted, so there is no listener,
+no HTTP page, no `/stream.wav` and no stdout PCM today; the JUCE app plays to a
+local audio device and writes `.wav` files. Read the instructions below as
+description rather than as something you can run. The probe design is kept
+because one port serving both browsers and `nc` -- by waiting ~300ms to see
+whether the client speaks HTTP -- is the part worth having if remote listening
+is ever built again.
 
 The instrument runs on the Linux box; the sound comes out of your laptop.
 
@@ -816,10 +858,12 @@ fixed-size stack — that's exactly what you want on an MCU. The post chain in
    or three `Program` structs, ping-ponged. `EXPR_CODE_MAX 768` at 8 bytes is
    6 KB per program — comfortable in 128 KB of SRAM, not in 20 KB.
 
-4. **The delay line is the real constraint.** `EXPR_DELAY_LEN` is 2^18 int32
-   = **1 MB**. No MCU has that in SRAM. Options: drop to 2^13 (32 KB, 0.7s at
-   44.1 kHz), store int16 instead of int32 (halves it), or put it in external
-   SDRAM/PSRAM if you have it (Daisy has 64 MB). Same for the 2 MB sink ring —
+4. **The delay line is the real constraint.** `EXPR_DELAY_LEN` is 2^17 int32
+   = **512 KB**, per layer. (The 2^18 buffer is `BB_SPACE_LEN`, the post-chain
+   SPACE line; the two are separate and are easy to confuse.) No MCU has either
+   in SRAM. Options: drop to 2^13 (32 KB, 0.19s at 44.1 kHz), store int16
+   instead of int32 (halves it), or put it in external SDRAM/PSRAM if you have
+   it (Daisy has 64 MB). Same for the 2 MB sink ring —
    on an MCU you'd stream to an SD card in small blocks instead.
 
 5. **`mlockall` and `SCHED_FIFO` disappear.** There's no virtual memory and no
@@ -846,6 +890,24 @@ than switch-dispatch.
 
 ## 8a. Making sounds without writing expressions
 
+Most of the mechanisms described here are live. The ladders, the rack, the
+generator and the sequencer are `knob.c`, `rack.c`, `gen.c` and the sequencer,
+looper and knob-role code in `engine.c`, and the JUCE panels drive every one of
+them. One is not: the per-control `axis` tagging described under *Directional
+moves* existed only in `ui.c` and went out with it, there is no axis mechanism
+anywhere in the tree today, and RACK's SCULPT is a different thing: it nudges
+the five VOICE DESIGN macros. The axis argument is kept because it is what
+SCULPT would need in order to move a hand-written expression the way the
+terminal version could.
+
+What is retired throughout is the front end. The single-key bindings named
+below -- `p`, `v`, `M`, `Z`, `[`/`]` -- were the terminal instrument's, and the
+`VOICE`/`POST`/`SHAPE` columns they refer to are the terminal panel drawn in
+§9, not anything on screen today. The layer digits under *Layers* are the
+exception: those two bindings are live in the JUCE app. Read the rest as a
+record of which gestures turned out to be worth having. The design arguments
+underneath them are why this section exists and none of those have changed.
+
 The expression language is the truth of this instrument, but it is a bad
 control surface. It offers no way to ask for "the same idea, but darker", and
 eight knobs called `p0..p7` tell you nothing about what they will do. Four
@@ -861,14 +923,17 @@ transport (bpm/beats/bars), the master gain, and the output device.
 That independence is what lets you put a dark sub drone under a bright gated
 hit under a filtered noise bed -- which is the entire architecture of the
 genre. The cost is eight copies of the expression and SPACE state, plus the
-sink and master-phrase rings: about 18MB of static memory. None is allocated
-on the audio thread. The expression VM is cheap; it was never going to be the
-bottleneck.
+sink and master-phrase rings: about 18MB of static memory. That figure covers
+the per-layer state and those two rings only -- the loop bank's five satellite
+buffers, `BB_LOOP_LEN` int16 apiece, are another 10MB of BSS beside it. None of
+it is allocated on the audio thread. The expression VM is cheap; it was never
+going to be the bottleneck.
 
 `1`-`8` focuses a layer -- panel, editor and step grid all follow it.
-`shift`+number toggles a layer on or off without moving focus, so you can
-drop the beat out while still tweaking the drone. Muting is a 45ms ramp, not
-a switch, and once a layer has faded to silence its DSP is skipped entirely.
+`shift`+number toggles a layer on or off without moving focus, so you can drop
+the beat out while still tweaking the drone. Muting is a ramp, not a switch --
+`g_lvl[]` moves 32 Q16 steps per sample, so about 46ms at 44.1kHz -- and once a
+layer has reached silence the render loop skips its DSP entirely.
 
 ### Ladders, or: why a knob used to feel like nothing was happening
 
@@ -926,7 +991,7 @@ skeletons known to work, each slot tagged with what kind of value belongs in
 it. It was only reachable by rolling dice. `rack.c` is that table made
 navigable.
 
-A voice is a **source** -- seventeen of them, named for what they sound like --
+A voice is a **source** -- twenty-two of them, named for what they sound like --
 optionally wrapped in **BODY** (a lowpass) and **SPACE** (a feedback delay).
 The slots the source exposes are named for what they do: `SWEEP`, `GRAIN`,
 `PITCH`, `WIDTH`, `RATIO`. `rack_build()` renders the lot to expression text,
@@ -939,7 +1004,12 @@ are hit-oriented: `thump`, `burst`, `metal`, `dust`, `rumble`, and `feedback`.
 Choosing one enables a sequencer and seeds a four-pulse rhythm when the layer
 was empty. They still compile to visible expressions; "triggered engine" is
 an input convention (`tr`/`age`/`vel` plus the gate envelope), not a closed
-synth hidden alongside the VM.
+synth hidden alongside the VM. Five more make the cold wing -- `cold`,
+`vapor`, `hymn`, `siren` and `glass` -- tuned sources that ride the semitone
+voice clock, so the sequencer's pitch lane plays them as melodies. `glass` is
+struck as well as tuned: it reads `age`, so it carries the triggered flag too,
+which is why the suite pins seven triggered engines rather than six.
+Twenty-two sources in all.
 
 Only the choices that change the *shape* of the expression live in the `Rack`
 struct -- four bytes: source, body, space, mode. Every continuous value stays
@@ -1008,10 +1078,10 @@ in five is worse than no button. Three things fix it:
 
 The acceptance contract is explicit: a generated voice must audition between
 6% and 85% RMS. Trigger-oriented rolls always arrive with a rhythm; some hits
-also receive ratchets and reduced probability. `make test` compiles every
-source with every BODY/SPACE combination, confirms all seventeen source
-defaults are audible, and checks deterministic generated seeds against that
-level contract.
+also receive ratchets and reduced probability. `morgue-tests` (run it through
+`ctest --preset <your-preset>`) compiles every source with every BODY/SPACE
+combination, confirms all twenty-two source defaults are audible, and checks
+deterministic generated seeds against that level contract.
 
 The audition measures **three windows**, at `t` = 0, 2^18 and 2^21, and takes
 the loudest. Measuring only from `t`=0 quietly biased the whole generator: a
@@ -1028,8 +1098,12 @@ not a sound, it is a fault. Masking both operands -- `(t*a&255)*(t*b&255)` --
 makes the level independent of how long the instrument has been running, and
 is an actual ring modulator, sum and difference tones and all.
 
-Each voice has a 32-bit seed shown on the status line, and seeds round-trip
-exactly -- write the number down and `p` can find that sound again.
+Rolls are seeded, and the seed round-trips exactly: hand `gen_roll()` the same
+32-bit number and you get the same voice back. That is a property of the engine
+that no front end currently surfaces -- the seed the roll returns is discarded
+at the call site, it is in no field of `bb` and in no session file, and the
+status line shows bar, step, CPU and clip instead. Anything that wants "find
+that sound again" has to start by keeping the number.
 
 ### The sequencer
 
@@ -1108,9 +1182,10 @@ short crossfade. Controls cover dry/loop mix, overdub feedback, half/normal/
 double speed, forward/reverse, and repeating `1/2`, `1/4`, `1/8`, or `1/16`
 slices. `Space` starts or stops, `o` toggles overdub, and `x` clears.
 
-The phrase audio is intentionally volatile: session v4 stores all looper
-controls, while the actual capture disappears when the process exits. WAV
-recording remains the durable way to keep a performance.
+The phrase audio is intentionally volatile: the session file -- version 7, the
+number `engine.c` writes today -- stores all looper controls, while the actual
+capture disappears when the process exits. WAV recording remains the durable
+way to keep a performance.
 
 ### Knob roles
 
@@ -1136,6 +1211,15 @@ Better that than a confidently wrong millisecond count.
 ---
 
 ## 9. The panel
+
+This whole section is `ui.c`, and `ui.c` is deleted. There is no terminal
+panel, no scope, no `?` pages and no keymap in the tree, and none of the keys
+below do anything today; the JUCE app in `app/` is the only front end now. It
+stays here in full because it is the only surviving statement of what the
+layout was FOR: the uniform cursor, the colour-by-meaning rule, and the bottom
+line that describes the control under the cursor. The session-file paragraph at
+the end describes version 4, which was current when it was written -- `engine.c`
+writes `version 7` now.
 
 The centre of the screen is one flat list of controls in three columns, and
 every control in it -- rack slot, post-chain knob, tempo, sample rate -- is
@@ -1281,6 +1365,12 @@ version 3 receives safe defaults for every appended v4 field.
 
 ## 10. Command line
 
+Every flag below was parsed by `main.c`, which is deleted, along with the ALSA
+and TCP code most of them configured. The JUCE app takes no arguments at all.
+One thing survived: the regression suite still accepts `-T` for muscle memory,
+but the binary is `morgue-tests` and the documented way to run it is
+`ctest --preset <preset>` after `cmake --build --preset <preset>`.
+
 ```
 -d DEV     ALSA device. "default" (via PulseAudio/PipeWire), "plughw:0,0"
            (direct, with format conversion), "hw:0,0" (raw), or "none".
@@ -1296,11 +1386,16 @@ version 3 receives safe defaults for every appended v4 field.
 -T         run the headless regression suite and exit
 ```
 
-`-E` is how you check a patch without a sound card:
+`-E` was how you checked a patch without a sound card -- compile the
+expression, evaluate it headlessly, print decimal samples:
 
 ```sh
-./bytebeat -E 't*(t>>p0&t>>p1)' -p 12,8 -n 20
+bytebeat -E 't*(t>>p0&t>>p1)' -p 12,8 -n 20
 ```
+
+Nothing replaces it. The nearest thing left is `morgue-tests`, which runs the
+whole engine with no device present, but it runs its own fixtures rather than
+an expression you hand it.
 
 ---
 
@@ -1310,13 +1405,29 @@ version 3 receives safe defaults for every appended v4 field.
 expr.c    lexer, recursive-descent parser, bytecode, VM       — read alone
 dsp.c     post chain: drive, tone, crush, space, DC blocker   — read alone
 gen.c     procedural patch generator with offline audition    — read alone
-knob.c    ladders and units: where a knob's detents are         — read alone
+knob.c    ladders and units: where a knob's detents are       — read alone
 rack.c    the source table; renders a voice to expression text
-audio.c   ALSA, real-time mixer, expressive sequencer, SPACE, phrase looper
-sink.c    .wav writing (hand-rolled 44-byte header), HTTP/TCP/stdout streaming
-ui.c      ncurses: the panel, layers, editor, step grid, scope, keymap
-main.c    startup, program reclamation, v4 sessions, headless regression suite
+ret.c     the return bus: four effects in eight slots, no atomics, no `bb`
+engine.c  the instrument: render loop, voices, sequencer, sampler, loop bank,
+          return bus, arrangement, program reclamation, session file
+bb_platform.c  the five calls engine.c is allowed to make to an OS
+bytebeat.h     every field both threads touch, and why each one is an atomic
+examples.h     the starter bank. Nothing compiles it today; it is kept
+          because it is the only place the per-example bpm/beats/bars live
+tests/engine_tests.c   the regression suite, lifted out of main.c; links the
+          engine and nothing else -- no JUCE, no ALSA, no sound card
+app/      the JUCE front end, and the only front end. AudioEngine.cpp owns the
+          device callback and the WAV recorder; the panels are in app/panels/
 ```
+
+Four files that used to be on this list are gone: `audio.c` (the ALSA
+thread), `sink.c` (WAV writing and HTTP/TCP/stdout streaming), `ui.c` (the
+ncurses panel) and `main.c` (startup, reclamation, sessions and the `-T`
+suite). Most of what they held had already moved before they were deleted:
+the mixer, sequencer, SPACE and looper went from `audio.c` into `engine.c`,
+reclamation and the session file went from `main.c` the same way, and the
+suite is now `tests/engine_tests.c`. What actually went with them is the ALSA
+plumbing, the socket plumbing, and the terminal panel itself.
 
 `expr.c` has no dependency on anything else in the project. That is
 deliberate — it should be readable on its own, and it is the file worth

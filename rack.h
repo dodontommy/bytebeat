@@ -34,7 +34,7 @@ extern "C" {
 #define RACK_SRC_SLOTS  5    /* most slots any one source exposes  */
 #define RACK_MAX_SLOTS  8    /* source slots + BODY + SPACE(2)     */
 
-/* `Rack` itself is declared in bytebeat.h -- it is session state that main.c
+/* `Rack` itself is declared in bytebeat.h -- it is session state engine.c
  * persists, and a layer carries one whether or not the rack is driving it. */
 
 /* One labelled control, as presented to the player. */

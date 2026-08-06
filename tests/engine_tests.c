@@ -1,11 +1,12 @@
 /* engine_tests.c -- the regression suite, lifted out of the terminal driver.
  *
  * This is the whole of the `-T` self-test that used to live inside main.c,
- * moved out unchanged. It had to move: main.c is the ncurses front end, it
- * needs ALSA and a terminal to link, and it is being retired -- but the suite
- * inside it is the only thing in the tree that can say whether a port changed
- * the SOUND. Losing it to a platform migration would be losing the one
- * instrument that measures the migration.
+ * moved out unchanged. It had to move: main.c was the ncurses front end, it
+ * needed ALSA and a terminal to link, and it was being retired -- but the
+ * suite inside it is the only thing in the tree that can say whether a port
+ * changed the SOUND. Losing it to a platform migration would have been losing
+ * the one instrument that measures the migration. main.c is gone now; this
+ * file is what came out of it.
  *
  * So this target links bbengine and nothing else. No ALSA, no ncurses, no
  * JUCE, no sound card, no terminal. That is not a convenience, it is the
@@ -15,11 +16,11 @@
  *
  * Three things had to change on the way across, and only three:
  *
- *   1. main.c called audio_self_test(), which lives in audio.c behind ALSA.
- *      That function is a one-line forwarder to bb_engine_self_test() (see
- *      audio.c:411-417) -- the clock and phrase-loop invariants moved into
- *      the engine some time ago precisely so the GUI test runner could reach
- *      them. We call the engine entry point directly. Nothing is lost: the
+ *   1. main.c called audio_self_test(), which lived in audio.c behind ALSA.
+ *      That function was a one-line forwarder to bb_engine_self_test() -- the
+ *      clock and phrase-loop invariants had moved into the engine some time
+ *      earlier, precisely so a test runner could reach them without a sound
+ *      card. We call the engine entry point directly. Nothing is lost: the
  *      same checks run, against the same code, with ALSA no longer dragged
  *      in to reach them.
  *
@@ -145,8 +146,8 @@ static int tmp_dir_make(char *out, size_t n, const char *tag)
 /* Remove an (empty) directory named by a UTF-8 path. Deliberately not part of
  * the bb_platform contract -- the engine never removes directories, only the
  * tests do, so the knowledge stays here. Failure is ignored for the same
- * reason main.c ignored rmdir's return: a scratch directory that will not go
- * away is not a reason to fail a test about audio. */
+ * reason the original suite ignored rmdir's return: a scratch directory that
+ * will not go away is not a reason to fail a test about audio. */
 static void tmp_dir_remove(const char *utf8_path)
 {
 #if defined(_WIN32)
@@ -433,21 +434,21 @@ static void test_session_roundtrip(void)
     atomic_store(&bb.verb_level, 99);
     atomic_store(&bb.smp_send, 31);
 
-    test_expect(bb_config_save() == 0, "version 4 session can be saved");
+    test_expect(bb_config_save() == 0, "version 7 session can be saved");
 
     FILE *f = bb_fopen(cfg_path, "r");
-    int saw_v4 = 0;
+    int saw_marker = 0;
     if (f) {
         char line[128];
         while (fgets(line, sizeof line, f))
-            if (line_is(line, "version 7")) saw_v4 = 1;
+            if (line_is(line, "version 7")) saw_marker = 1;
         fclose(f);
     }
-    test_expect(saw_v4, "saved session carries the version 7 marker");
+    test_expect(saw_marker, "saved session carries the version 7 marker");
 
     set_defaults();
     memset(bb_expr, 0, sizeof bb_expr);
-    test_expect(bb_config_load() == 1, "version 4 session can be loaded");
+    test_expect(bb_config_load() == 1, "version 7 session can be loaded");
     ly = &bb.layer[2];
     test_expect(atomic_load(&bb.req_rate) == 48000 &&
                 atomic_load(&bb.gain) == 201 && atomic_load(&bb.focus) == 2,
@@ -3787,6 +3788,142 @@ static void test_loop_bank(void)
 #endif
 }
 
+/* ======================================================================== */
+/*  the sequencer gate: why RACK has a SEQ switch                           */
+/* ======================================================================== */
+
+/* A struck source is not a sound, it is a response to a trigger, and the only
+ * thing in the engine that produces triggers is the per-layer sequencer
+ * behind `if (sn->seq_on)`. So a layer holding a struck source with seq_on
+ * clear is not "quiet" or "not playing yet" -- it renders exact digital
+ * silence and will keep doing so forever.
+ *
+ * That was invisible for as long as the only things that ever set seq_on were
+ * ROLL and the preset patches: picking THUMP from the RACK source grid gave a
+ * layer that could not make a sound and gave no reason why. RACK now carries
+ * a SEQ switch, and these checks pin the fact that makes the switch load
+ * bearing. If a later change makes a struck source audible unarmed, or makes
+ * an unarmed layer of any kind silent when it should not be, this is where it
+ * gets caught -- not in a bug report six months later. */
+static int src_index_named(const char *want)
+{
+    for (int i = 0; i < rack_nsrc(); i++)
+        if (!strcmp(rack_src_name(i), want)) return i;
+    return -1;
+}
+
+/* The RACK source grid's apply path, which deliberately does NOT touch the
+ * sequencer -- arming is the SEQ switch's job and nothing else's. Mirrors
+ * RackPanel::applyRack. */
+static void seq_apply_source(int L, int src)
+{
+    bb_rack[L].src   = (unsigned char)src;
+    bb_rack[L].body  = 0;
+    bb_rack[L].space = 0;
+    bb_rack[L].mode  = (unsigned char)rack_src_mode(src);
+    bb_custom[L]     = 0;
+
+    Layer *l = &bb.layer[L];
+    atomic_store(&l->mode, bb_rack[L].mode);
+    atomic_store(&l->on, 1);
+
+    RackBuild b;
+    rack_build(&bb_rack[L], &b);
+    int params[BB_NPARAM] = { 0 };
+    rack_seed_params(&b, params);
+    for (int p = 0; p < BB_NPARAM; p++)
+        atomic_store(&l->param[p], params[p]);
+
+    ExprError er;
+    snprintf(bb_expr[L], BB_EXPR_MAX, "%s", b.expr);
+    if (!bb_publish(L, bb_expr[L], &er))
+        bb_publish(L, "0", &er);
+}
+
+/* Peak of layer 0 alone over four seconds. Defaults come BEFORE init because
+ * bb_engine_init snaps the level ramp to whatever on/LCTL_LEVEL already say;
+ * setting them afterwards would start every scenario inside a 46 ms fade. */
+static int seq_peak(int src, int armed)
+{
+    static int16_t out[8192];
+    const int rate = 44100;
+
+    bb_engine_set_defaults();
+    for (int L = 1; L < BB_NLAYER; L++) atomic_store(&bb.layer[L].on, 0);
+    for (int L = 0; L < BB_NLAYER; L++) {
+        atomic_store(&bb.layer[L].seq_on, 0);
+        for (int i = 0; i < BB_STEPS; i++)
+            atomic_store(&bb.layer[L].seq_gate[i], 0);
+    }
+    bb_engine_init(rate);
+    bb_engine_reset_loop();
+    atomic_store(&bb.gain, 256);
+
+    seq_apply_source(0, src);
+    if (armed) {
+        int gate[BB_STEPS];
+        gen_euclid(BB_STEPS, 4, gate);
+        for (int i = 0; i < BB_STEPS; i++)
+            atomic_store(&bb.layer[0].seq_gate[i], gate[i]);
+        atomic_store(&bb.layer[0].seq_on, 1);
+    }
+
+    int peak = 0;
+    for (int block = 0; block < rate * 4 / 8192; block++) {
+        bb_engine_render(out, 8192, 1);
+        for (int i = 0; i < 8192; i++) {
+            int v = out[i] < 0 ? -out[i] : out[i];
+            if (v > peak) peak = v;
+        }
+    }
+    return peak;
+}
+
+static void test_seq_gate(void)
+{
+    /* What the SEQ switch lays down when it is thrown on an empty grid. Four
+     * hits, evenly spread: the switch has to leave something audible behind
+     * or it reads as broken in its own right. */
+    int gate[BB_STEPS];
+    gen_euclid(BB_STEPS, 4, gate);
+    int hits = 0;
+    for (int i = 0; i < BB_STEPS; i++) hits += gate[i] != 0;
+    test_expect(hits == 4, "SEQ seeds a four-hit bar, got %d", hits);
+
+    const int thump = src_index_named("thump");
+    test_expect(thump >= 0, "the struck source THUMP is still in the rack");
+    if (thump < 0) return;
+
+    test_expect(rack_src_triggered(thump), "THUMP is still flagged triggered");
+
+    /* THE CHECK THIS WHOLE GROUP EXISTS FOR. bp(tr*vel*4096,p0,p1) has the
+     * trigger as its ONLY input, so unarmed it is not merely quiet. */
+    const int unarmed = seq_peak(thump, 0);
+    test_expect(unarmed == 0,
+                "unarmed THUMP renders exact silence, got peak %d", unarmed);
+
+    const int armed = seq_peak(thump, 1);
+    test_expect(armed > 0, "armed THUMP renders audio, got peak %d", armed);
+
+    /* And the switch is not a master mute wearing a sequencer's clothes: a
+     * source that does not read the trigger sounds either way, which is why
+     * the silence above could hide for so long -- most of the rack is fine. */
+    const int ramp = src_index_named("ramp");
+    test_expect(ramp >= 0, "the free-running source RAMP is still in the rack");
+    if (ramp < 0) return;
+
+    test_expect(!rack_src_triggered(ramp), "RAMP is still flagged free-running");
+    const int ramp_off = seq_peak(ramp, 0);
+    test_expect(ramp_off > 0,
+                "an unarmed free-running source still sounds, got peak %d",
+                ramp_off);
+
+    /* leave the engine the way an empty session would */
+    bb_engine_set_defaults();
+    bb_engine_init(44100);
+    bb_engine_reclaim();
+}
+
 static int self_test_mode(void)
 {
     test_checks = test_failures = 0;
@@ -3795,12 +3932,13 @@ static int self_test_mode(void)
     test_expression_vm();
     test_rack_and_generator();
 
-    /* main.c called audio_self_test() here. That function (audio.c:414) does
-     * nothing but forward to bb_engine_self_test(): the clock and phrase-loop
-     * invariants moved into the engine so the GUI test runner could reach
-     * them without ALSA. Calling the engine entry point directly runs exactly
-     * the same checks and keeps this target free of any sound-card library,
-     * which is the whole reason it exists. */
+    /* main.c called audio_self_test() at this point in the order. That
+     * function did nothing but forward to bb_engine_self_test(): the clock
+     * and phrase-loop invariants had already moved into the engine so a test
+     * runner could reach them without ALSA. Calling the engine entry point
+     * directly runs exactly the same checks in the same place and keeps this
+     * target free of any sound-card library, which is the whole reason it
+     * exists. */
     char err[160] = "";
     test_expect(bb_engine_self_test(err, sizeof err),
                 "audio clock/phrase invariants: %s", err);
@@ -3832,15 +3970,22 @@ static int self_test_mode(void)
     int retbus = test_checks - historical - port;
     test_loop_bank();
 
+    /* Counted separately for the fourth time and the same reason: the
+     * unarmed-THUMP silence check exists to notice a change nobody meant to
+     * make, so it must never be able to hide inside a total that moved for an
+     * unrelated reason. */
+    int loopbank = test_checks - historical - port - retbus;
+    test_seq_gate();
+
     if (test_failures) {
         fprintf(stderr, "%d of %d checks failed\n", test_failures, test_checks);
         return 1;
     }
     printf("%d historical checks, %d port checks, %d return-bus checks, "
-           "%d loop-bank checks\n",
-           historical, port, retbus,
-           test_checks - historical - port - retbus);
-    printf("all %d checks passed (%d sources, session v3/v4)\n",
+           "%d loop-bank checks, %d gate checks\n",
+           historical, port, retbus, loopbank,
+           test_checks - historical - port - retbus - loopbank);
+    printf("all %d checks passed (%d sources, session v7, reads v2+)\n",
            test_checks, rack_nsrc());
     return 0;
 }

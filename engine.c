@@ -1,21 +1,23 @@
 /* engine.c -- the device-independent audio core.
  *
  * Extracted from the terminal instrument's audio thread so a GUI (or anything
- * else) can make the same sound without committing to ALSA. The single rule
- * that used to live in audio.c still lives here and is still the whole game:
+ * else) could make the same sound without committing to ALSA. That terminal
+ * instrument has since been retired and this file outlived it, which was the
+ * point of extracting it. The single rule it was extracted with is still the
+ * whole game:
  *
  *   ONLY bb_engine_render() runs on the audio thread. It must never malloc,
  *   never lock, and never block. Everything the audio thread needs is a
  *   compile-time allocation in this file, exactly as it was before.
  *
- * The audio-device of the day is whoever calls bb_engine_render():
- *   - the terminal instrument's ALSA thread (thin, see audio.c)
- *   - JUCE's device callback (see the GUI)
- *   - the regression suite (see bb_engine_self_test)
+ * The audio device of the day is whoever calls bb_engine_render():
+ *   - JUCE's device callback (see app/AudioEngine.cpp)
+ *   - the regression suite (see bb_engine_self_test), which calls it with no
+ *     sound card present at all
  *
  * The shared ownership of `bb` (bytebeat.h) is what lets the render loop and
  * the session machinery agree on everything: layers, transport, looper,
- * telemetry. main.c no longer owns them; this file does.
+ * telemetry. No front end owns them; this file does.
  */
 
 #include "bytebeat.h"
@@ -56,9 +58,9 @@ volatile sig_atomic_t bb_quit_signal;
 
 /* ---- control metadata ----------------------------------------------------
  * The ladder tables that drive every knob's range and step size. Owned here
- * so the TUI, the GUI and the session loader all agree on the same controls.
- * (These used to live in the TUI; the config loader needs them, and it is
- * not a UI concern.) */
+ * so the GUI and the session loader agree on the same controls. (These used
+ * to live in the front end; the config loader needs them, and a control's
+ * legal range is not a presentation concern.) */
 const CtlInfo bb_lctl_info[LCTL_COUNT] = {
     { "LEVEL",   0, 256, 8, 32 },
     { "DRIVE",   0, 255, 4, 32 },
@@ -652,8 +654,12 @@ static struct {
     unsigned long long ew;      /* epoch when the current state began       */
 } g_ret_req[BB_NRET];
 
-/* Semitone -> playback-rate ratio in Q32; see audio.c's comment (index
- * = semitones + 12, offset 12 is exactly 1<<32). */
+/* Semitone -> playback-rate ratio in Q32, indexed by semitones + 12 so the
+ * table covers -12..+12 and entry 12 is exactly 1<<32, meaning unity. The
+ * relationship the numbers encode: +12 semitones doubles the playback rate,
+ * so the j-th output frame reads the 2j-th sample of the source. A table
+ * rather than powf() because this is read from the audio thread, which is
+ * not allowed to call into libm and cannot afford to. */
 static const uint64_t PITCH_Q32[25] = {
     2147483648ULL, 2275179671ULL, 2410468894ULL, 2553802834ULL,
     2705659104ULL, 2866542664ULL, 3036987106ULL, 3217556019ULL,
@@ -1089,9 +1095,14 @@ static int32_t loop_process(int32_t live, uint32_t bar_pos, uint32_t bar_len,
 /* THE SATELLITE BUFFERS. 5 x 2^20 int16 = 10,485,760 B = 10.00 MiB, BSS,
  * demand-zero. Slot n uses g_sat_buf[n - 1]; slot 0 uses g_loop_buf.
  *
- * NOTHING MAY EVER memset THIS ARRAY. Not bb_engine_init() (the suite calls it
- * seven times, so a memset here walks 70 MiB per run and makes every unopened
- * looper resident), not CLEAR (which sets len = 0, exactly as loop_command()
+ * NOTHING MAY EVER memset THIS ARRAY. Not bb_engine_init() -- the suite reaches
+ * it from 25 static call sites (17 written out, plus tests/engine_tests.c's
+ * SCENARIO macro expanded 8 times), so a memset here walks a quarter of a
+ * gigabyte per run and makes every unopened looper resident. This is the one
+ * place that count is written down; the other comments arguing from it state
+ * the rule instead, because a number repeated in five files goes false in four
+ * of them. It was "seven" in all five until a recount.
+ * Nor CLEAR (which sets len = 0, exactly as loop_command()
  * already does), not the session loader. An unopened looper must cost zero
  * resident pages, which is the entire reason 10 MiB is affordable. The residue
  * is unreachable by CONSTRUCTION and not by discipline: every read is
@@ -2108,9 +2119,10 @@ void bb_engine_init(int rate)
     /* --- the return bus ---------------------------------------------------
      * ret_reset() clears only the arena the slot's CURRENT type actually
      * touches, which is why this is affordable: the regression suite calls
-     * bb_engine_init() seven times, and clearing the 9.25 MiB of pools each
-     * time would fault in every page of a session that uses one return. See
-     * ret.h's pool comment -- ret_init() deliberately clears nothing.
+     * bb_engine_init() many times per run (the count and its consequence are
+     * beside g_sat_buf), and clearing the 9.25 MiB of pools each time would
+     * fault in every page of a session that uses one return. See ret.h's pool
+     * comment -- ret_init() deliberately clears nothing.
      *
      * g_ret_fade MUST START AT 65536, not ramp up from 0. If it starts at 0
      * the first ~46 ms of every session differ from the pre-return-bus
@@ -3478,9 +3490,10 @@ int bb_config_set_root(const char *dir)
 
 /* The fallback root, used only when nobody called bb_config_set_root() first.
  * The GUI always does (app/Main.cpp, before anything reads a path), so in
- * practice this is the headless path: the regression suite, and whatever
- * replaces the TUI. It still has to be RIGHT, because the day it is wrong is
- * the day someone's session lands in a directory nobody thinks to look in. */
+ * practice this is the headless path: the regression suite, and any future
+ * tool that links the engine without a front end. It still has to be RIGHT,
+ * because the day it is wrong is the day someone's session lands in a
+ * directory nobody thinks to look in. */
 static void cfg_paths(void)
 {
 #if defined(_WIN32)

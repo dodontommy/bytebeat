@@ -212,8 +212,10 @@ static int measure_window(const Voice *v, uint32_t t0)
         if (i >= WARM) { sum += (uint64_t)((int64_t)s * s); used++; }
     }
 
-    /* Integer sqrt so the generator needs no libm -- the whole project links
-     * against nothing but asound, ncurses and pthread. */
+    /* Integer sqrt so the generator needs no libm. The engine deliberately
+     * links against nothing at all: bbengine is built and the whole suite is
+     * run with third_party/JUCE empty, which is what lets the instrument be
+     * proven on a machine that has only a C compiler. */
     uint64_t ms = used ? sum / (uint64_t)used : 0;
     uint64_t r = 0, bit = 1ULL << 40;
     while (bit > ms) bit >>= 2;

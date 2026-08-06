@@ -90,7 +90,7 @@ private:
     std::unique_ptr<ExpressionEditor> expr;
     std::unique_ptr<LockLane>      lockLane;
     std::unique_ptr<PlateButton>   stepBackBtn;
-    PlateButton bodyBtn, spaceBtn, rollBtn, mutateBtn;
+    PlateButton bodyBtn, spaceBtn, rollBtn, mutateBtn, seqBtn;
 
     int layer = 0;
     int lockView = 0;                       // viewed lock lane, 0-based

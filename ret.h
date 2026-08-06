@@ -129,7 +129,8 @@ enum {
  *
  * WHICH IS WHY ret_init() DELIBERATELY DOES NOT CLEAR THE POOLS. Clearing
  * 9.25 MiB at startup faults in every page of a session that uses one return,
- * and bb_engine_init() is called seven times by the regression suite. A slot
+ * and the regression suite calls bb_engine_init() many times per run (counted
+ * beside g_sat_buf in engine.c, which is protected by the same argument). A slot
  * is cleared only when its type changes, and only over that type's footprint.
  * A well-meaning "initialise everything" commit destroys this property. */
 #define RET_DL_BITS  19
@@ -339,7 +340,7 @@ typedef struct {
 
 /* Zeroes the per-slot scratch and NOTHING ELSE. See the pool comment above:
  * touching the arenas here would fault in 9.25 MiB on every bb_engine_init(),
- * and the suite calls that seven times. */
+ * and the suite calls that many times per run. */
 void ret_init(void);
 
 /* Zero one slot's scratch and clear the arena, over the UNION of what the

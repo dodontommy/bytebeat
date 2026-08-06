@@ -123,9 +123,10 @@ function(morgue_configure_c_target tgt)
     #    rmdir -- so without this the Linux build dies on implicit
     #    declarations, which GCC 14 and Clang 16 make hard errors.
     #
-    #    _GNU_SOURCE is exactly what the old Makefile passed (see its comment
-    #    at line 22), so this is not a new dependency, only a newly explicit
-    #    one. On Darwin the equivalent is _DARWIN_C_SOURCE; asking Apple's
+    #    _GNU_SOURCE is exactly what the retired Makefile passed, so this is
+    #    not a new dependency, only a newly explicit one -- it was needed for
+    #    clock_nanosleep and pthread scheduling long before this file existed.
+    #    On Darwin the equivalent is _DARWIN_C_SOURCE; asking Apple's
     #    headers for _POSIX_C_SOURCE instead would RESTRICT them, which is the
     #    opposite of what is wanted.
     if(APPLE)

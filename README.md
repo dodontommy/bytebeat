@@ -9,21 +9,23 @@ expression; the panel just puts hands on it.
 ![RACK — the voice station](docs/morgue_rack.png)
 
 A JUCE desktop app over **one realtime C engine**, building and running on
-**Windows, macOS and Linux**. A **3,233-check headless regression suite**
+**Windows, macOS and Linux**. A **3,241-check headless regression suite**
 exercises the whole thing — DSP, sequencer, loop bank, return bus, timeline,
 sessions — on any machine with a C compiler, no sound card and no submodule
 required, and CI runs it on four toolchains (MSVC, Apple Clang, gcc, clang).
 
-The [ncurses terminal instrument](docs/TUI.md) is retired. Its regression
-suite was the valuable part and now lives in `tests/` as its own target.
+The ncurses terminal instrument is retired: `main.c`, `ui.c`, `audio.c`, its
+raw-PCM sink and the page that documented them are all out of the tree. The
+regression suite was the valuable part and now lives in `tests/` as its own
+target, `morgue-tests`.
 
 ## The console
 
 | Workspace | What it does |
 |---|---|
-| **RACK** | The voice station. 16 curated patches, 22 expression generators, a live bytebeat editor, knobs with roles inferred from the compiled bytecode, per-voice post chain, 16-step sequencer with pitch/ratchet/probability/parameter-lock lanes. |
+| **RACK** | The voice station. 16 curated patches, 22 expression generators, a live bytebeat editor, knobs with roles inferred from the compiled bytecode, per-voice post chain, 16-step sequencer with pitch/ratchet/probability/parameter-lock lanes, armed by the SEQ switch. |
 | **ARRANGE** | The song timeline. Record any voice or the drum bus into bar-aligned clips, drag/trim/loop them across 64 bars, place WAVs from the locker, seek by clicking the ruler. Its own PLAY/STOP, and a REC source that leaves the arrangement out of the take so you can overdub against it. |
-| **GRAIN LICKS** | The drum machine: 8 sample slots × 16 steps with per-step pitch and velocity, choke groups, mute/solo. A synthetic kit is preloaded so it grooves before you touch anything. |
+| **GRAIN LICKS** | The drum machine: 8 sample slots × 16 steps with per-step pitch and velocity, choke groups, mute/solo. On first run the engine synthesizes a kick, snare and hat into the first three slots and writes a starting pattern across them, so the panel makes sound before a file is loaded. |
 | **GRAIN MASS** | Four sample wells: load anything, pitch it ±24 semitones, reverse it, loop it. PLAY ALL starts every well together on the next bar. |
 | **SURVIVOR** | The loop bank: six bar-synced loopers. Slot 0 is the master phrase looper; the other five record **LIVE** — voices, sampler and returns, but never another looper — so layers stack without recording each other. Commit any finished loop to an ARRANGE lane. |
 | **MIXER** | Faders, mutes and meters, plus the **return bus**: eight ad-hoc slots (CHAMBER, DELAY, DRIVE, CHOIR), an 11×8 send matrix, and a link grid so returns feed each other. Every link is one sample old, which is what makes any feedback patch bounded. |
@@ -32,14 +34,22 @@ suite was the valuable part and now lives in `tests/` as its own target.
 | **PLATE** | The visual wing: a watched INTAKE folder for scans and captures, and generation loss as a seeded, reproducible operator chain. |
 | **EXPORT** | Stem rendering — **planned, and the sheet says so.** The engine has no stem renderer yet. |
 
+A layer's sequencer fires no triggers at all while its **SEQ** switch is off,
+which for a struck source means no sound whatsoever: THUMP is
+`bp(tr*vel*4096,p0,p1)`, the trigger is its only input, and an unarmed THUMP
+layer renders exact silence rather than something merely quiet. SEQ sits at the
+right end of the sequencer head, and lays down E(4,16) when the grid is empty
+so that arming a layer always leaves something audible behind.
+
 Press `?` anywhere for the field manual.
 
 ![ARRANGE — the song timeline](docs/morgue_arrange.png)
 
 ## Directed sound design
 
-The instrument refuses to make you choose between writing math and pulling a
-slot-machine lever:
+Writing the maths and rolling dice are usually the only two ways to get a
+voice out of a machine like this. Four controls sit between them, so you can
+direct a sound without composing an expression and without gambling:
 
 - **PATCH MORGUE** — sixteen named, known-good voices (CONCRETE FLOOR,
   COLD ROOM, DISTRICT ALARM, GLASS AUTOPSY…). Click one; it sounds.
@@ -67,7 +77,7 @@ git clone --recursive https://github.com/dodontommy/bytebeat.git
 cd bytebeat
 cmake --preset windows-msvc-relwithdebinfo     # or linux-gcc- / linux-clang- / macos-clang-
 cmake --build --preset windows-msvc-relwithdebinfo
-ctest  --preset windows-msvc-relwithdebinfo    # 3,233 checks
+ctest  --preset windows-msvc-relwithdebinfo    # 3,241 checks
 ```
 
 Requires CMake ≥ 3.22 (JUCE 8.0.15's floor) and a C11/C++17 toolchain. JUCE is
@@ -111,8 +121,12 @@ the looper, the chamber, the timeline and the session file, with hard
 realtime rules — the audio thread never allocates, never locks, never
 blocks. Every knob is an atomic; programs, samples, clips and songs are
 published to the audio thread by single atomic pointer swaps and reclaimed
-only after two render epochs. Integer overflow is not a bug here;
-`-fwrapv` everywhere, because the overflow **is** the sound.
+only after two render epochs. Integer overflow is not a bug here -- the
+overflow **is** the sound -- so the wrap is guaranteed by the code rather
+than by a flag: `expr.c` does every arithmetic op in `uint32_t`, where
+wrapping is defined, and negative left shifts go through the matching
+unsigned type. `-fwrapv` is still passed on GCC, Clang and Apple Clang,
+but MSVC has no equivalent and nothing here depends on one.
 
 The signal path, per voice:
 
@@ -128,7 +142,6 @@ locker.
 
 ## Documents
 
-- [docs/TUI.md](docs/TUI.md) — the terminal instrument
 - [DESIGN_SPEC.md](DESIGN_SPEC.md) — product spec and the R1–R9 roadmap
 - [design_handoff_morgue_gui/](design_handoff_morgue_gui/) — the pixel spec this GUI implements
 - [HANDOFF.md](HANDOFF.md) — engineering state, for whoever builds next
