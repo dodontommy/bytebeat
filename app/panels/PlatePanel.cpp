@@ -434,6 +434,22 @@ juce::File PlatePanel::findScript()
         return {};
     };
 
+    /* The checkout this binary was built from, baked in at configure time.
+     *
+     * This is first because the walk-up below cannot reach an OUT-OF-TREE
+     * build, and out-of-tree is not an exotic case here -- it is the required
+     * layout on Windows, where JUCE's intermediate paths overflow MAX_PATH
+     * unless the build directory sits somewhere short like C:\Users\<you>\mb.
+     * Following the project's own documented build therefore produced an app
+     * that could never find its own script, and said so on every render. */
+   #ifdef MORGUE_SOURCE_DIR
+    {
+        const juce::File c = juce::File (MORGUE_SOURCE_DIR)
+                                 .getChildFile ("tools").getChildFile ("degrade.py");
+        if (c.existsAsFile()) return c;
+    }
+   #endif
+
     juce::File f = walkUp (juce::File::getSpecialLocation (
                                juce::File::currentExecutableFile).getParentDirectory());
     if (f != juce::File()) return f;

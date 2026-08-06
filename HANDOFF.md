@@ -200,6 +200,17 @@ R3 automation lanes, R9 undo/project versions. Both real, neither blocking.
   omitted `bb_platform.o` while `engine.c` called `bb_now_us()` ten times. A
   second build system that no one runs and CI does not cover rots in silence
   and then gets cited in a decision as though it worked.
+- **The documented build layout broke a feature, and only that feature.**
+  PLATE shells out to `tools/degrade.py` and found it by walking up from the
+  executable. That cannot reach a build tree OUTSIDE the checkout -- which is
+  the layout this project REQUIRES on Windows, because JUCE's intermediate
+  paths overflow `MAX_PATH` unless the build directory is short and near the
+  drive root. So following the build instructions in this file produced an app
+  whose PLATE tab reported `tools/degrade.py NOT FOUND` on every render, while
+  everything else worked perfectly. The checkout path is now baked in at
+  configure time (`MORGUE_SOURCE_DIR`, CMakeLists.txt) and tried first. If a
+  feature resolves a path by walking up from the binary, ask where the binary
+  is *supposed* to live before believing it works.
 - **A decision applied to one of the two things it applied to.** R1's notes
   put the step sampler's audio in the engine "because REC and SURVIVOR capture
   the engine's master bus; a JUCE-only mixer would sit outside the

@@ -329,6 +329,19 @@ target_sources(MORGUE PRIVATE
 target_compile_definitions(MORGUE PRIVATE
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:MORGUE,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:MORGUE,JUCE_VERSION>"
+    # WHERE THIS BINARY WAS BUILT FROM, so PLATE can find tools/degrade.py.
+    #
+    # The panel shells out to that script rather than reimplementing its ffmpeg
+    # chains, and it located it by walking up from the executable. That works
+    # for a build tree inside the checkout and CANNOT work for one outside it --
+    # which on Windows is the layout this project REQUIRES, because JUCE's
+    # intermediate paths overflow MAX_PATH unless the build directory is short
+    # and near the drive root. Following the documented Windows build produced
+    # an app whose PLATE tab reported "tools/degrade.py NOT FOUND" on every
+    # render. The walk-up stays (it is what finds the script for an in-tree
+    # build, and for a relocated checkout), this is tried first, and
+    # MORGUE_DEGRADE still overrides everything.
+    MORGUE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     # No web view anywhere in this instrument. Left at its default of 1 this
     # makes libwebkit2gtk-4.1-dev a hard build dependency on Linux, for
     # nothing, and drags in WebKit.framework on macOS and the ActiveX/WebView2
